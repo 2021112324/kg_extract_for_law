@@ -1,0 +1,947 @@
+"""
+Neo4j图数据库适配器
+"""
+import logging
+from typing import Dict, Any, Optional
+
+from neo4j import GraphDatabase, Driver
+from neo4j.exceptions import Neo4jError
+
+from .base import (
+    IGraphStorage,
+    GraphNode,
+    GraphEdge,
+    GraphStats,
+    GraphVisualizationData
+)
+
+logger = logging.getLogger(__name__)
+
+
+class Neo4jAdapter(IGraphStorage):
+    """Neo4j图数据库适配器"""
+
+    # 定义常量
+    DRIVER_NOT_INITIALIZED_ERROR = "Neo4j driver未初始化"
+
+    def __init__(
+            self,
+            uri: str = None,
+            username: str = None,
+            password: str = None,
+            database: str = "neo4j"
+    ):
+        """
+        初始化Neo4j适配器
+
+        Args:
+            uri: Neo4j数据库URI
+            username: 用户名
+            password: 密码
+            database: 数据库名称
+        """
+        self.uri = uri if uri else "bolt://60.205.171.106:7687"
+        self.username = username if username else "neo4j"
+        self.password = password if password else "hit-wE8sR9wQ3pG1"
+        self.database = database if database else "neo4j"
+        self.driver: Optional[Driver] = None
+
+    def _sanitize_property_name(self, prop_name: str) -> str:
+        """
+        对属性名进行清洗，将特殊字符替换为下划线，确保在Cypher中有效
+
+        Args:
+            prop_name: 原始属性名
+
+        Returns:
+            str: 清洗后的属性名
+        """
+        if not prop_name:
+            return prop_name
+
+        import re
+        # 更严格的清洗：只保留字母、数字、下划线和中文
+        # 替换所有非字母数字下划线和中文字符为下划线
+        sanitized = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fff]', '_', prop_name)
+
+        # 移除连续的下划线
+        sanitized = re.sub(r'_+', '_', sanitized)
+
+        # 移除开头和结尾的下划线
+        sanitized = sanitized.strip('_')
+
+        # 如果清洗后为空，使用默认名称
+        if not sanitized:
+            sanitized = 'property'
+
+        # 确保不以数字开头（Cypher要求）
+        if sanitized[0].isdigit():
+            sanitized = 'prop_' + sanitized
+
+        return sanitized
+
+    def _sanitize_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        对属性字典进行清洗，处理所有属性名中的特殊字符
+
+        Args:
+            properties: 原始属性字典
+
+        Returns:
+            Dict[str, Any]: 清洗后的属性字典
+        """
+        if not properties:
+            return properties
+
+        sanitized_properties = {}
+        for prop_key, prop_value in properties.items():
+            sanitized_key = self._sanitize_property_name(prop_key)
+            sanitized_properties[sanitized_key] = prop_value
+        return sanitized_properties
+
+    def connect(
+        self
+    ) -> bool:
+        """
+        建立与Neo4j数据库的连接
+
+        该方法使用配置的URI、用户名和密码创建数据库驱动程序连接。
+        成功建立连接后，会调用is_connected()方法验证连接是否有效。
+
+        Returns:
+            bool: 连接成功返回True，失败返回False
+
+        Raises:
+            Exception: 当连接过程中出现任何异常时记录错误日志
+        """
+        try:
+            self.driver = GraphDatabase.driver(
+                self.uri,
+                auth=(self.username, self.password)
+            )
+            return self.is_connected()
+        except Exception as e:
+            logger.error(f"Neo4j连接失败: {str(e)}")
+            return False
+
+    def disconnect(
+        self
+    ) -> None:
+        """
+        断开与Neo4j数据库的连接
+
+        该方法安全地关闭数据库驱动程序连接并清理相关资源。
+        如果当前没有活动连接（driver为None），则不执行任何操作。
+        """
+        if self.driver:
+            self.driver.close()
+            self.driver = None
+
+    def is_connected(
+            self
+    ) -> bool:
+        """
+        检查与Neo4j数据库的连接状态
+
+        通过执行简单的Cypher查询来验证数据库连接是否仍然有效。
+        如果没有初始化驱动程序或查询失败，则返回False。
+
+        Returns:
+            bool: 连接正常返回True，连接异常或未初始化返回False
+
+        Raises:
+            Exception: 当连接测试过程中出现任何异常时记录错误日志
+        """
+        if not self.driver:
+            return False
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run("RETURN 1 as test")
+                return result.single()["test"] == 1
+        except Exception as e:
+            logger.error(f"Neo4j连接测试失败: {str(e)}")
+            return False
+
+    def add_subgraph(
+            self,
+            kg_data: dict,
+            graph_tag: str,
+            graph_level: str = "DomainLevel",
+            filename: str = None,
+    ) -> bool:
+        """
+        向neo4j数据库添加子图，将知识图谱数据保存到Neo4j数据库中，使用标签进行数据隔离
+
+        Args:
+            kg_data: 知识图谱数据，包含nodes和edges
+            graph_tag: 图谱标签
+            filename: 文件名.txt，用于文档级分类
+            graph_level: 存储层级 (DocumentLevel, DomainLevel, GlobalLevel)
+        """
+        # print("1111")
+        if graph_level not in ['DocumentLevel', 'DomainLevel', 'GlobalLevel']:
+            raise ValueError("Invalid graph_level")
+        if graph_level == 'DocumentLevel' and filename is None:
+            raise ValueError("filename is required when graph_level is DocumentLevel")
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 开始事务
+                with session.begin_transaction() as tx:
+                    # 先创建所有实体节点，添加graph_tag属性和标签
+                    for node in kg_data.get('nodes', []):
+                        # 构建Cypher查询语句，使用MERGE确保相同ID的实体不会重复创建
+                        query = (
+                            f"MERGE (n:{graph_tag} {{id: $id}}) "
+                            "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag"
+                        )
+
+                        # 处理filename属性 - 以去重方式向列表增加新值
+                        if filename:
+                            query += ", n.filename = CASE " \
+                                     "WHEN n.filename IS NULL THEN [$filename] " \
+                                     "WHEN NOT $filename IN n.filename THEN n.filename + $filename " \
+                                     "ELSE n.filename END"
+
+                        # 处理graph_level属性 - 以去重方式向列表增加新值
+                        query += ", n.graph_level = CASE " \
+                                 "WHEN n.graph_level IS NULL THEN [$graph_level] " \
+                                 "WHEN NOT $graph_level IN n.graph_level THEN n.graph_level + $graph_level " \
+                                 "ELSE n.graph_level END"
+
+                        # 添加或更新其他属性 - 相同属性名取新值
+                        properties = node.properties or {}
+                        # 使用预处理函数清洗属性名
+                        sanitized_properties = self._sanitize_properties(properties)
+                        for prop_key, prop_value in sanitized_properties.items():
+                            query += f", n.`{prop_key}` = ${prop_key}"
+
+                        # 准备参数
+                        params = {
+                            'id': node.node_id,
+                            'name': node.node_name,
+                            'label': node.node_type,
+                            'graph_tag': graph_tag,
+                            'graph_level': graph_level,
+                            **sanitized_properties
+                        }
+
+                        # 添加文件名参数（如果提供）
+                        if filename:
+                            params['filename'] = filename
+
+                        tx.run(query, params)
+
+                    # 创建关系
+                    for edge in kg_data.get('edges', []):
+                        subject_id = edge.source_id
+                        predicate = edge.relation_type
+                        object_id = edge.target_id
+
+                        # 获取关系的label属性（如果存在）
+                        relation_label = edge.properties.get('label', '') if edge.properties else ''
+
+                        # 处理关系名，确保符合Cypher命名规范
+                        safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)
+
+                        # 使用MERGE确保相同节点间的关系不会重复创建
+                        query = (
+                            f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
+                            f"MERGE (a)-[r:{safe_predicate}]->(b) "
+                        )
+
+                        # 添加属性设置
+                        query += "SET r.graph_tag = $graph_tag, r.label = $relation_label"
+
+                        # 处理graph_level属性
+                        query += ", r.graph_level = CASE " \
+                                 "WHEN r.graph_level IS NULL THEN [$graph_level] " \
+                                 "WHEN NOT $graph_level IN r.graph_level THEN r.graph_level + $graph_level " \
+                                 "ELSE r.graph_level END"
+
+                        # 处理filename属性
+                        if filename:
+                            query += ", r.filename = CASE " \
+                                     "WHEN r.filename IS NULL THEN [$filename] " \
+                                     "WHEN NOT $filename IN r.filename THEN r.filename + $filename " \
+                                     "ELSE r.filename END"
+
+                        query += " RETURN r"
+
+                        params = {
+                            'subject_id': subject_id,
+                            'object_id': object_id,
+                            'graph_tag': graph_tag,
+                            'relation_label': relation_label,
+                            'graph_level': graph_level
+                        }
+
+                        # 添加文件名参数（如果提供）
+                        if filename:
+                            params['filename'] = filename
+
+                        tx.run(query, **params)
+
+                    # 提交事务
+                    tx.commit()
+
+                print(f"知识图谱数据已成功保存到数据库 {self.database}，使用标签 {graph_tag}")
+                return True
+        except Exception as e:
+            logger.error(f"保存知识图谱数据到数据库失败: {str(e)}")
+            return False
+
+    def add_subgraph_with_merge(
+            self,
+            kg_data: dict,
+            graph_tag: str,
+            graph_level: str = "DomainLevel",
+            filename: str = None,
+            merge_strategy: int = 1
+    ) -> bool:
+        """
+        # TODO：待测试
+        向neo4j数据库添加子图，使用合并策略
+        """
+
+        if graph_level not in ['DocumentLevel', 'DomainLevel', 'GlobalLevel']:
+            raise ValueError("Invalid graph_level")
+        if graph_level == 'DocumentLevel' and filename is None:
+            raise ValueError("filename is required when graph_level is DocumentLevel")
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                with session.begin_transaction() as tx:
+                    # 处理节点
+                    for node in kg_data.get('nodes', []):
+                        if merge_strategy == 1:
+                            # 修复CASE表达式语法
+                            query = (
+                                f"MERGE (n:{graph_tag} {{id: $id}}) "
+                                "ON CREATE SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag, "
+                                "n.graph_level = $graph_level "
+                            )
+                            # 应该分别处理不同的filename来源
+                            node_filename = node.get('filename')
+                            if node_filename:
+                                # 处理节点中的filename（假定是字符串）
+                                query += (
+                                    ", n.filename = CASE "
+                                    "WHEN n.filename IS NULL THEN [$node_filename] "
+                                    "WHEN NOT $node_filename IN n.filename THEN n.filename + [$node_filename] "
+                                    "ELSE n.filename END "
+                                )
+                                params['node_filename'] = node_filename
+                            elif filename:
+                                # 处理函数参数中的filename（假定是字符串）
+                                query += (
+                                    ", n.filename = CASE "
+                                    "WHEN n.filename IS NULL THEN [$param_filename] "
+                                    "WHEN NOT $param_filename IN n.filename THEN n.filename + [$param_filename] "
+                                    "ELSE n.filename END "
+                                )
+                                params['param_filename'] = filename
+
+
+                            # 处理其他属性 - 简化策略，直接设置
+                            properties = node.get('properties', {}) or {}
+                            sanitized_properties = self._sanitize_properties(properties)
+                            for prop_key, prop_value in sanitized_properties.items():
+                                query += f", n.`{prop_key}` = ${prop_key} "
+
+                        else:
+                            # 默认处理方式
+                            query = (
+                                f"MERGE (n:{graph_tag} {{id: $id}}) "
+                                "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag, "
+                                "n.graph_level = $graph_level "
+                            )
+
+                            if filename:
+                                query += (
+                                    ", n.filename = CASE "
+                                    "WHEN n.filename IS NULL THEN [$filename] "
+                                    "WHEN NOT $filename IN n.filename THEN n.filename + [$filename] "
+                                    "ELSE n.filename END "
+                                )
+
+                            properties = node.get('properties', {}) or {}
+                            sanitized_properties = self._sanitize_properties(properties)
+                            for prop_key, prop_value in sanitized_properties.items():
+                                query += f", n.`{prop_key}` = ${prop_key} "
+
+                        # 准备参数
+                        params = {
+                            'id': node.get('node_id'),
+                            'name': node.get('node_name'),
+                            'label': node.get('node_type'),
+                            'graph_tag': graph_tag,
+                            'graph_level': graph_level,
+                            **sanitized_properties
+                        }
+
+                        if filename:
+                            params['filename'] = filename
+
+                        tx.run(query, params)
+
+                    # 处理边
+                    for edge in kg_data.get('edges', []):
+                        subject_id = edge.get('source_id')
+                        predicate = edge.get('relation_type')
+                        object_id = edge.get('target_id')
+
+                        relation_label = edge.get('properties', {}).get('label', '') if edge.get('properties') else ''
+
+                        # 处理关系名
+                        safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)
+
+                        if merge_strategy == 1:
+                            query = (
+                                f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
+                                f"MERGE (a)-[r:{safe_predicate}]->(b) "
+                                "ON CREATE SET r.graph_tag = $graph_tag, r.label = $relation_label, "
+                                "r.graph_level = $graph_level "
+                            )
+
+                            if filename:
+                                query += (
+                                    ", r.filename = CASE "
+                                    "WHEN r.filename IS NULL THEN [$filename] "
+                                    "WHEN NOT $filename IN r.filename THEN r.filename + [$filename] "
+                                    "ELSE r.filename END "
+                                )
+
+                        else:
+                            query = (
+                                f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
+                                f"MERGE (a)-[r:{safe_predicate}]->(b) "
+                                "SET r.graph_tag = $graph_tag, r.label = $relation_label, "
+                                "r.graph_level = $graph_level "
+                            )
+
+                            if filename:
+                                query += (
+                                    ", r.filename = CASE "
+                                    "WHEN r.filename IS NULL THEN [$filename] "
+                                    "WHEN NOT $filename IN r.filename THEN r.filename + [$filename] "
+                                    "ELSE r.filename END "
+                                )
+
+                        query += " RETURN r"
+
+                        params = {
+                            'subject_id': subject_id,
+                            'object_id': object_id,
+                            'graph_tag': graph_tag,
+                            'relation_label': relation_label,
+                            'graph_level': graph_level
+                        }
+
+                        if filename:
+                            params['filename'] = filename
+
+                        tx.run(query, **params)
+
+                    tx.commit()
+                    print(f"知识图谱数据已成功保存到数据库 {self.database}，使用标签 {graph_tag}")
+                    return True
+
+        except Exception as e:
+            logger.error(f"保存知识图谱数据到数据库失败: {str(e)}")
+            return False
+
+    def delete_subgraph(
+            self,
+            graph_tag: str
+    ) -> bool:
+        """
+        删除指定标签的子图数据
+
+        该方法通过graph_tag参数匹配并删除Neo4j数据库中对应标签下的所有节点和关系。
+        使用DETACH DELETE确保删除节点时同时删除与其关联的所有关系，避免约束冲突。
+
+        Args:
+            graph_tag (str): 图谱标签，用于标识需要删除的子图数据。
+                           该标签在创建子图时被用作节点标签，用于隔离不同来源或类型的数据。
+
+        Returns:
+            bool: 删除操作结果
+                - True: 成功删除指定标签下的所有数据
+                - False: 删除失败，可能原因包括：
+                    1. 数据库驱动未初始化
+                    2. 数据库连接异常
+                    3. Cypher查询执行错误
+
+        Example:
+            >>> adapter = Neo4jAdapter()
+            >>> adapter.connect()
+            True
+            >>> adapter.delete_subgraph("project_A")
+            True
+
+        Note:
+            - 该操作不可逆，删除的数据无法恢复
+            - 仅删除指定标签下的数据，不影响其他标签的数据
+            - 使用DETACH DELETE确保节点和关系都被删除
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return False
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 删除当前标签下的所有数据
+                session.run(f"MATCH (n:{graph_tag}) "
+                            f"DETACH DELETE n")
+                print(f"标签 {graph_tag} 下的所有数据已删除")
+                return True
+
+        except Exception as e:
+            print(f"删除数据时出错: {e}")
+            return False
+
+    def get_visualization_data(self, graph_tag: str, limit: Optional[int] = None) -> GraphVisualizationData:
+        """
+        获取可视化数据
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return GraphVisualizationData(
+                nodes=[],
+                relationships=[],
+                error=self.DRIVER_NOT_INITIALIZED_ERROR
+            )
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 根据limit参数构建Cypher查询语句
+                if limit is not None and limit > 0:
+                    cypher = """
+                    MATCH (n)-[r]->(m)
+                    WHERE $graph_tag IN labels(n) AND $graph_tag IN labels(m)
+                    WITH n, r, m LIMIT $limit
+                    RETURN 
+                        collect(DISTINCT n) + collect(DISTINCT m) as allNodes,
+                        collect(r) as allRels
+                    """
+                    result = session.run(cypher, graph_tag=graph_tag, limit=limit)
+                else:
+                    cypher = """
+                   MATCH (n)-[r]->(m)
+                    WHERE $graph_tag IN labels(n) AND $graph_tag IN labels(m)
+                    RETURN 
+                        collect(DISTINCT n) + collect(DISTINCT m) as allNodes,
+                        collect(r) as allRels
+                    """
+                    result = session.run(cypher, graph_tag=graph_tag)
+
+                record = result.single()
+
+                if not record:
+                    return GraphVisualizationData(
+                        nodes=[],
+                        relationships=[]
+                    )
+
+                # 使用集合去除重复节点
+                nodes_data = []
+                seen_node_ids = set()
+                for node in record["allNodes"]:
+                    if node.get('id') not in seen_node_ids:
+                        nodes_data.append(node)
+                        seen_node_ids.add(node.get('id'))
+
+                relationships_data = record["allRels"]
+
+                # nodes_data = record["allNodes"]
+                # relationships_data = record["allRels"]
+
+                # 转换节点数据
+                nodes = []
+                for node in nodes_data:
+                    # 获取除graph_tag外的第一个标签作为label
+                    labels = [label for label in node.labels if label != graph_tag]
+                    label = labels[0] if labels else ""
+
+                    # 获取节点属性并移除内部使用的字段
+                    properties = dict(node)
+                    properties.pop('id', None)
+                    properties.pop('name', None)
+                    properties.pop('graph_tag', None)
+
+                    nodes.append(GraphNode(
+                        id=node.get('id', ''),
+                        name=node.get('name', ''),
+                        label=label,
+                        properties=properties
+                    ))
+
+                # 转换关系数据
+                relationships = []
+                for rel in relationships_data:
+                    # 获取关系属性并移除内部使用的字段
+                    properties = dict(rel)
+                    properties.pop('graph_tag', None)
+
+                    relationships.append(GraphEdge(
+                        id=str(rel.id),
+                        source_id=rel.start_node.get('id', ''),
+                        target_id=rel.end_node.get('id', ''),
+                        type=rel.type,
+                        properties=properties
+                    ))
+
+                # 防止出现无节点但有关系的情况
+                if len(nodes) == 0:
+                    relationships = []
+
+                return GraphVisualizationData(
+                    nodes=nodes,
+                    relationships=relationships
+                )
+
+        except Neo4jError as e:
+            logger.error(f"获取图谱可视化数据失败: {str(e)}")
+            return GraphVisualizationData(
+                nodes=[],
+                relationships=[],
+                error=str(e)
+            )
+
+    def get_subgraph_stats(self, graph_tag: str) -> GraphStats:
+        """获取子图统计信息"""
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=self.DRIVER_NOT_INITIALIZED_ERROR
+            )
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 获取节点数量
+                result = session.run("""
+                    MATCH (n)
+                    WHERE $graph_tag IN labels(n)
+                    RETURN count(n) as nodeCount
+                """, graph_tag=graph_tag)
+                node_count = result.single()["nodeCount"]
+
+                # 获取关系数量
+                result = session.run("""
+                    MATCH (n)-[r]->(m)
+                    WHERE $graph_tag IN labels(n) AND $graph_tag IN labels(m)
+                    RETURN count(r) as edgeCount
+                """, graph_tag=graph_tag)
+                edge_count = result.single()["edgeCount"]
+
+                return GraphStats(
+                    node_count=node_count,
+                    edge_count=edge_count
+                )
+        except Neo4jError as e:
+            logger.error(f"获取Neo4j子图统计信息失败: {str(e)}")
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=str(e)
+            )
+
+    def create_vector_index(self, name: str, dimension: int = 1536) -> bool:
+        pass
+        # """创建向量索引"""
+        # if not self.driver:
+        #     logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+        #     return False
+        #
+        # try:
+        #     with self.driver.session(database=self.database) as session:
+        #         session.run("""
+        #         CREATE VECTOR INDEX IF NOT EXISTS
+        #         FOR (n:Document) ON (n.embedding)
+        #         OPTIONS {indexConfig: {
+        #           `vector.dimensions`: $dimension,
+        #           `vector.similarity_function`: 'cosine'
+        #         }}
+        #         """, dimension=dimension)
+        #         return True
+        # except Neo4jError as e:
+        #     logger.error(f"创建Neo4j向量索引失败: {str(e)}")
+        #     return False
+
+    def merge_graphs(self, source_graph_tag: str, target_graph_tag: str):
+        """
+        将source_graph_tag图谱合并到target_graph_tag图谱中
+
+        Args:
+            source_graph_tag (str): 源图谱标识符(A)
+            target_graph_tag (str): 目标图谱标识符(B)
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=self.DRIVER_NOT_INITIALIZED_ERROR
+            )
+
+        try:
+            # 获取源图谱数据
+            source_data = self.get_visualization_data(source_graph_tag)
+
+            with self.driver.session(database=self.database) as session:
+                with session.begin_transaction() as tx:
+                    # 合并节点
+                    for node in source_data.nodes:
+                        # 使用MERGE确保不会重复创建相同ID的节点
+                        query = (
+                            f"MERGE (n:{target_graph_tag} {{id: $id}}) "
+                            "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag"
+                        )
+
+                        # 处理其他属性
+                        properties = node.properties or {}
+                        sanitized_properties = self._sanitize_properties(properties)
+                        for prop_key, prop_value in sanitized_properties.items():
+                            query += f", n.`{prop_key}` = ${prop_key}"
+
+                        # 准备参数
+                        params = {
+                            'id': node.id,
+                            'name': node.name,
+                            'label': node.label,
+                            'graph_tag': target_graph_tag,
+                            **sanitized_properties
+                        }
+
+                        tx.run(query, params)
+
+                    # 合并边
+                    for edge in source_data.relationships:
+                        # 获取关系的label属性（如果存在）
+                        relation_label = edge.properties.get('label', '') if edge.properties else ''
+
+                        # 处理关系名，确保符合Cypher命名规范
+                        safe_predicate = ''.join(c if c.isalnum() else '_' for c in edge.type)
+
+                        # 使用MERGE确保相同节点间的关系不会重复创建
+                        # 采用分步MATCH方式避免笛卡尔积警告
+                        query = (
+                            f"MATCH (a:{target_graph_tag} {{id: $subject_id}}) "
+                            f"MATCH (b:{target_graph_tag} {{id: $object_id}}) "
+                            f"MERGE (a)-[r:{safe_predicate}]->(b) "
+                        )
+
+                        # 添加属性设置
+                        query += "SET r.graph_tag = $graph_tag, r.label = $relation_label"
+
+                        params = {
+                            'subject_id': edge.source_id,
+                            'object_id': edge.target_id,
+                            'graph_tag': target_graph_tag,
+                            'relation_label': relation_label
+                        }
+
+                        tx.run(query, **params)
+
+                    tx.commit()
+
+            return self.get_subgraph_stats(target_graph_tag)
+        except Neo4jError as e:
+            logger.error(e)
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=str(e)
+            )
+
+
+    # def build_knowledge_graph(
+    #         self,
+    #         graph_id: str,
+    #         file_text: str,
+    #         potential_schema: Optional[Dict[str, Any]] = None
+    # ) -> Dict[str, Any]:
+    #     """构建知识图谱"""
+    #     if not self.driver:
+    #         logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+    #         return {"success": False, "error": self.DRIVER_NOT_INITIALIZED_ERROR}
+    #
+    #     subgraph_name = self._normalize_name(graph_id)
+    #
+    #     try:
+    #         entities = []
+    #         relations = []
+    #         schema_triplets = []
+    #
+    #         if potential_schema:
+    #             entities = potential_schema.get("entityTypes", [])
+    #             relations = potential_schema.get("relationTypes", [])
+    #
+    #             # 构建schema_triplets
+    #             for relation in relations:
+    #                 if (isinstance(relation, dict) and
+    #                         "sourceType" in relation and "targetType" in relation):
+    #
+    #                     source_entity = next(
+    #                         (e for e in entities
+    #                          if str(e.get("id")) == str(relation["sourceType"])),
+    #                         None
+    #                     )
+    #                     target_entity = next(
+    #                         (e for e in entities
+    #                          if str(e.get("id")) == str(relation["targetType"])),
+    #                         None
+    #                     )
+    #
+    #                     if source_entity and target_entity:
+    #                         schema_triplets.append((
+    #                             source_entity.get("name"),
+    #                             relation.get("name"),
+    #                             target_entity.get("name")
+    #                         ))
+    #
+    #         with self.driver.session(database=self.database) as session:
+    #             # 创建Document节点
+    #             session.run("""
+    #             CREATE (d:Document {
+    #                 id: randomUUID(),
+    #                 graph_id: $graph_id,
+    #                 content: $content,
+    #                 created_at: datetime()
+    #             })
+    #             """, graph_id=subgraph_name, content=file_text[:10000])
+    #
+    #             # 创建示例实体
+    #             if entities:
+    #                 self._create_sample_entities(session, subgraph_name, entities)
+    #
+    #             # 创建示例关系
+    #             if relations and len(entities) >= 2:
+    #                 self._create_sample_relationships(
+    #                     session, subgraph_name, relations, entities
+    #                 )
+    #
+    #             return {
+    #                 "success": True,
+    #                 "message": "知识图谱构建完成",
+    #                 "schema": {
+    #                     "entities": entities,
+    #                     "relations": relations,
+    #                     "schema_triplets": schema_triplets
+    #                 }
+    #             }
+    #
+    #     except Neo4jError as e:
+    #         logger.error(f"构建知识图谱失败: {str(e)}")
+    #         return {"success": False, "error": str(e)}
+
+
+
+    # def _normalize_name(self, name: str) -> str:
+    #     """标准化名称"""
+    #     return name.lower().replace(" ", "_").replace("-", "_")
+    #
+    # def _create_sample_entities(self, session, subgraph_name: str, entities: list):
+    #     """创建示例实体"""
+    #     for entity in entities[:5]:  # 最多创建5种实体类型
+    #         if entity and "name" in entity:
+    #             entity_name = entity["name"]
+    #             for i in range(3):  # 每种类型创建3个示例
+    #                 session.run(f"""
+    #                     CREATE (e:{entity_name} {{
+    #                         id: randomUUID(),
+    #                         graph_id: $graph_id,
+    #                         name: $name,
+    #                         description: '自动创建的示例节点',
+    #                         created_at: datetime()
+    #                     }})
+    #                 """, graph_id=subgraph_name, name=f"示例{entity_name}{i + 1}")
+    #
+    # def _create_sample_relationships(self, session, subgraph_name: str, relations: list, entities: list):
+    #     """创建示例关系"""
+    #     for relation in relations[:3]:  # 最多创建3种关系
+    #         if (relation and "name" in relation and
+    #                 "sourceType" in relation and "targetType" in relation):
+    #
+    #             source_entity = next(
+    #                 (e for e in entities
+    #                  if str(e.get("id")) == str(relation["sourceType"])),
+    #                 None
+    #             )
+    #             target_entity = next(
+    #                 (e for e in entities
+    #                  if str(e.get("id")) == str(relation["targetType"])),
+    #                 None
+    #             )
+    #
+    #             if (source_entity and target_entity and
+    #                     "name" in source_entity and "name" in target_entity):
+    #                 relation_name = relation["name"]
+    #                 session.run(f"""
+    #                     MATCH (a:{source_entity["name"]} {{graph_id: $graph_id}}),
+    #                           (b:{target_entity["name"]} {{graph_id: $graph_id}})
+    #                     WITH a, b LIMIT 1
+    #                     CREATE (a)-[r:{relation_name} {{
+    #                         graph_id: $graph_id,
+    #                         description: '自动创建的示例关系',
+    #                         created_at: datetime()
+    #                     }}]->(b)
+    #                 """, graph_id=subgraph_name)
+    #
+    # def _process_nodes(self, raw_nodes: list) -> list:
+    #     """处理节点数据"""
+    #     nodes = []
+    #     for node in raw_nodes:
+    #         if (node and "properties" in node and
+    #                 node["properties"] is not None):
+    #
+    #             labels = node["labels"]
+    #             # 跳过GraphMetadata节点
+    #             if "GraphMetadata" in labels:
+    #                 continue
+    #
+    #             label = labels[0] if labels else "Unknown"
+    #             name = node["properties"].get("name", f"{label}_{node['id']}")
+    #
+    #             # 过滤属性
+    #             filtered_props = {
+    #                 k: v for k, v in node["properties"].items()
+    #                 if k not in ["graph_id"] and not k.startswith("_")
+    #             }
+    #
+    #             nodes.append(GraphNode(
+    #                 id=str(node["id"]),
+    #                 label=label,
+    #                 properties={
+    #                     "name": name,
+    #                     **filtered_props
+    #                 }
+    #             ))
+    #     return nodes
+    #
+    # def _process_relationships(self, raw_relationships: list) -> list:
+    #     """处理关系数据"""
+    #     relationships = []
+    #     for rel in raw_relationships:
+    #         if (rel and "source" in rel and "target" in rel and
+    #                 rel["id"] is not None and rel["source"] is not None and
+    #                 rel["target"] is not None and rel["type"] is not None):
+    #
+    #             # 过滤属性
+    #             filtered_props = {}
+    #             if rel.get("properties") is not None:
+    #                 filtered_props = {
+    #                     k: v for k, v in rel["properties"].items()
+    #                     if k not in ["graph_id"] and not k.startswith("_")
+    #                 }
+    #
+    #             relationships.append(GraphRelationship(
+    #                 id=str(rel["id"]),
+    #                 source=str(rel["source"]),
+    #                 target=str(rel["target"]),
+    #                 type=rel["type"],
+    #                 properties=filtered_props
+    #             ))
+    #     return relationships
