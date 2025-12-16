@@ -147,4 +147,22 @@ class IGraphStorage(ABC):
         """合并图"""
         pass
 
+    @abstractmethod
+    def merge_graphs_with_match_node(
+            self,
+            source_graph_tag: str,
+            target_graph_tag: str,
+            matched_node_id: str,
+    ):
+        """合并图并匹配节点"""
+        pass
+
+    @abstractmethod
+    def get_nodes_by_type(
+            self,
+            graph_tag: str,
+            node_type: str,
+    ):
+        pass
+
 

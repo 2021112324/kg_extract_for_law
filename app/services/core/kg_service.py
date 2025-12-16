@@ -1,4 +1,7 @@
 import os
+import re
+from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -10,7 +13,7 @@ from app.infrastructure.graph_storage.factory import GraphStorageFactory
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.models.kg import KG as KGModel, KGExtractionTask, KGFile
-from app.schemas.kg import KGCreate, KGTaskCreate
+from app.schemas.kg import KGCreate, KGTaskCreate, KGTaskCreateByFile
 from app.services.ai.kg_extract_service import kg_extract_service
 from app.utils.snowflake_id import generate_snowflake_string_id
 
@@ -62,7 +65,7 @@ class KGService:
             db: Session,
             page: int = 1,
             limit: int = 10,
-            name: Optional[str] =  None,
+            name: Optional[str] = None,
     ):
         try:
             # 查询数据库中的知识图谱
@@ -446,6 +449,63 @@ class KGService:
             db.rollback()
             raise e
 
+    async def create_kg_task_by_file(
+            self,
+            kg_id,
+            task_data: KGTaskCreateByFile,
+            file_contents: List[dict],
+            db: Session,
+    ):
+        """
+        创建知识图谱任务
+        """
+        kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+        if not kg:
+            return not_found_response(
+                entity="知识图谱"
+            )
+        error_file_list = []
+        for file_content in file_contents:
+            try:
+                file_name = file_content['filename']
+                task_name = file_name
+                task_description = f"{task_data.dir}-{task_name}"
+                existed_task = db.query(KGExtractionTask).filter(
+                    KGExtractionTask.name == task_name,
+                    KGExtractionTask.kg_id == kg_id,
+                    KGExtractionTask.del_flag == 0
+                ).first()
+                if existed_task:
+                    continue
+                one_task_data = KGTaskCreate(
+                    name=task_name,
+                    description=task_description,
+                    prompt=task_data.prompt,
+                    schema=task_data.schema,
+                    examples=task_data.examples
+                )
+                result = await self.create_kg_task(kg_id, one_task_data, [file_content], db)
+                if result.get("code") != 200:
+                    raise Exception(f"{file_name}对应的任务抽取时出错: {str(e)}")
+            except Exception as e:
+                db.rollback()
+                error_file_list.append(file_name)
+                print(f"Error: {file_name}文件处理出现问题，请检查！" + str(e))
+                continue
+
+        # 使用项目根目录的相对路径
+        error_file_path = project_root + "/tests/error_file_list.txt"
+
+        try:
+            with open(error_file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(error_file_list))
+                print(f"已输出错误文件列表到 {error_file_path}")
+        except IOError as e:
+            print(f"写入错误文件列表失败: {e}")
+        return success_response(
+            data=None,
+            msg="任务执行完毕"
+        )
 
     async def rerun_kg_task(
             self,
@@ -794,6 +854,202 @@ class KGService:
         except Exception as e:
             raise e
 
+    async def match_node_with_type(
+            self,
+            kg_id,
+            task_id,
+            node_type: str,
+            db: Session,
+    ):
+        """
+        合并知识图谱任务
+        """
+        try:
+            kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+            if not kg:
+                return not_found_response(
+                    entity="知识图谱"
+                )
+            task = db.query(KGExtractionTask).filter(
+                KGExtractionTask.kg_id == kg_id,
+                KGExtractionTask.id == task_id,
+                KGExtractionTask.del_flag == 0
+            ).first()
+            if not task:
+                return not_found_response(
+                    entity="任务"
+                )
+            if task.status != 2:        # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                return error_response(
+                    code=400,
+                    msg="任务未完成，请等待任务完成"
+                )
+            if not task.graph_name:
+                return not_found_response(
+                    entity="任务图谱"
+                )
+            if not kg.graph_name:
+                return not_found_response(
+                    entity="总图谱"
+                )
+            self.graph_storage.connect()
+            result = self.graph_storage.get_nodes_by_type(
+                kg.graph_name,
+                node_type
+            )
+            self.graph_storage.disconnect()
+            node_list = [node.name for node in result]
+            # 获取task.name中第一个"."前的内容，如果没有"."，则获取全部内容
+            source_name = task.name.split('.')[0] if '.' in task.name else task.name
+            matched_node = self.find_best_match(self.sanitize_neo4j_property_name(source_name), node_list)
+            if matched_node:
+                matched_node_id = None
+                for node in result:
+                    if node.name == matched_node:
+                        matched_node_id = node.id
+                        break
+                if matched_node_id:
+                    return success_response(
+                        data={
+                            "matched_node": matched_node,
+                            "matched_node_id": matched_node_id
+                        },
+                        msg="匹配成功"
+                    )
+            return error_response(
+                code=404,
+                msg="未找到匹配的节点"
+            )
+        except Exception as e:
+            raise e
+
+    async def merge_graph_with_match(
+            self,
+            kg_id,
+            task_id,
+            db: Session,
+    ):
+        """
+        将单个子图合并到总图谱
+
+        :param kg_id:
+        :param task_id:
+        :param db:
+        :return:
+        """
+        try:
+            kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+            if not kg:
+                return not_found_response(
+                    entity="知识图谱"
+                )
+            task = db.query(KGExtractionTask).filter(
+                KGExtractionTask.kg_id == kg_id,
+                KGExtractionTask.id == task_id,
+                KGExtractionTask.del_flag == 0
+            ).first()
+            if not task:
+                return not_found_response(
+                    entity="任务"
+                )
+            matched_node_result = await self.match_node_with_type(
+                kg_id,
+                task_id,
+                "规章文件",
+                db
+            )
+            matched_node_id = matched_node_result.get("data").get("matched_node_id")
+            if not matched_node_id:
+                return error_response(
+                    code=400,
+                    msg="未找到匹配的节点"
+                )
+            self.graph_storage.connect()
+            result = self.graph_storage.merge_graphs_with_match_node(
+                task.graph_name,
+                kg.graph_name,
+                matched_node_id
+            )
+            self.graph_storage.disconnect()
+            if not result:
+                return error_response(
+                    code=400,
+                    msg="合并图谱失败"
+                )
+            return success_response(
+                data=result.model_dump(),
+                msg="合并图谱成功"
+            )
+        except Exception as e:
+            raise e
+
+    async def merge_all_graph_with_match(
+            self,
+            kg_id,
+            db: Session,
+    ):
+        """
+        将所有子图合并到总图谱
+
+        :param kg_id:
+        :param db:
+        :return:
+        """
+        try:
+            kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+            if not kg:
+                return not_found_response(
+                    entity="知识图谱"
+                )
+            task_list = db.query(KGExtractionTask).filter(
+                KGExtractionTask.kg_id == kg_id,
+                KGExtractionTask.del_flag == 0
+            ).all()
+            error_list = []
+            for task in task_list:
+                matched_node_result = await self.match_node_with_type(
+                    kg_id,
+                    task.id,
+                    "规章文件",
+                    db
+                )
+                matched_node_id = matched_node_result.get("data").get("matched_node_id")
+                if not matched_node_id:
+                    return error_response(
+                        code=400,
+                        msg="未找到匹配的节点"
+                    )
+                self.graph_storage.connect()
+                result = self.graph_storage.merge_graphs_with_match_node(
+                    task.graph_name,
+                    kg.graph_name,
+                    matched_node_id
+                )
+                self.graph_storage.disconnect()
+                if result.error:
+                    error_list.append(task.id)
+                    continue
+            # 使用项目根目录的相对路径
+            error_file_path = project_root + "/tests/error_task_list.txt"
+
+            try:
+                with open(error_file_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(error_list))
+                    print(f"已输出错误文件列表到 {error_file_path}")
+            except IOError as e:
+                print(f"写入错误文件列表失败: {e}")
+            self.graph_storage.connect()
+            graph_status = self.graph_storage.get_subgraph_stats(kg.graph_name)
+            return success_response(
+                data={
+                    "graph_status": graph_status,
+                    "error_list": error_list
+                },
+                msg="合并图谱成功"
+            )
+        except Exception as e:
+            raise e
+
     async def _is_md_exist_in_minio(
             self,
             md_path: str,
@@ -815,6 +1071,75 @@ class KGService:
             print(f"检查文件是否存在时出错: {str(e)}")
             return False
 
+    @staticmethod
+    def sanitize_neo4j_property_name(name: str) -> str:
+        """
+        将字符串中不能作为Neo4j属性名的符号替换为单个下划线，但保留中文符号
+
+        Args:
+            name (str): 原始字符串
+
+        Returns:
+            str: 处理后的符合Neo4j属性名规范的字符串
+        """
+        if not name:
+            return name
+
+        # 保留字母、数字、下划线、中文字符以及常见的中文符号
+        # 包括中文括号（）、书名号《》、引号""、顿号、问号、感叹号、冒号、分号等
+        pattern = r'[^a-zA-Z0-9_\u4e00-\u9fff\uFF08\uFF09\u300A\u300B\u201C\u201D\u3001\uFF1F\uFF01\uFF1A\uFF1B\u3002\uFF0C]'
+        sanitized = re.sub(pattern, '_', name)
+
+        # 将连续的下划线替换为单个下划线
+        sanitized = re.sub(r'_+', '_', sanitized)
+
+        # 移除开头和结尾的下划线
+        sanitized = sanitized.strip('_')
+
+        # 如果结果为空，返回默认名称
+        if not sanitized:
+            return ""
+
+        # 确保不以数字开头（Cypher要求）
+        if sanitized[0].isdigit():
+            sanitized = '_' + sanitized
+
+        return sanitized
+
+    @staticmethod
+    def find_best_match(
+            target: str,
+            candidates: List[str],
+            threshold: float = 0.9
+    ) -> Optional[str]:
+        """
+        在字符串列表中查找与目标字符串相似度最高的结果
+
+        Args:
+            target (str): 目标字符串
+            candidates (List[str]): 候选字符串列表
+            threshold (float): 相似度阈值，默认0.9
+
+        Returns:
+            Optional[str]: 匹配度最高的字符串，若低于阈值则返回None
+        """
+        if not target or not candidates:
+            return None
+
+        best_match = None
+        highest_similarity = 0.0
+
+        for candidate in candidates:
+            similarity = SequenceMatcher(None, target, candidate).ratio()
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                best_match = candidate
+
+        # 只有当最高相似度超过阈值时才返回结果
+        if highest_similarity >= threshold:
+            return best_match
+        else:
+            return None
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):

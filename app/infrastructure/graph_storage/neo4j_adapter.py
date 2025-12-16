@@ -40,7 +40,7 @@ class Neo4jAdapter(IGraphStorage):
             password: 密码
             database: 数据库名称
         """
-        self.uri = uri if uri else "bolt://60.205.171.106:7687"
+        self.uri = uri if uri else "bolt://36.212.181.26:8290"
         self.username = username if username else "neo4j"
         self.password = password if password else "hit-wE8sR9wQ3pG1"
         self.database = database if database else "neo4j"
@@ -756,192 +756,159 @@ class Neo4jAdapter(IGraphStorage):
                 error=str(e)
             )
 
+    def merge_graphs_with_match_node(
+            self,
+            source_graph_tag: str,
+            target_graph_tag: str,
+            matched_node_id: str,
+    ):
+        """
+        将source_graph_tag图谱合并到target_graph_tag图谱中，并建立源自于关系
 
-    # def build_knowledge_graph(
-    #         self,
-    #         graph_id: str,
-    #         file_text: str,
-    #         potential_schema: Optional[Dict[str, Any]] = None
-    # ) -> Dict[str, Any]:
-    #     """构建知识图谱"""
-    #     if not self.driver:
-    #         logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
-    #         return {"success": False, "error": self.DRIVER_NOT_INITIALIZED_ERROR}
-    #
-    #     subgraph_name = self._normalize_name(graph_id)
-    #
-    #     try:
-    #         entities = []
-    #         relations = []
-    #         schema_triplets = []
-    #
-    #         if potential_schema:
-    #             entities = potential_schema.get("entityTypes", [])
-    #             relations = potential_schema.get("relationTypes", [])
-    #
-    #             # 构建schema_triplets
-    #             for relation in relations:
-    #                 if (isinstance(relation, dict) and
-    #                         "sourceType" in relation and "targetType" in relation):
-    #
-    #                     source_entity = next(
-    #                         (e for e in entities
-    #                          if str(e.get("id")) == str(relation["sourceType"])),
-    #                         None
-    #                     )
-    #                     target_entity = next(
-    #                         (e for e in entities
-    #                          if str(e.get("id")) == str(relation["targetType"])),
-    #                         None
-    #                     )
-    #
-    #                     if source_entity and target_entity:
-    #                         schema_triplets.append((
-    #                             source_entity.get("name"),
-    #                             relation.get("name"),
-    #                             target_entity.get("name")
-    #                         ))
-    #
-    #         with self.driver.session(database=self.database) as session:
-    #             # 创建Document节点
-    #             session.run("""
-    #             CREATE (d:Document {
-    #                 id: randomUUID(),
-    #                 graph_id: $graph_id,
-    #                 content: $content,
-    #                 created_at: datetime()
-    #             })
-    #             """, graph_id=subgraph_name, content=file_text[:10000])
-    #
-    #             # 创建示例实体
-    #             if entities:
-    #                 self._create_sample_entities(session, subgraph_name, entities)
-    #
-    #             # 创建示例关系
-    #             if relations and len(entities) >= 2:
-    #                 self._create_sample_relationships(
-    #                     session, subgraph_name, relations, entities
-    #                 )
-    #
-    #             return {
-    #                 "success": True,
-    #                 "message": "知识图谱构建完成",
-    #                 "schema": {
-    #                     "entities": entities,
-    #                     "relations": relations,
-    #                     "schema_triplets": schema_triplets
-    #                 }
-    #             }
-    #
-    #     except Neo4jError as e:
-    #         logger.error(f"构建知识图谱失败: {str(e)}")
-    #         return {"success": False, "error": str(e)}
+        Args:
+            source_graph_tag (str): 源图谱标识符(A)
+            target_graph_tag (str): 目标图谱标识符(B)
+            matched_node_id (str): 关联的节点id
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=self.DRIVER_NOT_INITIALIZED_ERROR
+            )
 
+        try:
+            # 获取源图谱数据
+            source_data = self.get_visualization_data(source_graph_tag)
 
+            with self.driver.session(database=self.database) as session:
+                with session.begin_transaction() as tx:
+                    # 首先检验是否存在target_graph_tag标签下的id为matched_node_id的节点A
+                    check_node_query = f"""
+                        MATCH (n:{target_graph_tag} {{id: $node_id}})
+                        RETURN n
+                    """
+                    check_result = tx.run(check_node_query, node_id=matched_node_id)
+                    target_node = check_result.single()
+                    # 若没有则返回None
+                    if not target_node:
+                        return None
 
-    # def _normalize_name(self, name: str) -> str:
-    #     """标准化名称"""
-    #     return name.lower().replace(" ", "_").replace("-", "_")
-    #
-    # def _create_sample_entities(self, session, subgraph_name: str, entities: list):
-    #     """创建示例实体"""
-    #     for entity in entities[:5]:  # 最多创建5种实体类型
-    #         if entity and "name" in entity:
-    #             entity_name = entity["name"]
-    #             for i in range(3):  # 每种类型创建3个示例
-    #                 session.run(f"""
-    #                     CREATE (e:{entity_name} {{
-    #                         id: randomUUID(),
-    #                         graph_id: $graph_id,
-    #                         name: $name,
-    #                         description: '自动创建的示例节点',
-    #                         created_at: datetime()
-    #                     }})
-    #                 """, graph_id=subgraph_name, name=f"示例{entity_name}{i + 1}")
-    #
-    # def _create_sample_relationships(self, session, subgraph_name: str, relations: list, entities: list):
-    #     """创建示例关系"""
-    #     for relation in relations[:3]:  # 最多创建3种关系
-    #         if (relation and "name" in relation and
-    #                 "sourceType" in relation and "targetType" in relation):
-    #
-    #             source_entity = next(
-    #                 (e for e in entities
-    #                  if str(e.get("id")) == str(relation["sourceType"])),
-    #                 None
-    #             )
-    #             target_entity = next(
-    #                 (e for e in entities
-    #                  if str(e.get("id")) == str(relation["targetType"])),
-    #                 None
-    #             )
-    #
-    #             if (source_entity and target_entity and
-    #                     "name" in source_entity and "name" in target_entity):
-    #                 relation_name = relation["name"]
-    #                 session.run(f"""
-    #                     MATCH (a:{source_entity["name"]} {{graph_id: $graph_id}}),
-    #                           (b:{target_entity["name"]} {{graph_id: $graph_id}})
-    #                     WITH a, b LIMIT 1
-    #                     CREATE (a)-[r:{relation_name} {{
-    #                         graph_id: $graph_id,
-    #                         description: '自动创建的示例关系',
-    #                         created_at: datetime()
-    #                     }}]->(b)
-    #                 """, graph_id=subgraph_name)
-    #
-    # def _process_nodes(self, raw_nodes: list) -> list:
-    #     """处理节点数据"""
-    #     nodes = []
-    #     for node in raw_nodes:
-    #         if (node and "properties" in node and
-    #                 node["properties"] is not None):
-    #
-    #             labels = node["labels"]
-    #             # 跳过GraphMetadata节点
-    #             if "GraphMetadata" in labels:
-    #                 continue
-    #
-    #             label = labels[0] if labels else "Unknown"
-    #             name = node["properties"].get("name", f"{label}_{node['id']}")
-    #
-    #             # 过滤属性
-    #             filtered_props = {
-    #                 k: v for k, v in node["properties"].items()
-    #                 if k not in ["graph_id"] and not k.startswith("_")
-    #             }
-    #
-    #             nodes.append(GraphNode(
-    #                 id=str(node["id"]),
-    #                 label=label,
-    #                 properties={
-    #                     "name": name,
-    #                     **filtered_props
-    #                 }
-    #             ))
-    #     return nodes
-    #
-    # def _process_relationships(self, raw_relationships: list) -> list:
-    #     """处理关系数据"""
-    #     relationships = []
-    #     for rel in raw_relationships:
-    #         if (rel and "source" in rel and "target" in rel and
-    #                 rel["id"] is not None and rel["source"] is not None and
-    #                 rel["target"] is not None and rel["type"] is not None):
-    #
-    #             # 过滤属性
-    #             filtered_props = {}
-    #             if rel.get("properties") is not None:
-    #                 filtered_props = {
-    #                     k: v for k, v in rel["properties"].items()
-    #                     if k not in ["graph_id"] and not k.startswith("_")
-    #                 }
-    #
-    #             relationships.append(GraphRelationship(
-    #                 id=str(rel["id"]),
-    #                 source=str(rel["source"]),
-    #                 target=str(rel["target"]),
-    #                 type=rel["type"],
-    #                 properties=filtered_props
-    #             ))
-    #     return relationships
+                    # 合并节点
+                    created_node_ids = []  # 记录已创建的节点ID
+                    for node in source_data.nodes:
+                        # 使用MERGE确保不会重复创建相同ID的节点
+                        query = (
+                            f"MERGE (n:{target_graph_tag} {{id: $id}}) "
+                            "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag"
+                        )
+                        # 处理其他属性
+                        properties = node.properties or {}
+                        sanitized_properties = self._sanitize_properties(properties)
+                        for prop_key, prop_value in sanitized_properties.items():
+                            query += f", n.`{prop_key}` = ${prop_key}"
+                        # 准备参数
+                        params = {
+                            'id': node.id,
+                            'name': node.name,
+                            'label': node.label,
+                            'graph_tag': target_graph_tag,
+                            **sanitized_properties
+                        }
+                        tx.run(query, params)
+                        created_node_ids.append(node.id)  # 记录创建的节点ID
+
+                    # 合并边
+                    for edge in source_data.relationships:
+                        # 获取关系的label属性（如果存在）
+                        relation_label = edge.properties.get('label', '') if edge.properties else ''
+                        # 处理关系名，确保符合Cypher命名规范
+                        safe_predicate = ''.join(c if c.isalnum() else '_' for c in edge.type)
+                        # 使用MERGE确保相同节点间的关系不会重复创建
+                        # 采用分步MATCH方式避免笛卡尔积警告
+                        query = (
+                            f"MATCH (a:{target_graph_tag} {{id: $subject_id}}) "
+                            f"MATCH (b:{target_graph_tag} {{id: $object_id}}) "
+                            f"MERGE (a)-[r:{safe_predicate}]->(b) "
+                        )
+                        # 添加属性设置
+                        query += "SET r.graph_tag = $graph_tag, r.label = $relation_label"
+                        params = {
+                            'subject_id': edge.source_id,
+                            'object_id': edge.target_id,
+                            'graph_tag': target_graph_tag,
+                            'relation_label': relation_label
+                        }
+                        tx.run(query, **params)
+
+                    # 新增功能：将source_data中创建的每个节点都与target_node建立"源自于"关系
+                    for node_id in created_node_ids:
+                        create_relation_query = f"""
+                            MATCH (source_node:{target_graph_tag} {{id: $source_id}})
+                            MATCH (target_node:{target_graph_tag} {{id: $target_id}})
+                            MERGE (source_node)-[r:源自于]->(target_node)
+                            SET r.graph_tag = $graph_tag, r.label = '源自于'
+                        """
+                        tx.run(create_relation_query,
+                               source_id=node_id,
+                               target_id=matched_node_id,
+                               graph_tag=target_graph_tag)
+
+                    tx.commit()
+
+            return self.get_subgraph_stats(target_graph_tag)
+        except Neo4jError as e:
+            logger.error(e)
+            return GraphStats(
+                node_count=0,
+                edge_count=0,
+                error=str(e)
+            )
+
+    def get_nodes_by_type(
+            self,
+            graph_tag: str,
+            node_type: str,
+    ):
+        """
+        获取neo4j中标签为graph_tag，且节点类型n.label为node_type的节点列表
+
+        Args:
+            graph_tag (str): 图谱标签
+            node_type (str): 节点类型(label)
+
+        Returns:
+            list: 符合条件的节点列表
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return []
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 查询指定标签和节点类型的节点
+                result = session.run("""
+                    MATCH (n:%s)
+                    WHERE n.label = $node_type
+                    RETURN n
+                """ % graph_tag, node_type=node_type)
+
+                nodes = []
+                for record in result:
+                    node = record["n"]
+                    # 转换节点数据
+                    properties = dict(node)
+                    nodes.append(GraphNode(
+                        id=properties.get('id', ''),
+                        name=properties.get('name', ''),
+                        label=properties.get('label', ''),
+                        properties=properties
+                    ))
+
+                return nodes
+
+        except Exception as e:
+            logger.error(f"获取节点列表失败: {str(e)}")
+            return []
+

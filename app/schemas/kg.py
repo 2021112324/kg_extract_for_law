@@ -41,6 +41,20 @@ class KGTaskCreate(BaseModel):
     # files: List[UploadFile] = File(...)
 
 
+class KGTaskCreateByFile(BaseModel):
+    """
+    针对每个
+
+    用于API接口创建知识抽取任务的请求数据
+    """
+    dir: str
+    prompt: Optional[str] = None
+    schema: KGSchema = None
+    examples: Optional[List[dict]] = None
+    # parameters: Optional[dict] = None
+    # files: List[UploadFile] = File(...)
+
+
 class GraphNodeBase(BaseModel):
     """图谱节点基础模式"""
     node_id: str
