@@ -40,7 +40,7 @@ class Neo4jAdapter(IGraphStorage):
             password: 密码
             database: 数据库名称
         """
-        self.uri = uri if uri else "bolt://36.212.181.26:8290"
+        self.uri = uri if uri else "bolt://60.205.171.106:7687"
         self.username = username if username else "neo4j"
         self.password = password if password else "hit-wE8sR9wQ3pG1"
         self.database = database if database else "neo4j"
@@ -857,6 +857,7 @@ class Neo4jAdapter(IGraphStorage):
 
                     tx.commit()
 
+            # self.delete_subgraph(source_graph_tag)
             return self.get_subgraph_stats(target_graph_tag)
         except Neo4jError as e:
             logger.error(e)

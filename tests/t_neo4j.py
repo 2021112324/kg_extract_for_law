@@ -4,7 +4,7 @@ if __name__ == "__main__":
     neo4j_adapter = Neo4jAdapter()
     # 创建知识图谱
     neo4j_adapter.connect()
-    neo4j_adapter.merge_graphs("law_top_graph", "法律规章制度测试_kg_523818113737687040")
+    neo4j_adapter.merge_graphs("enterprise_regulations", "zxy_law")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")
     # # 格式化输出result
@@ -42,3 +42,6 @@ if __name__ == "__main__":
     #     print(f"  名称: {node.name}")
     #     print(f"  标签: {node.label}")
     #     # print(f"  属性: {node.properties}")
+
+
+

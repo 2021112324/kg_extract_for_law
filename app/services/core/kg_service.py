@@ -402,6 +402,9 @@ class KGService:
                     content_type = file_content.get('content_type', 'application/octet-stream')
                     filename = file_content.get('filename', 'unknown')
                     try:
+                        # 修复：确保传入的是字节流而不是字符串
+                        if isinstance(content, str):
+                            content = content.encode('utf-8')
                         self.file_storage.upload_file_object(
                             file_data=content,
                             bucket_name=minio_bucket,
@@ -1049,6 +1052,70 @@ class KGService:
             )
         except Exception as e:
             raise e
+
+    async def create_kg_task_by_file_with_merge(
+            self,
+            kg_id,
+            task_data: KGTaskCreateByFile,
+            file_contents: List[dict],
+            db: Session,
+    ):
+        """
+        创建知识图谱任务
+        """
+        kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+        if not kg:
+            return not_found_response(
+                entity="知识图谱"
+            )
+        error_file_list = []
+        for file_content in file_contents:
+            try:
+                file_name = file_content.get("file_name")
+                if not file_name:
+                    continue
+                task_name = file_name
+                task_description = f"{task_data.dir}-{task_name}"
+                existed_task = db.query(KGExtractionTask).filter(
+                    KGExtractionTask.name == task_name,
+                    KGExtractionTask.kg_id == kg_id,
+                    KGExtractionTask.del_flag == 0
+                ).first()
+                if existed_task:
+                    continue
+                one_task_data = KGTaskCreate(
+                    name=task_name,
+                    description=task_description,
+                    prompt=task_data.prompt,
+                    schema=task_data.schema,
+                    examples=task_data.examples
+                )
+                result = await self.create_kg_task(kg_id, one_task_data, [file_content], db)
+                if result.get("code") != 200:
+                    raise Exception(f"{file_name}对应的任务抽取时出错: {str(e)}")
+            except Exception as e:
+                db.rollback()
+                error_file_list.append(file_name)
+                print(f"Error: {file_name}文件处理出现问题，请检查！" + str(e))
+                continue
+
+        # 使用项目根目录的相对路径
+        error_file_path = project_root + "/tests/error_file_list.txt"
+
+        try:
+            with open(error_file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(error_file_list))
+                print(f"已输出错误文件列表到 {error_file_path}")
+        except IOError as e:
+            print(f"写入错误文件列表失败: {e}")
+
+        merge_result = await self.merge_all_graph_with_match(kg_id, db)
+        if merge_result.get("code") != 200:
+            return merge_result
+        return success_response(
+            data=None,
+            msg="任务执行完毕"
+        )
 
     async def _is_md_exist_in_minio(
             self,

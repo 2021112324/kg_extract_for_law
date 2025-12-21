@@ -6,6 +6,7 @@
 """
 import json
 import logging
+import os
 from typing import List
 
 # FastAPI核心组件
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 # 数据库会话管理器
 from app.db.session import get_db
+from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 # 统一响应格式工具
 from app.infrastructure.response import success_response, error_response
 # 数据传输对象定义
@@ -577,6 +579,7 @@ async def merge_with_match(
             data=None
         )
 
+
 @router.post("/kgs/{kg_id}/tasks/{task_id}/merge_all_with_match")
 async def merge_all_with_match(
         kg_id,  # 图谱ID参数，从URL路径中提取
@@ -732,6 +735,119 @@ async def get_kg_task_files(
     except Exception as e:
         return error_response(
             msg=f"获取图谱任务抽取文件列表失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+
+@router.post("/kgs/{kg_id}/kg_extract_by_dir")
+async def kg_extract_by_local_dir(
+        background_tasks: BackgroundTasks,  # 后台任务管理器
+        data_dir: str,
+        prompt: str,
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+    功能特例化：
+    输入目录、提示词文件位置，
+    以目录为基础创建一个kg，
+    然后遍历目录下的每个文件，
+    每个文件创建一个任务，
+    目录下的文件对应任务全执行完后合并图谱
+
+    以此，json请求格式为：
+    {
+        "data_dir": "文件位置",
+        "prompt": "提示词位置"
+    }
+
+    Args:
+        background_tasks (BackgroundTasks): FastAPI后台任务管理器
+        data_dir (str): 本体抽取的文件目录位置
+        prompt (str): 提示词文件位置
+        db (Session): 数据库会话对象，通过依赖注入自动获取
+
+    Returns:
+        dict: 任务创建结果的响应
+            {
+                "code": 200,
+                "msg": "任务开始执行",
+                "data": null
+            }
+
+    Raises:
+        Exception: 当创建任务失败时返回错误响应
+    """
+    try:
+        # 检验参数
+        file_dir = data_dir
+        if not os.path.exists(file_dir):
+            raise Exception(f"文件目录不存在: {file_dir}")
+        if not os.path.isdir(file_dir):
+            raise Exception(f"文件目录不是目录: {file_dir}")
+        prompt_path = prompt
+        if not os.path.exists(prompt_path):
+            raise Exception(f"提示词文件不存在: {prompt_path}")
+        prompt_dict = {}
+        try:
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                prompt_dict = json.load(f)
+        except FileNotFoundError:
+            logger.error(f"提示词文件未找到: {prompt_path}")
+        except json.JSONDecodeError as e:
+            logger.error(f"提示词文件格式错误: {str(e)}")
+        except Exception as e:
+            logger.error(f"读取提示词文件时发生错误: {str(e)}")
+        if not prompt_dict:
+            raise Exception(f"提示词文件格式错误: {prompt_path}")
+        if not prompt_dict.get("prompt"):
+            raise Exception(f"提示词文件格式错误: {prompt_path}")
+        prompt_dict["schema"] = prompt_dict.get("schema", [])
+        prompt_dict["examples"] = prompt_dict.get("examples", [])
+        # 创建kg
+        new_kg = KGCreate(
+            name=data_dir.split("/")[-1],
+            description="",
+        )
+        kg_result = await kg_service.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+        # 迁移图谱
+        neo4j_adapter = Neo4jAdapter()
+        neo4j_adapter.connect()
+        neo4j_adapter.merge_graphs("enterprise_regulations", kg_graph_name)
+        neo4j_adapter.disconnect()
+        files = os.listdir(file_dir)
+        file_contents = []
+        for file in files:
+            file_path = os.path.join(file_dir, file)
+            # 只处理md或txt文件
+            if file.endswith('.md') or file.endswith('.txt'):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                file_contents.append({
+                    'file_name': file,
+                    'content': content,
+                    'content_type': 'text/markdown' if file.endswith('.md') else 'text/plain'
+                })
+        task_data = KGTaskCreateByFile(
+            dir=data_dir.split("/")[-1],
+            prompt=prompt_dict.get("prompt"),
+            schema=prompt_dict.get("schema"),
+            examples=prompt_dict.get("examples")
+        )
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.create_kg_task_by_file_with_merge,
+            {"kg_id": kg_id, "task_data": task_data, "db": db, "file_contents": file_contents}
+        )
+        return success_response(
+            msg="任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行任务失败: {str(e)}",
             code=500,
             data=None
         )
