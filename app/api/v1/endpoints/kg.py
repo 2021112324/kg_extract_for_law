@@ -4,6 +4,7 @@
 本模块提供了一套完整的知识图谱管理API接口，包括图谱的增删改查、任务管理以及文件管理等功能。
 通过FastAPI框架实现RESTful API，支持异步处理和后台任务执行。
 """
+import importlib.util
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 # 统一响应格式工具
 from app.infrastructure.response import success_response, error_response
 # 数据传输对象定义
-from app.schemas.kg import KGCreate, KGTaskCreate, KGTaskCreateByFile
+from app.schemas.kg import KGCreate, KGTaskCreate, KGTaskCreateByFile, KGSchema
 # 核心业务服务层
 from app.services.core.kg_service import kg_service
 # 异步任务管理器
@@ -780,33 +781,46 @@ async def kg_extract_by_local_dir(
     """
     try:
         # 检验参数
-        file_dir = data_dir
+        file_dir = data_dir.replace('\\', '/')
         if not os.path.exists(file_dir):
             raise Exception(f"文件目录不存在: {file_dir}")
         if not os.path.isdir(file_dir):
             raise Exception(f"文件目录不是目录: {file_dir}")
-        prompt_path = prompt
+        prompt_path = prompt.replace('\\', '/')
         if not os.path.exists(prompt_path):
-            raise Exception(f"提示词文件不存在: {prompt_path}")
-        prompt_dict = {}
-        try:
-            with open(prompt_path, 'r', encoding='utf-8') as f:
-                prompt_dict = json.load(f)
-        except FileNotFoundError:
-            logger.error(f"提示词文件未找到: {prompt_path}")
-        except json.JSONDecodeError as e:
-            logger.error(f"提示词文件格式错误: {str(e)}")
-        except Exception as e:
-            logger.error(f"读取提示词文件时发生错误: {str(e)}")
-        if not prompt_dict:
-            raise Exception(f"提示词文件格式错误: {prompt_path}")
-        if not prompt_dict.get("prompt"):
-            raise Exception(f"提示词文件格式错误: {prompt_path}")
-        prompt_dict["schema"] = prompt_dict.get("schema", [])
-        prompt_dict["examples"] = prompt_dict.get("examples", [])
+            raise Exception(f"Python文件不存在: {prompt_path}")
+        # 动态导入Python文件
+        spec = importlib.util.spec_from_file_location("prompt_module", prompt_path)
+        prompt_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prompt_module)
+        # 获取需要的变量（假设文件中有prompt、schema、examples等变量）
+        prompt_dict = {
+            'prompt': getattr(prompt_module, 'prompt', ''),
+            'schema': getattr(prompt_module, 'schema', {}),
+            'examples': getattr(prompt_module, 'examples', [])
+        }
+        # if not os.path.exists(prompt_path):
+        #     raise Exception(f"提示词文件不存在: {prompt_path}")
+        # prompt_dict = {}
+        # try:
+        #     with open(prompt_path, 'r', encoding='utf-8') as f:
+        #         prompt_dict = json.load(f)
+        # except FileNotFoundError:
+        #     logger.error(f"提示词文件未找到: {prompt_path}")
+        # except json.JSONDecodeError as e:
+        #     logger.error(f"提示词文件格式错误: {str(e)}")
+        # except Exception as e:
+        #     logger.error(f"读取提示词文件时发生错误: {str(e)}")
+        # if not prompt_dict:
+        #     raise Exception(f"提示词文件格式错误: {prompt_path}")
+        # if not prompt_dict.get("prompt"):
+        #     raise Exception(f"提示词文件格式错误: {prompt_path}")
+        # prompt_dict["schema"] = prompt_dict.get("schema", [])
+        # prompt_dict["examples"] = prompt_dict.get("examples", [])
         # 创建kg
+        print(prompt_dict)
         new_kg = KGCreate(
-            name=data_dir.split("/")[-1],
+            name=file_dir.split("/")[-1],
             description="",
         )
         kg_result = await kg_service.create_kg(new_kg, db)
@@ -831,9 +845,9 @@ async def kg_extract_by_local_dir(
                     'content_type': 'text/markdown' if file.endswith('.md') else 'text/plain'
                 })
         task_data = KGTaskCreateByFile(
-            dir=data_dir.split("/")[-1],
+            dir=file_dir.split("/")[-1],
             prompt=prompt_dict.get("prompt"),
-            schema=prompt_dict.get("schema"),
+            schema=KGSchema(**prompt_dict.get("schema")),
             examples=prompt_dict.get("examples")
         )
         background_tasks.add_task(

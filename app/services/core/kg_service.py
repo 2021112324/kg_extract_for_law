@@ -1016,6 +1016,9 @@ class KGService:
                     "规章文件",
                     db
                 )
+                if matched_node_result.get("code") != 200 or not matched_node_result.get("data"):
+                    error_list.append(task.id)
+                    continue
                 matched_node_id = matched_node_result.get("data").get("matched_node_id")
                 if not matched_node_id:
                     return error_response(
@@ -1074,7 +1077,7 @@ class KGService:
                 file_name = file_content.get("file_name")
                 if not file_name:
                     continue
-                task_name = file_name
+                task_name = os.path.splitext(file_name)[0]
                 task_description = f"{task_data.dir}-{task_name}"
                 existed_task = db.query(KGExtractionTask).filter(
                     KGExtractionTask.name == task_name,
