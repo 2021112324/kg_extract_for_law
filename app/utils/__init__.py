@@ -10,3 +10,7 @@
 @Desc: 
     
 """
+
+from .text_encoding_utils import TextEncodingUtils
+
+__all__ = ['TextEncodingUtils']

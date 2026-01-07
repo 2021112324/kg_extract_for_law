@@ -593,13 +593,26 @@ class KGService:
                 prompt_parameters["schema"] = kg_schema
             # 4. 获取任务对应的md文件路径列表
             task_files = db.query(KGFile).filter(KGFile.kg_id == kg_id, KGFile.task_id == task_id).all()
+            # 优化：将抽取结果与文件绑定
             if task_files:
-                md_paths = [file.minio_path for file in task_files if file.minio_path]
+                minio_files = []
+                for file in task_files:
+                    file_minio_path = file.minio_path
+                    filename = file.filename
+                    if not file_minio_path or not filename:
+                        continue
+                    minio_files.append(
+                        {
+                            "minio_path": file_minio_path,
+                            "filename": filename
+                        }
+                    )
             else:
-                md_paths = []
+                minio_files = []
             # 5. 判断文件列表中各文件是否存在minio中的md文件
-            for md_path in md_paths:
-                if not await self._is_md_exist_in_minio(md_path):
+            for minio_file in minio_files:
+                minio_path = minio_file.get("minio_path", "")
+                if not await self._is_md_exist_in_minio(minio_path):
                     return not_found_response(
                         entity="文件",
                     )
@@ -607,13 +620,13 @@ class KGService:
                 task.retry_count = task.retry_count + 1
             try:
                 # 6.执行抽取任务
-                result = await self.kg_extract_service.extract_kg_from_md_paths(
-                    md_paths=md_paths,
+                result = await self.kg_extract_service.extract_kg_from_minio_paths(
+                    minio_files=minio_files,
                     user_prompt=user_prompt,
                     db=db,
                     prompt_parameters=prompt_parameters,
                 )
-                print("debug:" + str(result))
+                # print("debug:" + str(result))
                 try:
                     # 7. 将抽取出的图谱保存到图数据库中
                     if result:
@@ -1040,10 +1053,10 @@ class KGService:
 
             try:
                 with open(error_file_path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(error_list))
-                    print(f"已输出错误文件列表到 {error_file_path}")
+                    f.write("\n".join(str(task_id) for task_id in error_list))
+                    print(f"已输出错误任务列表到 {error_file_path}")
             except IOError as e:
-                print(f"写入错误文件列表失败: {e}")
+                print(f"写入错误任务列表失败: {e}")
             self.graph_storage.connect()
             graph_status = self.graph_storage.get_subgraph_stats(kg.graph_name)
             return success_response(
@@ -1074,7 +1087,7 @@ class KGService:
         error_file_list = []
         for file_content in file_contents:
             try:
-                file_name = file_content.get("file_name")
+                file_name = file_content.get("filename")
                 if not file_name:
                     continue
                 task_name = os.path.splitext(file_name)[0]
@@ -1107,7 +1120,7 @@ class KGService:
 
         try:
             with open(error_file_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(error_file_list))
+                f.write("\n".join(str(file_name) for file_name in error_file_list))
                 print(f"已输出错误文件列表到 {error_file_path}")
         except IOError as e:
             print(f"写入错误文件列表失败: {e}")
@@ -1122,19 +1135,19 @@ class KGService:
 
     async def _is_md_exist_in_minio(
             self,
-            md_path: str,
+            minio_path: str,
     ):
         """
         判断文件是否存在minio中
         """
         try:
             # 解析路径，分离存储桶和文件名
-            if '/' in md_path:
-                bucket_name, file_name = md_path.split('/', 1)
+            if '/' in minio_path:
+                bucket_name, file_name = minio_path.split('/', 1)
             else:
                 # 如果没有'/'分隔符，则使用默认存储桶
                 bucket_name = MINIO_BUCKET
-                file_name = md_path
+                file_name = minio_path
             # 使用file_storage检查文件是否存在
             return self.file_storage.file_exists(bucket_name, file_name)
         except Exception as e:

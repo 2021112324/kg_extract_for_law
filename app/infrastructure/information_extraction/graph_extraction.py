@@ -1,6 +1,7 @@
 """
 图谱抽取
 """
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -8,8 +9,7 @@ from dotenv import load_dotenv
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.method.base import LangextractConfig, ModelConfig
 from app.infrastructure.information_extraction.sync_task import sync_task_manager
-from app.schemas.kg import GraphEdgeBase, GraphNodeBase
-
+from app.schemas.kg import GraphEdgeBase, GraphNodeBase, TextClass
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -49,7 +49,7 @@ class GraphExtraction:
             max_char_buffer=MAX_CHAR_BUFFER,
             batch_length=BATCH_LENGTH,
             max_workers=MAX_WORKERS,
-
+            # resolver_params=
         )
         self.node_extractor = InformationExtractionFactory.create(
             "langextract",
@@ -170,7 +170,7 @@ class GraphExtraction:
                 node_examples = None
                 edge_examples = None
             # 提取节点信息
-            extract_nodes = await self.node_extractor.entity_extract(
+            extract_nodes, nodes_text_classes = await self.node_extractor.entity_extract(
                 prompt,
                 node_schema,
                 input_text,
@@ -181,7 +181,7 @@ class GraphExtraction:
                 return None
             print("节点信息：", extract_nodes)
             # 提取边信息
-            extract_edges = await self.edge_extractor.relationship_extract(
+            extract_edges, edges_text_classes = await self.edge_extractor.relationship_extract(
                 prompt,
                 extract_nodes,
                 edge_schema,
@@ -192,9 +192,12 @@ class GraphExtraction:
                 print("抽取的边为空")
                 return None
             print("边信息：", extract_edges)
+
+            text_classes = self.node_extractor.merge_text_class(nodes_text_classes, edges_text_classes)
             extract_result = {
                 "entities": extract_nodes,
                 "relations": extract_edges,
+                "text_classes": text_classes
             }
             return self.build_graph_structure(extract_result)
         except Exception as e:
@@ -267,6 +270,7 @@ class GraphExtraction:
                 input_text,
                 full_examples
             )
+            # print("抽取结果：", extract_result)
 
             if not isinstance(extract_result, dict):
                 print("抽取结果格式错误")
@@ -281,20 +285,27 @@ class GraphExtraction:
         使用GraphNodeBase和GraphEdgeBase构建图谱结构数据
         
         Args:
-            extract_result: 包含entities和relations的抽取结果，其中entities是list[Entity]格式，
-                           relations是list[Relationship]格式
+            extract_result: 包含entities和relations的抽取结果，其中
+                            entities是list[Entity]格式，
+                            relations是list[Relationship]格式
+                            texts_classes是list[TextClass]格式
 
             graph_data = {
             "nodes": list[GraphNodeBase],
-            "edges": list[GraphEdgeBase]
+            "edges": list[GraphEdgeBase],
+            "texts_classes": list[TextClass]
         }
         Returns:
             dict: 包含GraphNodeBase和GraphEdgeBase对象的图谱结构数据
         """
         graph_data = {
             "nodes": [],
-            "edges": []
+            "edges": [],
+            "text_classes": []
         }
+
+        # # 保存有用的text_class
+        # text_class_id_set = set()
 
         # 处理节点数据 (Entity对象列表)
         entities = extract_result.get("entities", [])
@@ -327,7 +338,17 @@ class GraphExtraction:
                     properties=node_properties,
                     description=getattr(entity, "description", None)
                 )
+
+                # 保存节点溯源文本映射
+                source_texts = getattr(entity, "source_texts", None)
+                if source_texts and isinstance(source_texts, list):
+                    sources_texts_info = {}
+                    new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, sources_texts_info)
+                    # for text_id in new_sources_texts_info.keys():
+                    #     text_class_id_set.add(text_id)
+                    node.source_text_info = new_sources_texts_info
                 graph_data["nodes"].append(node)
+                # graph_data["node_text_map"][node_id] = getattr(entity, "text", "")
                 # 使用name和entity_type组合作为键确保唯一性
                 node_map[node_key] = node_id  # 保存节点名称和类型到ID的映射
                 node_object_map[node_id] = node  # 维护节点对象映射
@@ -339,6 +360,19 @@ class GraphExtraction:
                 new_description = getattr(entity, "description", None)
                 if new_description:
                     existing_node.description = new_description
+
+                # 保存节点溯源文本映射
+                source_texts = getattr(entity, "source_texts", None)
+                if source_texts and isinstance(source_texts, list):
+                    temp_source_texts_info = existing_node.source_text_info
+                    new_sources_texts_info = {}
+                    if temp_source_texts_info and isinstance(temp_source_texts_info, dict):
+                        new_source_texts_info = self._merge_source_texts_to_info_map(source_texts, temp_source_texts_info)
+                    else:
+                        new_source_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
+                    # for text_id in new_sources_texts_info.keys():
+                    #     text_class_id_set.add(text_id)
+                    existing_node.source_text_info = new_source_texts_info
 
         # 处理边数据 (Relationship对象列表)
         relations = extract_result.get("relations", [])
@@ -380,21 +414,85 @@ class GraphExtraction:
                     }
 
                 # 关系去重检查
-                relation_key = (source_id, getattr(relation, "type", ""), target_id)
+                relation_type = getattr(relation, "type", None)
+                if not relation_type:
+                    continue
+                relation_key = (source_id, relation_type, target_id)
                 if relation_key not in relation_set:
                     relation_set.add(relation_key)
                     # 创建GraphEdgeBase对象
                     edge = GraphEdgeBase(
                         source_id=source_id,
                         target_id=target_id,
-                        relation_type=getattr(relation, "type", ""),
+                        relation_type=relation_type,
                         properties=edge_properties,
                         weight=getattr(relation, "weight", 1.0),
                         bidirectional=getattr(relation, "bidirectional", False)
                     )
+
+                    # 保存边溯源文本映射
+                    source_texts = getattr(relation, "source_texts", None)
+                    if source_texts and isinstance(source_texts, list):
+                        sources_texts_info = {}
+                        new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, sources_texts_info)
+                        # for text_id in new_sources_texts_info.keys():
+                        #     text_class_id_set.add(text_id)
+                        edge.source_text_info = new_sources_texts_info
+
                     graph_data["edges"].append(edge)
+                else:
+                    # 重复变关系，更新属性
+                    existing_edge = [edge for edge in graph_data["edges"] if edge.source_id == source_id and edge.target_id == target_id and edge.relation_type == relation_type]
+                    if existing_edge:
+                        edges_properties = existing_edge[0].properties
+                        if edges_properties and isinstance(edges_properties, dict):
+                            edges_properties.update(existing_edge[0].properties)
+
+                        # 更新边溯源文本映射
+                        source_texts = getattr(relation, "source_texts", None)
+                        if source_texts and isinstance(source_texts, list):
+                            sources_texts_info = existing_edge[0].source_text_info
+                            if sources_texts_info and isinstance(sources_texts_info, dict):
+                                new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, sources_texts_info)
+                            else:
+                                new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
+                            # for text_id in new_sources_texts_info.keys():
+                            #     text_class_id_set.add(text_id)
+                            existing_edge[0].source_text_info = new_sources_texts_info
+
             else:
                 print(f"Warning: 找不到源节点或目标节点: {source_name} -> {target_name}")
+
+        # 添加节点溯源文本类
+        # 方案零：保留所有节点的溯源文本类
+        for text_class in extract_result.get("texts_classes", []):
+            text_id = getattr(text_class, "id", None)
+            text_content = getattr(text_class, "text", None)
+            if not text_id or not text_content:
+                continue
+            graph_data["text_classes"].append(
+                TextClass(
+                    text_id=text_id,
+                    text=text_content
+                )
+            )
+        # 方案一：仅保留Langextract抽取后有节点存在溯源的对应文本类，但某些领域内，大量甚至全部节点都没能成功溯源，会导致溯源文本彻底丢失
+        # for text_id in text_class_id_set:
+        #     text_classes = extract_result.get("texts_classes", [])
+        #     for text_class in text_classes:
+        #         temp_class_id = getattr(text_class, "id", None)
+        #         if not temp_class_id:
+        #             continue
+        #         if temp_class_id == text_id:
+        #             text_content = getattr(text_class, "text", None)
+        #             if not text_content:
+        #                 continue
+        #             graph_data["text_classes"].append(
+        #                 TextClass(
+        #                     text_id=text_id,
+        #                     text=text_content
+        #                 )
+        #             )
 
         return graph_data
 
@@ -436,19 +534,77 @@ class GraphExtraction:
                 self.node_extractor.entity_and_relationship_extract,
                 parameters_list
             )
+            # print("抽取结果数：", result_list)
             graph_result = {
                 "entities": [],
-                "relations": []
+                "relations": [],
+                "texts_classes": []
             }
             for i, result in enumerate(result_list):
                 if not isinstance(result, dict):
                     print(f"第{i}个文段块抽取失败")
                 graph_result["entities"] = graph_result["entities"] + result.get("entities", [])
                 graph_result["relations"] = graph_result["relations"] + result.get("relations", [])
+                graph_result["texts_classes"] = self.node_extractor.merge_text_class(
+                    graph_result["texts_classes"],
+                    result.get("texts_classes", [])
+                )
             return graph_result
         except Exception as e:
             print("分段抽取失败：", e)
             raise e
+
+    def _merge_source_texts_to_info_map(
+            self,
+            source_texts: list,
+            text_info_map: dict
+    ) -> dict:
+        """
+        将原文本映射信息数据合并到映射中
+        节点溯源文本映射数据格式为：
+        {
+          "source_text_id":[
+              {
+                  "start_pos": "",
+                  "end_pos": "",
+                  "alignment_status": ""
+              }
+          ]
+        }
+        :param source_texts:
+        :param text_info_map:
+        :return:
+        """
+        for source_text in source_texts:
+            source_text_id = getattr(source_text, "id", None)
+            start_pos = getattr(source_text, "start_pos", None)
+            end_pos = getattr(source_text, "end_pos", None)
+            alignment_status = getattr(source_text, "alignment_status", None)
+            if not source_text_id:
+                continue
+            if source_text_id not in text_info_map:
+                text_info_map[source_text_id] = [{
+                    "start_pos": start_pos,
+                    "end_pos": end_pos,
+                    "alignment_status": alignment_status
+                }]
+            else:
+                # 方案一：保留所有溯源文本信息
+                temp_text_info_list = text_info_map[source_text_id]
+                if not temp_text_info_list or not isinstance(temp_text_info_list, list):
+                    temp_text_info_list = []
+                for temp_text_info in temp_text_info_list:
+                    # 避免重复
+                    if start_pos == temp_text_info.get("start_pos") or end_pos == temp_text_info.get("end_pos"):
+                        continue
+                temp_text_info_list.append(
+                    {
+                        "start_pos": start_pos,
+                        "end_pos": end_pos,
+                        "alignment_status": alignment_status
+                    }
+                )
+        return text_info_map
 
     @staticmethod
     def _split_text_by_paragraphs(
@@ -491,12 +647,3 @@ class GraphExtraction:
 
 
 graph_extractor = GraphExtraction()
-
-if __name__ == "__main__":
-    print("Project root:", project_root)
-    print("Env path exists:", os.path.exists(env_path))
-    print("BATCH_LENGTH:", BATCH_LENGTH)
-    print("MAX_WORKERS:", MAX_WORKERS)
-    print("MAX_CHAR_BUFFER:", MAX_CHAR_BUFFER)
-    print("MAX_CHUNK_SIZE:", MAX_CHUNK_SIZE)
-    print("OVERLAP_SIZE:", OVERLAP_SIZE)

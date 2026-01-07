@@ -714,7 +714,7 @@ class WordAligner:
       delim: str = "\u241F",  # Unicode Symbol for unit separator
       enable_fuzzy_alignment: bool = True,
       fuzzy_alignment_threshold: float = _FUZZY_ALIGNMENT_MIN_THRESHOLD,
-      accept_match_lesser: bool = False,
+      accept_match_lesser: bool = True,
   ) -> Sequence[Sequence[data.Extraction]]:
     """Aligns extractions with their positions in the source text.
 

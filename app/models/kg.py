@@ -1,10 +1,10 @@
 from typing import Dict, Any
 
 from sqlalchemy import Column, JSON, BIGINT, VARCHAR, \
-    TEXT, INT
+    TEXT, INT, DateTime
 from sqlalchemy.dialects.mssql import TINYINT
 
-from app.db.base import Base
+from app.db.base import Base, get_cn_datetime
 from app.utils.snowflake_id import generate_snowflake_id
 
 
@@ -27,6 +27,8 @@ class KG(Base):
     graph_status = Column(TINYINT, default=0)  # 图数据库状态：0-pending，1-created，2-error
     graph_config = Column(JSON, nullable=True)  # 存储graph相关配置
     del_flag = Column(TINYINT, default=0)  # 删除标志：0-正常，1-已删除
+    create_time = Column(DateTime, default=get_cn_datetime)
+
 
     def to_dict(self) -> Dict[str, Any]:
         """将知识图谱转换为字典表示形式"""
@@ -71,6 +73,7 @@ class KGExtractionTask(Base):
     graph_status = Column(TINYINT, default=0)  # 图数据库状态：0-pending，1-created，2-error
     graph_config = Column(JSON, nullable=True)  # 存储graph相关配置
     del_flag = Column(TINYINT, default=0)  # 删除标志：0-正常，1-已删除
+    create_time = Column(DateTime, default=get_cn_datetime)
 
     def to_dict(self) -> Dict[str, Any]:
         """将抽取任务转换为字典表示形式"""
@@ -109,6 +112,7 @@ class KGFile(Base):
     filename = Column(VARCHAR(255), nullable=True)
     minio_bucket = Column(TEXT, nullable=True)
     minio_path = Column(TEXT, nullable=True)
+    create_time = Column(DateTime, default=get_cn_datetime)
 
     def to_dict(self) -> Dict[str, Any]:
         """将文件转换为字典表示形式"""

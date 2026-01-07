@@ -1,0 +1,84 @@
+测试用例1: 完整schema
+节点部分:
+# 节点schema
+## Person
+### 描述
+表示一个人物实体
+### 属性
+- name：人物的姓名
+- age：人物的年龄
+- occupation：人物的职业
+## Company
+### 描述
+表示一个公司实体
+### 属性
+- name：公司的名称
+- location：公司的位置
+
+边部分:
+# 关系
+## WORKS_AT
+### 关系三元组
+Person-WORKS_AT-Company
+### 描述
+表示一个人在某个公司工作
+### 关系方向性
+单向
+### 属性
+- start_date：开始工作的日期
+- position：职位
+
+
+测试用例2: 只有节点的schema
+节点部分:
+# 节点schema
+## Book
+### 描述
+表示一本书实体
+### 属性
+- title：书的标题
+- author：书的作者
+- year：出版年份
+
+边部分: 无
+
+测试用例3: 只有边的schema
+节点部分: 无
+边部分:
+# 关系
+## WRITTEN_BY
+### 关系三元组
+Book-WRITTEN_BY-Author
+### 描述
+表示一本书被某个作者写作
+### 关系方向性
+单向
+### 属性
+- publish_date：出版日期
+
+
+测试用例4: 空schema
+结果: None
+
+测试用例5: 非字典类型输入
+结果: None
+
+测试用例6: 包含缺失字段的schema
+节点部分:
+# 节点schema
+## IncompleteEntity
+### 描述
+
+### 属性
+
+边部分:
+# 关系
+## IncompleteRelation
+### 关系三元组
+-IncompleteRelation-
+### 描述
+
+### 关系方向性
+
+### 属性
+

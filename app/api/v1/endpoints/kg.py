@@ -359,7 +359,7 @@ async def create_kg_task(
 
 # 创建图谱任务接口
 @router.post("/kgs/{kg_id}/tasks_batch")
-async def create_kg_task_by_batch_file_name(
+async def create_kg_task_by_batch_filename(
         kg_id,  # 图谱ID参数，从URL路径中提取
         background_tasks: BackgroundTasks,  # 后台任务管理器
         task_data: str = Form(..., description="任务创建数据"),  # 任务创建数据模型
@@ -840,7 +840,7 @@ async def kg_extract_by_local_dir(
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 file_contents.append({
-                    'file_name': file,
+                    'filename': file,
                     'content': content,
                     'content_type': 'text/markdown' if file.endswith('.md') else 'text/plain'
                 })

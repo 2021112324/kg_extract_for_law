@@ -62,6 +62,7 @@ class GraphNodeBase(BaseModel):
     node_type: str
     properties: Optional[Dict[str, Any]] = None
     description: Optional[str] = None
+    source_text_info: Optional[Dict[str, List]] = None
 
 
 class GraphEdgeBase(BaseModel):
@@ -72,3 +73,10 @@ class GraphEdgeBase(BaseModel):
     properties: Optional[Dict[str, Any]] = None
     weight: float = 1.0
     bidirectional: bool = False
+    source_text_info: Optional[Dict[str, List]] = None
+
+
+class TextClass(BaseModel):
+    """溯源文本类模型"""
+    text_id: str
+    text: str

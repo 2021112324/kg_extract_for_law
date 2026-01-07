@@ -10,7 +10,6 @@ def get_prompt_for_entity_and_relation_extraction(
         temp_schema = """
 # 提取内容
 本体任务提取的实体schema如下：
-# 实体和关系schema
 """ + schema
     else:
         temp_schema = ""
@@ -70,7 +69,6 @@ def get_prompt_for_entity_extraction(
 为了提高抽取效率，我们将抽取任务分为两部分
 本次对话仅提取实体和其内部的属性
 本体任务提取的实体schema如下：
-# 实体schema
 """ + entity_schema + """
 # 定义
 实体的定义如下
@@ -116,7 +114,6 @@ def get_prompt_for_relation_extraction(
 本体任务已提取的实体如下：
 """ + node_list + """
 本体任务提取的关系schema如下：
-# 关系schema
 """ + relation_schema + """
 # 定义
 实体的定义如下
