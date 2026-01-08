@@ -125,6 +125,8 @@ class KGExtractService():
             # 合并所有结果中的节点和边
             merged_nodes = {}
             merged_edges = {}
+            # 改进1-7：使用字典合并节点和边
+            merged_text_classes = {}
             for result in result_list:
                 if result is None:
                     continue
@@ -170,7 +172,29 @@ class KGExtractService():
                                     existing_node["properties"] = {}
                                 existing_node["properties"].update(node.properties)
 
-                            # TODO:合并source_text_info
+                            # 改进1-7:合并source_text_info
+                            if hasattr(node, "source_text_info") and node.source_text_info and isinstance(node.source_text_info, dict):
+                                if "source_text_info" not in existing_node:
+                                    existing_node["source_text_info"] = {}
+                                for text_id, new_positions in node.source_text_info.items():
+                                    if text_id in existing_node["source_text_info"]:
+                                        # 合并位置并去重
+                                        existing_positions = existing_node["source_text_info"][text_id]
+                                        # 方法1: 简单追加（如果不担心重复）
+                                        existing_positions.extend(new_positions)
+                                        # # 方法2: 去重（基于字典比较）
+                                        # # 将字典转为元组进行比较
+                                        # seen = set()
+                                        # unique_positions = []
+                                        # for pos in existing_positions + new_positions:
+                                        #     pos_tuple = tuple(sorted(pos.items()))
+                                        #     if pos_tuple not in seen:
+                                        #         seen.add(pos_tuple)
+                                        #         unique_positions.append(pos)
+                                        # existing_node["source_text_info"][text_id] = unique_positions
+                                    else:
+                                        # 新文档
+                                        existing_node["source_text_info"][text_id] = new_positions.copy()
 
                         else:
                             # 转换为字典格式存储
@@ -186,8 +210,8 @@ class KGExtractService():
                                 "description": node.description,
                                 "filename": filename,
                                 "properties": getattr(node, "properties", {}),
-                                # TODO:添加source_text_info
-                                # "source_text_info": getattr(node, "source_text_info", {})
+                                # 改进1-7:添加source_text_info
+                                "source_text_info": getattr(node, "source_text_info", {})
                             }
 
                 # 合并边部分
@@ -210,7 +234,29 @@ class KGExtractService():
                                     existing_edge["properties"] = {}
                                 existing_edge["properties"].update(edge.properties)
 
-                            # TODO:合并source_text_info
+                            # 改进1-7:合并source_text_info
+                            if hasattr(edge, "source_text_info") and edge.source_text_info and isinstance(edge.source_text_info, dict):
+                                if "source_text_info" not in existing_edge:
+                                    existing_edge["source_text_info"] = {}
+                                for text_id, new_positions in edge.source_text_info.items():
+                                    if text_id in existing_edge["source_text_info"]:
+                                        # 合并位置并去重
+                                        existing_positions = existing_edge["source_text_info"][text_id]
+                                        # 方法1: 简单追加（如果不担心重复）
+                                        existing_positions.extend(new_positions)
+                                        # # 方法2: 去重（基于字典比较）
+                                        # # 将字典转为元组进行比较
+                                        # seen = set()
+                                        # unique_positions = []
+                                        # for pos in existing_positions + new_positions:
+                                        #     pos_tuple = tuple(sorted(pos.items()))
+                                        #     if pos_tuple not in seen:
+                                        #         seen.add(pos_tuple)
+                                        #         unique_positions.append(pos)
+                                        # existing_edge["source_text_info"][text_id] = unique_positions
+                                    else:
+                                        # 新文档
+                                        merged_edges[edge_key]["source_text_info"][text_id] = new_positions.copy()
 
                         else:
                             # 转换为字典格式存储
@@ -221,27 +267,38 @@ class KGExtractService():
                                 "weight": getattr(edge, "weight", 1.0),
                                 "bidirectional": getattr(edge, "bidirectional", False),
                                 "properties": getattr(edge, "properties", {}),
-                                # TODO:添加source_text_info
-                                # "source_text_info": getattr(edge, "source_text_info", {})
+                                # 改进1-7:添加source_text_info
+                                "source_text_info": getattr(edge, "source_text_info", {})
                             }
                 # 合并文本节点
-                text_id_map = {}
                 if "text_classes" in result:
-                    text_nodes = result["text_nodes"]
-                    if not isinstance(text_nodes, list):
-                        text_nodes = []
-                    for text_node in text_nodes:
-                        getattr()
+                    text_classes = result["text_classes"]
+                    if not isinstance(text_classes, list):
+                        text_classes = []
+                    for text_class in text_classes:
+                        text_id = getattr(text_class, "text_id", None)
+                        text = getattr(text_class, "text", None)
+                        if not text_id or not text:
+                            continue
+                        if text_id in merged_text_classes:
+                            existing_text = merged_text_classes[text_id].get("text", "")
+                            # 只在新文本更长时才更新
+                            if len(text) > len(existing_text):
+                                merged_text_classes[text_id]["text"] = text
+                        else:
+                            merged_text_classes[text_id] = {
+                                "text_id": text_id,
+                                "text": text
+                            }
 
-
-                # TODO:处理多溯源溯源
+                # TODO:处理多溯源（可能用不到）
 
             # 转换为列表格式返回
             final_result = {
                 "nodes": list(merged_nodes.values()),
                 "edges": list(merged_edges.values()),
-                # TODO:文本节点
-
+                # 改进1-7：增加文本类
+                "text_classes": list(merged_text_classes.values())
             }
             return final_result
         except Exception as e:

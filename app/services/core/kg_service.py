@@ -542,6 +542,7 @@ class KGService:
             self,
             kg_id,
             task_id,
+            kg_level: str = "DocumentLevel"
     ):
         """
         执行知识图谱任务编排
@@ -557,6 +558,9 @@ class KGService:
         Args:
             kg_id: 知识图谱ID
             task_id: 任务ID
+            kg_level: 知识图谱类型：
+                        如果是文件级别，则每个文件保存一次图谱；
+                        如果是领域级别，则合并后保存图谱
 
         Returns:
             dict: 操作结果
@@ -623,14 +627,17 @@ class KGService:
                 result = await self.kg_extract_service.extract_kg_from_minio_paths(
                     minio_files=minio_files,
                     user_prompt=user_prompt,
-                    db=db,
                     prompt_parameters=prompt_parameters,
+                    # kg_level
                 )
                 # print("debug:" + str(result))
                 try:
                     # 7. 将抽取出的图谱保存到图数据库中
                     if result:
+
                         # TODO: 保留图谱节点文件来源？
+
+
                         self.graph_storage.connect()
                         self.graph_storage.add_subgraph_with_merge(
                             kg_data=result,
@@ -1223,6 +1230,9 @@ class KGService:
             return best_match
         else:
             return None
+
+    # @staticmethod
+    # def process_source_text():
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
