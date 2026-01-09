@@ -1201,8 +1201,8 @@ class KGService:
             print(f"检查文件是否存在时出错: {str(e)}")
             return False
 
-    @staticmethod
     def process_source_text(
+            self,
             kg_data: dict,
     ):
         """
@@ -1229,10 +1229,11 @@ class KGService:
             text_filename = text_class.get("filename")
             if isinstance(text_filename, list):
                 text_filename = text_filename[0]
+            temp_text_filename = self.sanitize_neo4j_filename(text_filename)
             new_kg_data["nodes"].append(
                 {
                     "node_id": new_text_id,
-                    "node_name": text_filename,
+                    "node_name": temp_text_filename,
                     "node_type": "SourceText",
                     "properties": {
                         "text": text_class.get("text")
@@ -1338,6 +1339,22 @@ class KGService:
             sanitized = '_' + sanitized
 
         return sanitized
+
+    def sanitize_neo4j_filename(self, name: str) -> str:
+        """
+        将文件名中后缀去掉，并且字符串中不能作为Neo4j属性名的符号替换为单个下划线，但保留中文符号
+
+        Args:
+            name (str): 原始字符串
+
+        Returns:
+            str: 处理后的符合Neo4j属性名规范的字符串
+        """
+        # 防止空字符串输入
+        if not name:
+            return ""
+        return self.sanitize_neo4j_property_name(os.path.splitext(name)[0])
+
 
     @staticmethod
     def find_best_match(

@@ -614,6 +614,7 @@ class GraphExtraction:
     ):
         """
         按段落分割文本，分段间保留重叠内容
+        优先在换行符处分割，若无法在合理范围内找到换行符，则按句子分割
 
         Args:
             text: 输入文本
@@ -629,21 +630,100 @@ class GraphExtraction:
         # 按段落分割（以双换行符为分隔）
         paragraphs = text.split("\n\n")
         chunks = []
-        current_chunk = ""
 
         for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) > max_chunk_size:
-                if current_chunk:  # 非空才添加
-                    chunks.append(current_chunk.strip())
-                    # 保留重叠部分（取最后overlap_size个字符）
-                    current_chunk = current_chunk[-min(overlap_size, len(current_chunk)):] + "\n\n"
-            current_chunk += paragraph + "\n\n"
-
-        # 添加最后剩余内容
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
+            if len(paragraph) <= max_chunk_size:
+                # 段落长度合适，直接添加
+                if chunks:
+                    # 与前一个块合并（考虑重叠）
+                    last_chunk = chunks[-1]
+                    if len(last_chunk) + len(paragraph) + 2 <= max_chunk_size:
+                        chunks[-1] = last_chunk + "\n\n" + paragraph
+                    else:
+                        chunks.append(paragraph)
+                else:
+                    chunks.append(paragraph)
+            else:
+                # 段落过长，需要进一步分割
+                sub_chunks = GraphExtraction._split_long_text(paragraph, max_chunk_size, overlap_size)
+                chunks.extend(sub_chunks)
 
         return chunks
+
+    @staticmethod
+    def _split_long_text(text: str, max_chunk_size: int, overlap_size: int) -> list:
+        """
+        智能分割过长文本块
+
+        Args:
+            text: 要分割的文本
+            max_chunk_size: 最大块大小
+            overlap_size: 重叠大小
+
+        Returns:
+            List[str]: 分割后的文本块列表
+        """
+        chunks = []
+        start_idx = 0
+
+        while start_idx < len(text):
+            end_idx = start_idx + max_chunk_size
+
+            if end_idx >= len(text):
+                # 剩余内容直接作为一个块
+                chunks.append(text[start_idx:])
+                break
+
+            # 在阈值附近寻找最近的换行符或句子结束符
+            search_range = int(max_chunk_size * 0.2)  # 搜索范围为最大长度的20%
+
+            # 优先寻找换行符
+            split_pos = GraphExtraction._find_split_position(text, end_idx, search_range, ['\n'])
+
+            if split_pos == -1:
+                # 没找到换行符，寻找句子结束符
+                split_pos = GraphExtraction._find_split_position(text, end_idx, search_range,
+                                                                 ['。', '！', '？', '；', '.', '!', '?', ';', '，', ',',
+                                                                  '、'])
+
+            if split_pos != -1 and split_pos > start_idx:
+                # 找到了合适的分割点
+                chunk = text[start_idx:split_pos + 1].rstrip()  # 去掉末尾可能的换行符
+                chunks.append(chunk)
+                start_idx = split_pos + 1
+            else:
+                # 没找到合适的分割点，强制在最大长度处分割
+                chunk = text[start_idx:end_idx]
+                chunks.append(chunk)
+                start_idx = end_idx
+
+        return chunks
+
+    @staticmethod
+    def _find_split_position(text: str, target_pos: int, search_range: int, split_chars: list) -> int:
+        """
+        在目标位置附近寻找最近的分割字符
+
+        Args:
+            text: 要搜索的文本
+            target_pos: 目标位置
+            search_range: 搜索范围
+            split_chars: 分割字符列表
+
+        Returns:
+            int: 找到的分割位置，-1表示未找到
+        """
+        # 向前搜索
+        for i in range(min(target_pos, len(text) - 1), max(target_pos - search_range, 0), -1):
+            if text[i] in split_chars:
+                return i
+
+        # 向后搜索
+        for i in range(target_pos, min(target_pos + search_range, len(text))):
+            if text[i] in split_chars:
+                return i
+
+        return -1
 
 
 graph_extractor = GraphExtraction()
