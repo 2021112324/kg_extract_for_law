@@ -130,30 +130,37 @@ class LangextractAdapter(IInformationExtraction):
 
         # 从Langfuse获取提示词
         try:
-            base_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/langextract/prompt_for_entity_and_relation_extraction",
-                label="production"
-            )
-            entity_def_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/definition_for_entity",
-                label="production"
-            )
-            relation_def_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/definition_for_relation",
-                label="production"
-            )
-            # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
-            prompt = base_prompt.compile(
-                user_prompt=user_prompt,
-                schema=schema if schema else "",
-                entity_definition=entity_def_prompt.prompt,
-                relation_definition=relation_def_prompt.prompt
-            )
+            raise Exception("跳过从Langfuse获取提示词")
+            # base_prompt = self.langfuse.get_prompt(
+            #     name="kg_extraction/langextract/prompt_for_entity_and_relation_extraction",
+            #     label="production"
+            # )
+            # entity_def_prompt = self.langfuse.get_prompt(
+            #     name="kg_extraction/definition_for_entity",
+            #     label="production"
+            # )
+            # relation_def_prompt = self.langfuse.get_prompt(
+            #     name="kg_extraction/definition_for_relation",
+            #     label="production"
+            # )
+            # # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
+            # prompt = base_prompt.compile(
+            #     user_prompt=user_prompt,
+            #     schema=schema if schema else "",
+            #     entity_definition=entity_def_prompt.prompt,
+            #     relation_definition=relation_def_prompt.prompt
+            # )
         except Exception as e:
             print(f"从Langfuse获取提示词失败: {e}")
             print("尝试使用默认提示词")
+            # print("schema内容：")
+            # print(schema)
             if schema:
-                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, str(schema))
+                # 优化1-9：确保提示词实体schema在关系schema前
+                if isinstance(schema, dict) and "nodes" in schema:
+                    # 将 nodes 移到字典最前面
+                    schema = {"nodes": schema.pop("nodes"), **schema}
+                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, schema)
             else:
                 prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, "")
         try:
@@ -617,7 +624,7 @@ class LangextractAdapter(IInformationExtraction):
                 # print("prompt: " + prompt)
                 # print("examples: " + str(examples))
                 # print("-----------------------------------------")
-                # print("分块大小: " + str(config.max_char_buffer))
+                print("分块大小: " + str(config.max_char_buffer))
                 result = lx.extract(
                     text_or_documents=input_text,
                     prompt_description=prompt,

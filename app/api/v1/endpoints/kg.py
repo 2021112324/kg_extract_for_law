@@ -10,6 +10,7 @@ import logging
 import os
 from typing import List
 
+from dotenv import load_dotenv
 # FastAPI核心组件
 from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, Form
 # SQLAlchemy数据库ORM
@@ -32,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 # 创建API路由实例
 router = APIRouter()
+
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+env_path = os.path.join(project_root, '.env')
+load_dotenv(env_path)
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://60.205.171.106:7687")
+NEO4J_USERNAME = os.getenv("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "hit-wE8sR9wQ3pG1")
+NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
 
 # 获取图谱列表接口
@@ -827,7 +836,9 @@ async def kg_extract_by_local_dir(
         kg_id = kg_result.get("data").get("id")
         kg_graph_name = kg_result.get("data").get("graph_name")
         # 迁移图谱
-        neo4j_adapter = Neo4jAdapter()
+        neo4j_adapter = Neo4jAdapter(
+
+        )
         neo4j_adapter.connect()
         neo4j_adapter.merge_graphs("enterprise_regulations", kg_graph_name)
         neo4j_adapter.disconnect()

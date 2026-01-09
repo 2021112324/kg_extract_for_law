@@ -542,7 +542,7 @@ class KGService:
             self,
             kg_id,
             task_id,
-            kg_level: str = "DocumentLevel"
+            kg_level: str = "DomainLevel"
     ):
         """
         执行知识图谱任务编排
@@ -628,7 +628,7 @@ class KGService:
                     minio_files=minio_files,
                     user_prompt=user_prompt,
                     prompt_parameters=prompt_parameters,
-                    # kg_level
+                    kg_level=kg_level
                 )
                 # print("debug:" + str(result))
                 try:
@@ -637,14 +637,12 @@ class KGService:
 
                         # TODO: 保留图谱节点文件来源？
 
-
-                        self.graph_storage.connect()
-                        self.graph_storage.add_subgraph_with_merge(
-                            kg_data=result,
-                            graph_tag=graph_name,
-                            graph_level="DomainLevel"
+                        await self.save_kg_result_to_storage(
+                            result=result,
+                            graph_name=graph_name,
+                            kg_level=kg_level
                         )
-                        self.graph_storage.disconnect()
+
                         # 只有在result不为None时才设置计数
                         task.status = 2  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                         task.entity_count = len(result.get("nodes", []))
@@ -816,6 +814,48 @@ class KGService:
             },
             msg="获取任务状态成功"
         )
+
+    async def save_kg_result_to_storage(
+            self,
+            result: dict | list[dict],
+            graph_name: str,
+            kg_level: str = "DomainLevel",
+    ) -> bool:
+        """
+        将图谱保存到图数据库中
+        :param result:
+        :param graph_name:
+        :param kg_level:
+        :return:
+        """
+        if kg_level == "DomainLevel":
+            if not isinstance(result, dict):
+                raise ValueError("参数result必须是列表")
+            # TODO：生成文本节点，并建立节点关系
+            kg_data = self.process_source_text(result)
+            self.graph_storage.connect()
+            self.graph_storage.add_subgraph_with_merge(
+                kg_data=kg_data,
+                graph_tag=graph_name,
+                graph_level="DomainLevel"
+            )
+            self.graph_storage.disconnect()
+        elif kg_level == "DocumentLevel":
+            if not isinstance(result, list):
+                raise ValueError("参数result必须是列表")
+            self.graph_storage.connect()
+            for kg_data in result:
+                filename = kg_data.get("filename")
+                if not filename:
+                    filename = ""
+                # TODO: 处理文本溯源
+                self.graph_storage.add_subgraph_with_merge(
+                    kg_data=kg_data,
+                    graph_tag=graph_name,
+                    graph_level="DocumentLevel",
+                    filename=filename
+                )
+            self.graph_storage.disconnect()
 
     async def merge_kg_task(
             self,
@@ -1160,6 +1200,109 @@ class KGService:
         except Exception as e:
             print(f"检查文件是否存在时出错: {str(e)}")
             return False
+
+    @staticmethod
+    def process_source_text(
+            kg_data: dict,
+    ):
+        """
+        将kg_data中的溯源文本数据处理成节点和关系
+        :param kg_data:
+        :return:
+        """
+        if not kg_data:
+            return {}
+        text_classes = kg_data.get("text_classes")
+        if not text_classes:
+            return kg_data
+        text_id_set = set()
+        new_kg_data = {
+            "nodes": [],
+            "edges": []
+        }
+        for text_class in text_classes:
+            text_id = text_class.get("text_id")
+            if not text_id:
+                continue
+            new_text_id = f"text_{text_id}"
+            text_id_set.add(new_text_id)
+            text_filename = text_class.get("filename")
+            if isinstance(text_filename, list):
+                text_filename = text_filename[0]
+            new_kg_data["nodes"].append(
+                {
+                    "node_id": new_text_id,
+                    "node_name": text_filename,
+                    "node_type": "SourceText",
+                    "properties": {
+                        "text": text_class.get("text")
+                    }
+                }
+            )
+        nodes = kg_data.get("nodes")
+        edges = kg_data.get("edges")
+        if not isinstance(nodes, list) or not isinstance(edges, list):
+            return {}
+        for node in nodes:
+            node_id = node.get("node_id")
+            node_name = node.get("node_name")
+            node_type = node.get("node_type")
+            if not node_id or not node_type:
+                continue
+            properties = node.get("properties")
+            description = node.get("description")
+            new_kg_data["nodes"].append(
+                {
+                    "node_id": node_id,
+                    "node_name": node_name,
+                    "node_type": node_type,
+                    "properties": properties,
+                    "description": description
+                }
+            )
+            # 建立节点到原文本的关系
+            source_text_info = node.get("source_text_info")
+            if not source_text_info or not isinstance(source_text_info, dict):
+                continue
+            for text_id, text_id_info in source_text_info.items():
+                new_text_id = f"text_{text_id}"
+                if new_text_id not in text_id_set:
+                    continue
+                source_id = node_id
+                target_id = new_text_id
+                relation_type = "TracedFrom"
+                properties = {
+                    "定位": text_id_info
+                }
+                new_kg_data["edges"].append(
+                    {
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "relation_type": relation_type,
+                        "properties": properties,
+                        "weight": 1.0,
+                        "bidirectional": False,
+                    }
+                )
+        for edge in edges:
+            source_id = edge.get("source_id")
+            target_id = edge.get("target_id")
+            relation_type = edge.get("relation_type")
+            properties = edge.get("properties")
+            weight = edge.get("weight")
+            bidirectional = edge.get("bidirectional")
+            new_kg_data["edges"].append(
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "relation_type": relation_type,
+                    "properties": properties,
+                    "weight": weight,
+                    "bidirectional": bidirectional,
+                }
+            )
+            # TODO:是否添加关系溯源
+        return new_kg_data
 
     @staticmethod
     def sanitize_neo4j_property_name(name: str) -> str:

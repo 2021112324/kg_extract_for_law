@@ -82,8 +82,12 @@ class KGExtractService():
             minio_files: list,
             user_prompt: str,
             prompt_parameters: dict = None,
-    ):
+            kg_level: str = "DomainLevel",
+    ) -> dict | list[dict]:
         """
+        当kg_level为"DomainLevel"，将多个图谱合并，返回的结果类型为dict
+        当kg_level为"DocumentLevel", 保留每个文件的图谱和文件信息，返回的结果类型为list[dict]
+
         从解析文档(markdown)中抽取图谱
         1.测试大模型是否可用
         2.获取大模型配置
@@ -122,185 +126,208 @@ class KGExtractService():
             # with open(result_file_path, 'w', encoding='utf-8') as f:
             #     json.dump(result_list, f, ensure_ascii=False, indent=2, default=lambda obj: obj.__dict__)
 
-            # 合并所有结果中的节点和边
-            merged_nodes = {}
-            merged_edges = {}
-            # 改进1-7：使用字典合并节点和边
-            merged_text_classes = {}
-            for result in result_list:
-                if result is None:
-                    continue
-                try:
-                    formatted_json = json.dumps(
-                        result,
-                        indent=2,
-                        ensure_ascii=False,
-                        default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
-                    )
-                    print("提取结果的格式化JSON输出:")
-                    print(formatted_json)
-                except Exception as json_error:
-                    print("JSON格式化错误:", json_error)
-                # 合并节点
-                if "nodes" in result:
-                    for node in result["nodes"]:
-                        node_id = node.node_id  # 改为对象属性访问
-                        if node_id in merged_nodes:
-                            # 按规则合并节点
-                            existing_node = merged_nodes[node_id]
-                            existing_node["node_name"] = getattr(node, "node_name", existing_node["node_name"])
-                            existing_node["node_type"] = getattr(node, "node_type", existing_node["node_type"])
-                            existing_node["description"] = getattr(node, "description", existing_node["description"])
-                            node_filename = getattr(node, "filename", [])
-                            if isinstance(node_filename, str):
-                                node_filename = [node_filename]
-                            elif not isinstance(node_filename, list):
-                                node_filename = []
-                            existing_node_filename = existing_node.get("filename", [])
-                            if isinstance(existing_node_filename, str):
-                                existing_node_filename = [existing_node_filename]
-                            elif not isinstance(existing_node_filename, list):
-                                existing_node_filename = []
-                            # 合并两个列表并去重
-                            existing_node_filename.extend(node_filename)
-                            existing_node_filename = list(set(existing_node_filename))
+            if kg_level == "DomainLevel":
+                # 合并所有结果中的节点和边
+                merged_nodes = {}
+                merged_edges = {}
+                # 改进1-7：使用字典合并节点和边
+                merged_text_classes = {}
+                for result in result_list:
+                    if result is None:
+                        continue
+                    # try:
+                    #     formatted_json = json.dumps(
+                    #         result,
+                    #         indent=2,
+                    #         ensure_ascii=False,
+                    #         default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
+                    #     )
+                    #     print("提取结果的格式化JSON输出:")
+                    #     print(formatted_json)
+                    # except Exception as json_error:
+                    #     print("JSON格式化错误:", json_error)
+                    filename = result.get("filename")
+                    # 合并节点
+                    if "nodes" in result:
+                        for node in result["nodes"]:
+                            node_id = node.node_id  # 改为对象属性访问
+                            if node_id in merged_nodes:
+                                # 按规则合并节点
+                                existing_node = merged_nodes[node_id]
+                                existing_node["node_name"] = getattr(node, "node_name", existing_node["node_name"])
+                                existing_node["node_type"] = getattr(node, "node_type", existing_node["node_type"])
+                                existing_node["description"] = getattr(node, "description", existing_node["description"])
+                                node_filename = filename
+                                if isinstance(node_filename, str):
+                                    node_filename = [node_filename]
+                                elif not isinstance(node_filename, list):
+                                    node_filename = []
+                                existing_node_filename = existing_node.get("filename", [])
+                                if isinstance(existing_node_filename, str):
+                                    existing_node_filename = [existing_node_filename]
+                                elif not isinstance(existing_node_filename, list):
+                                    existing_node_filename = []
+                                # 合并两个列表并去重
+                                existing_node_filename.extend(node_filename)
+                                existing_node_filename = list(set(existing_node_filename))
 
-                            existing_node["filename"] = existing_node_filename
-                            # 合并properties，后者覆盖前者
-                            if hasattr(node, "properties") and node.properties:
-                                if "properties" not in existing_node:
-                                    existing_node["properties"] = {}
-                                existing_node["properties"].update(node.properties)
+                                existing_node["filename"] = existing_node_filename
+                                # 合并properties，后者覆盖前者
+                                if hasattr(node, "properties") and node.properties:
+                                    if "properties" not in existing_node:
+                                        existing_node["properties"] = {}
+                                    existing_node["properties"].update(node.properties)
 
-                            # 改进1-7:合并source_text_info
-                            if hasattr(node, "source_text_info") and node.source_text_info and isinstance(node.source_text_info, dict):
-                                if "source_text_info" not in existing_node:
-                                    existing_node["source_text_info"] = {}
-                                for text_id, new_positions in node.source_text_info.items():
-                                    if text_id in existing_node["source_text_info"]:
-                                        # 合并位置并去重
-                                        existing_positions = existing_node["source_text_info"][text_id]
-                                        # 方法1: 简单追加（如果不担心重复）
-                                        existing_positions.extend(new_positions)
-                                        # # 方法2: 去重（基于字典比较）
-                                        # # 将字典转为元组进行比较
-                                        # seen = set()
-                                        # unique_positions = []
-                                        # for pos in existing_positions + new_positions:
-                                        #     pos_tuple = tuple(sorted(pos.items()))
-                                        #     if pos_tuple not in seen:
-                                        #         seen.add(pos_tuple)
-                                        #         unique_positions.append(pos)
-                                        # existing_node["source_text_info"][text_id] = unique_positions
-                                    else:
-                                        # 新文档
-                                        existing_node["source_text_info"][text_id] = new_positions.copy()
+                                # 改进1-7:合并source_text_info
+                                if hasattr(node, "source_text_info") and node.source_text_info and isinstance(node.source_text_info, dict):
+                                    if "source_text_info" not in existing_node:
+                                        existing_node["source_text_info"] = {}
+                                    for text_id, new_positions in node.source_text_info.items():
+                                        if text_id in existing_node["source_text_info"]:
+                                            # 合并位置并去重
+                                            existing_positions = existing_node["source_text_info"][text_id]
+                                            # 方法1: 简单追加（如果不担心重复）
+                                            existing_positions.extend(new_positions)
+                                            # # 方法2: 去重（基于字典比较）
+                                            # # 将字典转为元组进行比较
+                                            # seen = set()
+                                            # unique_positions = []
+                                            # for pos in existing_positions + new_positions:
+                                            #     pos_tuple = tuple(sorted(pos.items()))
+                                            #     if pos_tuple not in seen:
+                                            #         seen.add(pos_tuple)
+                                            #         unique_positions.append(pos)
+                                            # existing_node["source_text_info"][text_id] = unique_positions
+                                        else:
+                                            # 新文档
+                                            existing_node["source_text_info"][text_id] = new_positions.copy()
+                            else:
+                                # 转换为字典格式存储
+                                # filename = getattr(node, "filename", [])
+                                if isinstance(filename, str):
+                                    filename = [filename]
+                                elif not isinstance(filename, list):
+                                    filename = []
+                                merged_nodes[node_id] = {
+                                    "node_id": node.node_id,
+                                    "node_name": node.node_name,
+                                    "node_type": node.node_type,
+                                    "description": node.description,
+                                    "filename": filename,
+                                    "properties": getattr(node, "properties", {}),
+                                    # 改进1-7:添加source_text_info
+                                    "source_text_info": getattr(node, "source_text_info", {})
+                                }
+                    # 合并边部分
+                    if "edges" in result:
+                        for edge in result["edges"]:
+                            source_id = edge.source_id  # 改为对象属性访问
+                            target_id = edge.target_id  # 改为对象属性访问
+                            relation_type = edge.relation_type  # 改为对象属性访问
+                            # 以source_id、target_id、relation_type三者综合为唯一标识符
+                            edge_key = (source_id, target_id, relation_type)
+                            if edge_key in merged_edges:
+                                # 按规则合并边
+                                existing_edge = merged_edges[edge_key]
+                                existing_edge["weight"] = getattr(edge, "weight", existing_edge["weight"])
+                                existing_edge["bidirectional"] = getattr(edge, "bidirectional",
+                                                                         existing_edge["bidirectional"])
+                                # 合并properties，后者覆盖前者
+                                if hasattr(edge, "properties") and edge.properties:
+                                    if "properties" not in existing_edge:
+                                        existing_edge["properties"] = {}
+                                    existing_edge["properties"].update(edge.properties)
+                                # 改进1-7:合并source_text_info
+                                if hasattr(edge, "source_text_info") and edge.source_text_info and isinstance(edge.source_text_info, dict):
+                                    if "source_text_info" not in existing_edge:
+                                        existing_edge["source_text_info"] = {}
+                                    for text_id, new_positions in edge.source_text_info.items():
+                                        if text_id in existing_edge["source_text_info"]:
+                                            # 合并位置并去重
+                                            existing_positions = existing_edge["source_text_info"][text_id]
+                                            # 方法1: 简单追加（如果不担心重复）
+                                            existing_positions.extend(new_positions)
+                                            # # 方法2: 去重（基于字典比较）
+                                            # # 将字典转为元组进行比较
+                                            # seen = set()
+                                            # unique_positions = []
+                                            # for pos in existing_positions + new_positions:
+                                            #     pos_tuple = tuple(sorted(pos.items()))
+                                            #     if pos_tuple not in seen:
+                                            #         seen.add(pos_tuple)
+                                            #         unique_positions.append(pos)
+                                            # existing_edge["source_text_info"][text_id] = unique_positions
+                                        else:
+                                            # 新文档
+                                            merged_edges[edge_key]["source_text_info"][text_id] = new_positions.copy()
+                            else:
+                                # 转换为字典格式存储
+                                merged_edges[edge_key] = {
+                                    "source_id": edge.source_id,
+                                    "target_id": edge.target_id,
+                                    "relation_type": edge.relation_type,
+                                    "weight": getattr(edge, "weight", 1.0),
+                                    "bidirectional": getattr(edge, "bidirectional", False),
+                                    "properties": getattr(edge, "properties", {}),
+                                    # 改进1-7:添加source_text_info
+                                    "source_text_info": getattr(edge, "source_text_info", {})
+                                }
+                    # 合并文本节点
+                    if "text_classes" in result:
+                        text_classes = result["text_classes"]
+                        if not isinstance(text_classes, list):
+                            text_classes = []
+                        for text_class in text_classes:
+                            text_id = getattr(text_class, "text_id", None)
+                            text = getattr(text_class, "text", None)
+                            if not text_id or not text:
+                                continue
+                            if text_id in merged_text_classes:
+                                existing_text = merged_text_classes[text_id].get("text", "")
+                                # 只在新文本更长时才更新
+                                if len(text) > len(existing_text):
+                                    merged_text_classes[text_id]["text"] = text
+                                if "filename" in merged_text_classes[text_id] and filename not in merged_text_classes[text_id]["filename"]:
+                                    merged_text_classes[text_id]["filename"].append(filename)
 
-                        else:
-                            # 转换为字典格式存储
-                            filename = getattr(node, "filename", [])
-                            if isinstance(filename, str):
-                                filename = [filename]
-                            elif not isinstance(filename, list):
-                                filename = []
-                            merged_nodes[node_id] = {
-                                "node_id": node.node_id,
-                                "node_name": node.node_name,
-                                "node_type": node.node_type,
-                                "description": node.description,
-                                "filename": filename,
-                                "properties": getattr(node, "properties", {}),
-                                # 改进1-7:添加source_text_info
-                                "source_text_info": getattr(node, "source_text_info", {})
-                            }
-
-                # 合并边部分
-                if "edges" in result:
-                    for edge in result["edges"]:
-                        source_id = edge.source_id  # 改为对象属性访问
-                        target_id = edge.target_id  # 改为对象属性访问
-                        relation_type = edge.relation_type  # 改为对象属性访问
-                        # 以source_id、target_id、relation_type三者综合为唯一标识符
-                        edge_key = (source_id, target_id, relation_type)
-                        if edge_key in merged_edges:
-                            # 按规则合并边
-                            existing_edge = merged_edges[edge_key]
-                            existing_edge["weight"] = getattr(edge, "weight", existing_edge["weight"])
-                            existing_edge["bidirectional"] = getattr(edge, "bidirectional",
-                                                                     existing_edge["bidirectional"])
-                            # 合并properties，后者覆盖前者
-                            if hasattr(edge, "properties") and edge.properties:
-                                if "properties" not in existing_edge:
-                                    existing_edge["properties"] = {}
-                                existing_edge["properties"].update(edge.properties)
-
-                            # 改进1-7:合并source_text_info
-                            if hasattr(edge, "source_text_info") and edge.source_text_info and isinstance(edge.source_text_info, dict):
-                                if "source_text_info" not in existing_edge:
-                                    existing_edge["source_text_info"] = {}
-                                for text_id, new_positions in edge.source_text_info.items():
-                                    if text_id in existing_edge["source_text_info"]:
-                                        # 合并位置并去重
-                                        existing_positions = existing_edge["source_text_info"][text_id]
-                                        # 方法1: 简单追加（如果不担心重复）
-                                        existing_positions.extend(new_positions)
-                                        # # 方法2: 去重（基于字典比较）
-                                        # # 将字典转为元组进行比较
-                                        # seen = set()
-                                        # unique_positions = []
-                                        # for pos in existing_positions + new_positions:
-                                        #     pos_tuple = tuple(sorted(pos.items()))
-                                        #     if pos_tuple not in seen:
-                                        #         seen.add(pos_tuple)
-                                        #         unique_positions.append(pos)
-                                        # existing_edge["source_text_info"][text_id] = unique_positions
-                                    else:
-                                        # 新文档
-                                        merged_edges[edge_key]["source_text_info"][text_id] = new_positions.copy()
-
-                        else:
-                            # 转换为字典格式存储
-                            merged_edges[edge_key] = {
-                                "source_id": edge.source_id,
-                                "target_id": edge.target_id,
-                                "relation_type": edge.relation_type,
-                                "weight": getattr(edge, "weight", 1.0),
-                                "bidirectional": getattr(edge, "bidirectional", False),
-                                "properties": getattr(edge, "properties", {}),
-                                # 改进1-7:添加source_text_info
-                                "source_text_info": getattr(edge, "source_text_info", {})
-                            }
-                # 合并文本节点
-                if "text_classes" in result:
-                    text_classes = result["text_classes"]
-                    if not isinstance(text_classes, list):
-                        text_classes = []
-                    for text_class in text_classes:
-                        text_id = getattr(text_class, "text_id", None)
-                        text = getattr(text_class, "text", None)
-                        if not text_id or not text:
-                            continue
-                        if text_id in merged_text_classes:
-                            existing_text = merged_text_classes[text_id].get("text", "")
-                            # 只在新文本更长时才更新
-                            if len(text) > len(existing_text):
-                                merged_text_classes[text_id]["text"] = text
-                        else:
-                            merged_text_classes[text_id] = {
-                                "text_id": text_id,
-                                "text": text
-                            }
-
-                # TODO:处理多溯源（可能用不到）
-
-            # 转换为列表格式返回
-            final_result = {
-                "nodes": list(merged_nodes.values()),
-                "edges": list(merged_edges.values()),
-                # 改进1-7：增加文本类
-                "text_classes": list(merged_text_classes.values())
-            }
-            return final_result
+                            else:
+                                merged_text_classes[text_id] = {
+                                    "text_id": text_id,
+                                    "text": text,
+                                    "filename": [filename]
+                                }
+                    # TODO:处理多溯源（可能用不到）
+                # 转换为列表格式返回
+                final_result = {
+                    "nodes": list(merged_nodes.values()),
+                    "edges": list(merged_edges.values()),
+                    # 改进1-7：增加文本类
+                    "text_classes": list(merged_text_classes.values())
+                }
+                return final_result
+            elif kg_level == "DocumentLevel":
+                final_result = []
+                for result in result_list:
+                    nodes = []
+                    edges = []
+                    text_classes = []
+                    if "nodes" in result:
+                        for node in result["nodes"]:
+                            nodes.append(node.model_dump())
+                    if "edges" in result:
+                        for edge in result["edges"]:
+                            edges.append(edge.model_dump())
+                    if "text_classes" in result:
+                        for text_class in result["text_classes"]:
+                            text_classes.append(text_class.model_dump())
+                    final_result.append({
+                        "nodes": nodes,
+                        "edges": edges,
+                        "text_classes": text_classes
+                    })
+                return final_result
+            else:
+                logging.error("kg_level不支持!")
         except Exception as e:
             print(f"从解析文档(markdown)中抽取图谱时出错: {str(e)}")
             # 打印完整的 traceback 信息

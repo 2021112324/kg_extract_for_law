@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     
     # 服务器启动配置
     HOST: str = "0.0.0.0"
-    PORT: int = 8090
+    PORT: int = 8091
     RELOAD: bool = True
 
     # Swift / Fine-tune 配置

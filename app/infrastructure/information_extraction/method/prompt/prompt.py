@@ -1,16 +1,30 @@
+import json
+
 from app.infrastructure.information_extraction.method.prompt.defination import definition_for_entity, \
     definition_for_relation
 
 
 def get_prompt_for_entity_and_relation_extraction(
         user_prompt: str,
-        schema: str
+        schema: str | dict
 ):
-    if schema:
+    if schema and isinstance(schema, str):
         temp_schema = """
 # 提取内容
 本体任务提取的实体schema如下：
 """ + schema
+    elif schema and isinstance(schema, dict):
+        nodes_schema = schema.get("nodes", "")
+        edges_schema = schema.get("edges", "")
+        if not isinstance(nodes_schema, str):
+            nodes_schema = json.dumps(nodes_schema, ensure_ascii=False, indent=2)
+        if not isinstance(edges_schema, str):
+            edges_schema = json.dumps(edges_schema, ensure_ascii=False, indent=2)
+        temp_schema = """
+# 提取内容
+本体任务提取的实体schema如下：
+""" + nodes_schema + """
+""" + edges_schema
     else:
         temp_schema = ""
     return user_prompt + """
