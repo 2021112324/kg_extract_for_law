@@ -3,6 +3,7 @@
 """
 import logging
 import os
+import uuid
 
 from dotenv import load_dotenv
 
@@ -507,7 +508,9 @@ class GraphExtraction:
         """
         if node_id:
             return node_id
-        return f"{node_type}_{node_name}"
+        # 使用UUID确保生成的ID是唯一的
+        unique_uuid = uuid.uuid4()
+        return f"{node_type}_{node_name}_{unique_uuid}"
 
     async def _split_to_sync_extract(
             self,

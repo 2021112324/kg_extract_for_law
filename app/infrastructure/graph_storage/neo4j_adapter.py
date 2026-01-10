@@ -83,6 +83,7 @@ class Neo4jAdapter(IGraphStorage):
     def _sanitize_properties(self, properties: Dict[str, Any]) -> Dict[str, Any]:
         """
         对属性字典进行清洗，处理所有属性名中的特殊字符
+        同时确保所有属性值都是Neo4j支持的类型（原始类型或数组）
 
         Args:
             properties: 原始属性字典
@@ -96,7 +97,21 @@ class Neo4jAdapter(IGraphStorage):
         sanitized_properties = {}
         for prop_key, prop_value in properties.items():
             sanitized_key = self._sanitize_property_name(prop_key)
-            sanitized_properties[sanitized_key] = prop_value
+            # 处理属性值，确保为Neo4j支持的类型
+            if prop_value is None:
+                continue
+            elif isinstance(prop_value, (str, int, float, bool)):
+                sanitized_properties[sanitized_key] = prop_value
+            elif isinstance(prop_value, (list, tuple)):
+                # 检查列表中的元素是否都是原始类型
+                if all(isinstance(item, (str, int, float, bool)) for item in prop_value):
+                    sanitized_properties[sanitized_key] = list(prop_value)
+                else:
+                    # 如果列表包含复杂类型，则将整个列表转为字符串
+                    sanitized_properties[sanitized_key] = str(list(prop_value))
+            else:
+                # 对于其他复杂类型（如dict），转换为字符串
+                sanitized_properties[sanitized_key] = str(prop_value)
         return sanitized_properties
 
     def connect(
@@ -335,30 +350,32 @@ class Neo4jAdapter(IGraphStorage):
                             )
                             # 应该分别处理不同的filename来源
                             node_filename = node.get('filename')
-                            if node_filename:
-                                # 处理节点中的filename（假定是字符串）
-                                query += (
-                                    ", n.filename = CASE "
-                                    "WHEN n.filename IS NULL THEN [$node_filename] "
-                                    "WHEN NOT $node_filename IN n.filename THEN n.filename + [$node_filename] "
-                                    "ELSE n.filename END "
-                                )
-                                params['node_filename'] = node_filename
+                            if node_filename is not None:
+                                # 处理节点中的filename（直接转换为字符串）
+                                node_filename_str = str(node_filename)  # 直接使用str()转换
+
+                                if node_filename_str and node_filename_str != "None":  # 确保有实际值且不是"None"字符串
+                                    query += (
+                                        ", n.filename = CASE "
+                                        "WHEN n.filename IS NULL THEN [$node_filename_param] "
+                                        "ELSE apoc.coll.union(n.filename, [$node_filename_param]) "
+                                        "END "
+                                    )
+                                    params['node_filename_param'] = [node_filename_str]
                             elif filename:
-                                # 处理函数参数中的filename（假定是字符串）
-                                query += (
-                                    ", n.filename = CASE "
-                                    "WHEN n.filename IS NULL THEN [$param_filename] "
-                                    "WHEN NOT $param_filename IN n.filename THEN n.filename + [$param_filename] "
-                                    "ELSE n.filename END "
-                                )
-                                params['param_filename'] = filename
-
-
+                                # 处理函数参数中的filename（转换为字符串）
+                                filename_str = str(filename) if filename else ""
+                                if filename_str and filename_str != "None":
+                                    query += (
+                                        ", n.filename = CASE "
+                                        "WHEN n.filename IS NULL THEN [$param_filename] "
+                                        "ELSE apoc.coll.union(n.filename, [$param_filename]) "
+                                        "END "
+                                    )
+                                    params['param_filename'] = [filename_str]
                             # 处理其他属性 - 简化策略，直接设置
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
-
                         else:
                             # 默认处理方式
                             query = (
@@ -366,21 +383,18 @@ class Neo4jAdapter(IGraphStorage):
                                 "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag, "
                                 "n.graph_level = $graph_level "
                             )
-
                             if filename:
-                                query += (
-                                    ", n.filename = CASE "
-                                    "WHEN n.filename IS NULL THEN [$filename] "
-                                    "WHEN NOT $filename IN n.filename THEN n.filename + [$filename] "
-                                    "ELSE n.filename END "
-                                )
-
+                                filename_str = str(filename) if filename else ""
+                                if filename_str and filename_str != "None":
+                                    query += (
+                                        ", n.filename = CASE "
+                                        "WHEN n.filename IS NULL THEN [$filename] "
+                                        "ELSE apoc.coll.union(n.filename, [$filename]) "
+                                        "END "
+                                    )
+                                    params['filename'] = [filename_str]
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
-
-                        if filename:
-                            params['filename'] = filename
-
                         tx.run(query, params)
 
                     # 处理边
@@ -388,12 +402,21 @@ class Neo4jAdapter(IGraphStorage):
                         subject_id = edge.get('source_id')
                         predicate = edge.get('relation_type')
                         object_id = edge.get('target_id')
-
                         relation_label = edge.get('properties', {}).get('label', '') if edge.get('properties') else ''
-
                         # 处理关系名
                         safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)
-
+                        # 处理边的属性
+                        edge_properties = edge.get('properties', {}) or {}
+                        sanitized_edge_properties = self._sanitize_properties(edge_properties)
+                        # 准备边的参数
+                        params = {
+                            'subject_id': subject_id,
+                            'object_id': object_id,
+                            'graph_tag': graph_tag,
+                            'relation_label': relation_label,
+                            'graph_level': graph_level,
+                            **sanitized_edge_properties
+                        }
                         if merge_strategy == 1:
                             query = (
                                 f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
@@ -401,15 +424,21 @@ class Neo4jAdapter(IGraphStorage):
                                 "ON CREATE SET r.graph_tag = $graph_tag, r.label = $relation_label, "
                                 "r.graph_level = $graph_level "
                             )
-
-                            if filename:
-                                query += (
-                                    ", r.filename = CASE "
-                                    "WHEN r.filename IS NULL THEN [$filename] "
-                                    "WHEN NOT $filename IN r.filename THEN r.filename + [$filename] "
-                                    "ELSE r.filename END "
-                                )
-
+                            # 处理边的filename（直接转换为字符串）
+                            edge_filename = edge.get('filename')
+                            if edge_filename is not None:
+                                edge_filename_str = str(edge_filename)  # 直接使用str()转换
+                                if edge_filename_str and edge_filename_str != "None":
+                                    query += (
+                                        ", r.filename = CASE "
+                                        "WHEN r.filename IS NULL THEN [$edge_filename_param] "
+                                        "ELSE apoc.coll.union(r.filename, [$edge_filename_param]) "
+                                        "END "
+                                    )
+                                    params['edge_filename_param'] = [edge_filename_str]
+                            # 设置边的其他属性
+                            for prop_key, prop_value in sanitized_edge_properties.items():
+                                query += f", r.`{prop_key}` = ${prop_key} "
                         else:
                             query = (
                                 f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
@@ -417,28 +446,33 @@ class Neo4jAdapter(IGraphStorage):
                                 "SET r.graph_tag = $graph_tag, r.label = $relation_label, "
                                 "r.graph_level = $graph_level "
                             )
-
-                            if filename:
+                            # 处理边的filename（直接转换为字符串）
+                            edge_filename = edge.get('filename')
+                            if edge_filename is not None:
+                                edge_filename_str = str(edge_filename)  # 直接使用str()转换
+                                if edge_filename_str and edge_filename_str != "None":
+                                    query += (
+                                        ", r.filename = CASE "
+                                        "WHEN r.filename IS NULL THEN [$edge_filename_param] "
+                                        "ELSE apoc.coll.union(r.filename, [$edge_filename_param]) "
+                                        "END "
+                                    )
+                                    params['edge_filename_param'] = [edge_filename_str]
+                            # 设置边的其他属性
+                            for prop_key, prop_value in sanitized_edge_properties.items():
+                                query += f", r.`{prop_key}` = ${prop_key} "
+                        # 处理整体filename（统一转换为字符串）
+                        if filename:
+                            filename_str = str(filename) if filename else ""
+                            if filename_str and filename_str != "None":
                                 query += (
                                     ", r.filename = CASE "
                                     "WHEN r.filename IS NULL THEN [$filename] "
-                                    "WHEN NOT $filename IN r.filename THEN r.filename + [$filename] "
-                                    "ELSE r.filename END "
+                                    "ELSE apoc.coll.union(r.filename, [$filename]) "
+                                    "END "
                                 )
-
+                                params['filename'] = [filename_str]
                         query += " RETURN r"
-
-                        params = {
-                            'subject_id': subject_id,
-                            'object_id': object_id,
-                            'graph_tag': graph_tag,
-                            'relation_label': relation_label,
-                            'graph_level': graph_level
-                        }
-
-                        if filename:
-                            params['filename'] = filename
-
                         tx.run(query, **params)
 
                     tx.commit()
