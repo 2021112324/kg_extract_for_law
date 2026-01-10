@@ -314,6 +314,18 @@ class Neo4jAdapter(IGraphStorage):
                 with session.begin_transaction() as tx:
                     # 处理节点
                     for node in kg_data.get('nodes', []):
+                        # 处理其他属性 - 简化策略，直接设置
+                        properties = node.get('properties', {}) or {}
+                        sanitized_properties = self._sanitize_properties(properties)
+                        # 准备参数
+                        params = {
+                            'id': node.get('node_id'),
+                            'name': node.get('node_name'),
+                            'label': node.get('node_type'),
+                            'graph_tag': graph_tag,
+                            'graph_level': graph_level,
+                            **sanitized_properties
+                        }
                         if merge_strategy == 1:
                             # 修复CASE表达式语法
                             query = (
@@ -344,8 +356,6 @@ class Neo4jAdapter(IGraphStorage):
 
 
                             # 处理其他属性 - 简化策略，直接设置
-                            properties = node.get('properties', {}) or {}
-                            sanitized_properties = self._sanitize_properties(properties)
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
 
@@ -365,20 +375,8 @@ class Neo4jAdapter(IGraphStorage):
                                     "ELSE n.filename END "
                                 )
 
-                            properties = node.get('properties', {}) or {}
-                            sanitized_properties = self._sanitize_properties(properties)
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
-
-                        # 准备参数
-                        params = {
-                            'id': node.get('node_id'),
-                            'name': node.get('node_name'),
-                            'label': node.get('node_type'),
-                            'graph_tag': graph_tag,
-                            'graph_level': graph_level,
-                            **sanitized_properties
-                        }
 
                         if filename:
                             params['filename'] = filename
