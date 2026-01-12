@@ -98,16 +98,6 @@ class IGraphStorage(ABC):
         """检查连接状态"""
         pass
 
-    @abstractmethod
-    def add_subgraph(
-            self,
-            kg_data: dict,
-            graph_name: str,
-            **kwargs
-    ) -> bool:
-        """添加子图"""
-        pass
-
     def add_subgraph_with_merge(self, kg_data, graph_tag, **kwargs):
         """添加子图并合并"""
         pass

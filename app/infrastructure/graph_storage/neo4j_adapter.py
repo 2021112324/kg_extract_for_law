@@ -178,134 +178,6 @@ class Neo4jAdapter(IGraphStorage):
             logger.error(f"Neo4j连接测试失败: {str(e)}")
             return False
 
-    def add_subgraph(
-            self,
-            kg_data: dict,
-            graph_tag: str,
-            graph_level: str = "DomainLevel",
-            filename: str = None,
-    ) -> bool:
-        """
-        向neo4j数据库添加子图，将知识图谱数据保存到Neo4j数据库中，使用标签进行数据隔离
-
-        Args:
-            kg_data: 知识图谱数据，包含nodes和edges
-            graph_tag: 图谱标签
-            filename: 文件名.txt，用于文档级分类
-            graph_level: 存储层级 (DocumentLevel, DomainLevel, GlobalLevel)
-        """
-        # print("1111")
-        if graph_level not in ['DocumentLevel', 'DomainLevel', 'GlobalLevel']:
-            raise ValueError("Invalid graph_level")
-        if graph_level == 'DocumentLevel' and filename is None:
-            raise ValueError("filename is required when graph_level is DocumentLevel")
-        try:
-            with self.driver.session(database=self.database) as session:
-                # 开始事务
-                with session.begin_transaction() as tx:
-                    # 先创建所有实体节点，添加graph_tag属性和标签
-                    for node in kg_data.get('nodes', []):
-                        # 构建Cypher查询语句，使用MERGE确保相同ID的实体不会重复创建
-                        query = (
-                            f"MERGE (n:{graph_tag} {{id: $id}}) "
-                            "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag"
-                        )
-
-                        # 处理filename属性 - 以去重方式向列表增加新值
-                        if filename:
-                            query += ", n.filename = CASE " \
-                                     "WHEN n.filename IS NULL THEN [$filename] " \
-                                     "WHEN NOT $filename IN n.filename THEN n.filename + $filename " \
-                                     "ELSE n.filename END"
-
-                        # 处理graph_level属性 - 以去重方式向列表增加新值
-                        query += ", n.graph_level = CASE " \
-                                 "WHEN n.graph_level IS NULL THEN [$graph_level] " \
-                                 "WHEN NOT $graph_level IN n.graph_level THEN n.graph_level + $graph_level " \
-                                 "ELSE n.graph_level END"
-
-                        # 添加或更新其他属性 - 相同属性名取新值
-                        properties = node.properties or {}
-                        # 使用预处理函数清洗属性名
-                        sanitized_properties = self._sanitize_properties(properties)
-                        for prop_key, prop_value in sanitized_properties.items():
-                            query += f", n.`{prop_key}` = ${prop_key}"
-
-                        # 准备参数
-                        params = {
-                            'id': node.node_id,
-                            'name': node.node_name,
-                            'label': node.node_type,
-                            'graph_tag': graph_tag,
-                            'graph_level': graph_level,
-                            **sanitized_properties
-                        }
-
-                        # 添加文件名参数（如果提供）
-                        if filename:
-                            params['filename'] = filename
-
-                        tx.run(query, params)
-
-                    # 创建关系
-                    for edge in kg_data.get('edges', []):
-                        subject_id = edge.source_id
-                        predicate = edge.relation_type
-                        object_id = edge.target_id
-
-                        # 获取关系的label属性（如果存在）
-                        relation_label = edge.properties.get('label', '') if edge.properties else ''
-
-                        # 处理关系名，确保符合Cypher命名规范
-                        safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)
-
-                        # 使用MERGE确保相同节点间的关系不会重复创建
-                        query = (
-                            f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
-                            f"MERGE (a)-[r:{safe_predicate}]->(b) "
-                        )
-
-                        # 添加属性设置
-                        query += "SET r.graph_tag = $graph_tag, r.label = $relation_label"
-
-                        # 处理graph_level属性
-                        query += ", r.graph_level = CASE " \
-                                 "WHEN r.graph_level IS NULL THEN [$graph_level] " \
-                                 "WHEN NOT $graph_level IN r.graph_level THEN r.graph_level + $graph_level " \
-                                 "ELSE r.graph_level END"
-
-                        # 处理filename属性
-                        if filename:
-                            query += ", r.filename = CASE " \
-                                     "WHEN r.filename IS NULL THEN [$filename] " \
-                                     "WHEN NOT $filename IN r.filename THEN r.filename + $filename " \
-                                     "ELSE r.filename END"
-
-                        query += " RETURN r"
-
-                        params = {
-                            'subject_id': subject_id,
-                            'object_id': object_id,
-                            'graph_tag': graph_tag,
-                            'relation_label': relation_label,
-                            'graph_level': graph_level
-                        }
-
-                        # 添加文件名参数（如果提供）
-                        if filename:
-                            params['filename'] = filename
-
-                        tx.run(query, **params)
-
-                    # 提交事务
-                    tx.commit()
-
-                print(f"知识图谱数据已成功保存到数据库 {self.database}，使用标签 {graph_tag}")
-                return True
-        except Exception as e:
-            logger.error(f"保存知识图谱数据到数据库失败: {str(e)}")
-            return False
-
     def add_subgraph_with_merge(
             self,
             kg_data: dict,
@@ -315,8 +187,8 @@ class Neo4jAdapter(IGraphStorage):
             merge_strategy: int = 1
     ) -> bool:
         """
-        # TODO：待测试
         向neo4j数据库添加子图，使用合并策略
+        # TODO：或许可优化同义合并，但困难
         """
 
         if graph_level not in ['DocumentLevel', 'DomainLevel', 'GlobalLevel']:
