@@ -761,7 +761,7 @@ class Neo4jAdapter(IGraphStorage):
 
                     tx.commit()
 
-            # self.delete_subgraph(source_graph_tag)
+            self.delete_subgraph(source_graph_tag)
             return self.get_subgraph_stats(target_graph_tag)
         except Neo4jError as e:
             logger.error(e)

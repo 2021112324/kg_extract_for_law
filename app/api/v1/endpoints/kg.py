@@ -8,6 +8,7 @@ import importlib.util
 import json
 import logging
 import os
+import subprocess
 from typing import List
 
 from dotenv import load_dotenv
@@ -827,7 +828,7 @@ async def kg_extract_by_local_dir(
         # prompt_dict["schema"] = prompt_dict.get("schema", [])
         # prompt_dict["examples"] = prompt_dict.get("examples", [])
         # 创建kg
-        print(prompt_dict)
+        # print(prompt_dict)
         new_kg = KGCreate(
             name=file_dir.split("/")[-1],
             description="",
@@ -839,9 +840,9 @@ async def kg_extract_by_local_dir(
         neo4j_adapter = Neo4jAdapter(
 
         )
-        neo4j_adapter.connect()
-        neo4j_adapter.merge_graphs("law_top_rules", kg_graph_name)
-        neo4j_adapter.disconnect()
+        # neo4j_adapter.connect()
+        # neo4j_adapter.merge_graphs("law_top_rules", kg_graph_name)
+        # neo4j_adapter.disconnect()
         files = os.listdir(file_dir)
         file_contents = []
         for file in files:

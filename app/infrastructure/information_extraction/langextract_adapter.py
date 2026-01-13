@@ -10,6 +10,8 @@ import time
 import traceback
 import uuid
 from typing import Optional
+import threading
+import queue
 
 # 添加项目根目录到Python路径，解决相对导入问题
 current_file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +45,58 @@ from .method.prompt.prompt import get_prompt_for_entity_extraction, get_prompt_f
 from .method.prompt.schema import general_entity_schema, general_relation_schema, general_schema
 
 logger = logging.getLogger(__name__)
+
+
+class TimeoutException(Exception):
+    """超时异常类"""
+    pass
+
+
+def run_with_timeout(func, args=(), kwargs=None, timeout=1800):
+    """
+    在指定时间内运行函数，超时则抛出异常
+
+    Args:
+        func: 要执行的函数
+        args: 函数的位置参数
+        kwargs: 函数的关键字参数
+        timeout: 超时时间（秒），默认30分钟=1800秒
+
+    Returns:
+        函数执行结果
+
+    Raises:
+        TimeoutException: 超时异常
+    """
+    if kwargs is None:
+        kwargs = {}
+
+    result_queue = queue.Queue()
+
+    def target():
+        try:
+            result = func(*args, **kwargs)
+            result_queue.put(('success', result))
+        except Exception as e:
+            result_queue.put(('error', e))
+
+    thread = threading.Thread(target=target)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout)
+
+    if thread.is_alive():
+        # 线程仍在运行，表示超时
+        raise TimeoutException(f"函数执行超时：超过{timeout}秒")
+
+    if not result_queue.empty():
+        status, result = result_queue.get()
+        if status == 'error':
+            raise result
+        return result
+    else:
+        # 队列为空，可能是线程异常退出
+        raise TimeoutException(f"函数执行超时：超过{timeout}秒")
 
 
 class LangextractAdapter(IInformationExtraction):
@@ -625,26 +679,33 @@ class LangextractAdapter(IInformationExtraction):
                 # print("examples: " + str(examples))
                 # print("-----------------------------------------")
                 print("分块大小: " + str(config.max_char_buffer))
-                result = lx.extract(
-                    text_or_documents=input_text,
-                    prompt_description=prompt,
-                    examples=examples,
-                    model_id=config.model_name,
-                    api_key=config.api_key,
-                    language_model_type=config.language_model_type,
-                    format_type=config.format_type,
-                    max_char_buffer=config.max_char_buffer,
-                    temperature=config.temperature,
-                    fence_output=config.fence_output,
-                    use_schema_constraints=config.use_schema_constraints,
-                    batch_length=config.batch_length,
-                    max_workers=config.max_workers,
-                    additional_context=config.additional_context,
-                    resolver_params=config.resolver_params,
-                    debug=config.debug,
-                    model_url=config.api_url,
-                    extraction_passes=config.extraction_passes,
-                    language_model_params=config.config
+
+                # 使用带超时的函数执行lx.extract
+                result = run_with_timeout(
+                    lx.extract,
+                    args=(),
+                    kwargs={
+                        'text_or_documents': input_text,
+                        'prompt_description': prompt,
+                        'examples': examples,
+                        'model_id': config.model_name,
+                        'api_key': config.api_key,
+                        'language_model_type': config.language_model_type,
+                        'format_type': config.format_type,
+                        'max_char_buffer': config.max_char_buffer,
+                        'temperature': config.temperature,
+                        'fence_output': config.fence_output,
+                        'use_schema_constraints': config.use_schema_constraints,
+                        'batch_length': config.batch_length,
+                        'max_workers': config.max_workers,
+                        'additional_context': config.additional_context,
+                        'resolver_params': config.resolver_params,
+                        'debug': config.debug,
+                        'model_url': config.api_url,
+                        'extraction_passes': config.extraction_passes,
+                        'language_model_params': config.config
+                    },
+                    timeout=1800  # 30分钟超时
                 )
 
                 print(f"第 {attempt + 1} 次尝试成功!")
@@ -654,23 +715,32 @@ class LangextractAdapter(IInformationExtraction):
                 else:
                     result_list = list(result)
                 document_dict_list = self.convert_document_to_dict_with_text(result_list)
-                # try:
-                #     formatted_json = json.dumps(
-                #         document_dict_list,
-                #         indent=2,
-                #         ensure_ascii=False,
-                #         default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
-                #     )
-                #     # print("提取结果的格式化JSON输出:")
-                #     # print(formatted_json)
-                #     logger.info("提取结果的JSON输出:")
-                #     logger.info(formatted_json)
-                # except Exception as json_error:
-                #     logger.warning("格式化JSON输出失败:")
+                try:
+                    formatted_json = json.dumps(
+                        document_dict_list,
+                        indent=2,
+                        ensure_ascii=False,
+                        default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
+                    )
+                    # print("提取结果的格式化JSON输出:")
+                    # print(formatted_json)
+                    logger.info("提取结果的JSON输出:")
+                    logger.info(formatted_json)
+                except Exception as json_error:
+                    logger.warning("格式化JSON输出失败:")
                     # print(f"格式化JSON输出失败: {json_error}")
                 return document_dict_list
                 # return self.convert_annotated_document_to_dict(result)
 
+            except TimeoutException as e:
+                print(f"第 {attempt + 1} 次尝试超时: {e}")
+                last_exception = e
+                # 如果不是最后一次尝试，等待一段时间再重试
+                if attempt < self.max_retries - 1:
+                    # 指数退避策略: 等待 2^attempt 秒
+                    wait_time = 30 * (2 ** attempt)
+                    print(f"等待 {wait_time} 秒后进行下一次尝试...")
+                    time.sleep(wait_time)
             except Exception as e:
                 last_exception = e
                 print(f"第 {attempt + 1} 次尝试失败: {e}")
@@ -683,12 +753,12 @@ class LangextractAdapter(IInformationExtraction):
                     print(f"等待 {wait_time} 秒后进行下一次尝试...")
                     time.sleep(wait_time)
 
-                    # 特殊处理API限流错误
-                    if "429" in str(e) or "rate limit" in str(e).lower():
-                        # 对于限流错误，等待更长时间
-                        additional_wait = 5 * (attempt + 1)
-                        print(f"检测到限流错误，额外等待 {additional_wait} 秒...")
-                        time.sleep(additional_wait)
+                # 特殊处理API限流错误
+                if "429" in str(e) or "rate limit" in str(e).lower():
+                    # 对于限流错误，等待更长时间
+                    additional_wait = 5 * (attempt + 1)
+                    print(f"检测到限流错误，额外等待 {additional_wait} 秒...")
+                    time.sleep(additional_wait)
 
         # 所有重试都失败
         print(f"所有 {self.max_retries} 次尝试都失败了。")

@@ -1116,6 +1116,66 @@ class KGService:
         except Exception as e:
             raise e
 
+    async def merge_all_graph(
+            self,
+            kg_id,
+            db: Session,
+    ):
+        """
+        将所有子图合并到总图谱
+
+        :param kg_id:
+        :param db:
+        :return:
+        """
+        try:
+            kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+            if not kg:
+                return not_found_response(
+                    entity="知识图谱"
+                )
+            task_list = db.query(KGExtractionTask).filter(
+                KGExtractionTask.kg_id == kg_id,
+                KGExtractionTask.del_flag == 0
+            ).all()
+            error_list = []
+            for task in task_list:
+                self.graph_storage.connect()
+                result = self.graph_storage.merge_graphs(
+                    task.graph_name,
+                    kg.graph_name,
+                )
+                if not result:
+                    return error_response(
+                        code=400,
+                        msg="合并图谱失败"
+                    )
+                self.graph_storage.delete_subgraph(task.graph_name)
+                self.graph_storage.disconnect()
+                if result.error:
+                    error_list.append(task.id)
+                    continue
+            # 使用项目根目录的相对路径
+            error_file_path = project_root + "/tests/error_task_list.txt"
+
+            try:
+                with open(error_file_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(str(task_id) for task_id in error_list))
+                    print(f"已输出错误任务列表到 {error_file_path}")
+            except IOError as e:
+                print(f"写入错误任务列表失败: {e}")
+            self.graph_storage.connect()
+            graph_status = self.graph_storage.get_subgraph_stats(kg.graph_name)
+            return success_response(
+                data={
+                    "graph_status": graph_status,
+                    "error_list": error_list
+                },
+                msg="合并图谱成功"
+            )
+        except Exception as e:
+            raise e
+
     async def create_kg_task_by_file_with_merge(
             self,
             kg_id,
@@ -1172,7 +1232,8 @@ class KGService:
         except IOError as e:
             print(f"写入错误文件列表失败: {e}")
 
-        merge_result = await self.merge_all_graph_with_match(kg_id, db)
+        # merge_result = await self.merge_all_graph_with_match(kg_id, db)
+        merge_result = await self.merge_all_graph(kg_id, db)
         if merge_result.get("code") != 200:
             return merge_result
         return success_response(
@@ -1227,8 +1288,11 @@ class KGService:
             new_text_id = f"text_{text_id}"
             text_id_set.add(new_text_id)
             text_filename = text_class.get("filename")
-            if isinstance(text_filename, list):
+            while isinstance(text_filename, list) and len(text_filename) > 0:
                 text_filename = text_filename[0]
+                # 如果最终还是列表但长度为0，则设置为空字符串
+            if isinstance(text_filename, list):
+                text_filename = ""
             temp_text_filename = self.sanitize_neo4j_filename(text_filename)
             new_kg_data["nodes"].append(
                 {
