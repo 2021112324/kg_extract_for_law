@@ -659,6 +659,9 @@ class LangextractAdapter(IInformationExtraction):
 
         # 初始化重试参数
         last_exception = None
+        # 初始化重试提示词变化标记
+        timeout_flag = False
+        failed_flag = False
 
         for attempt in range(self.max_retries):
             try:
@@ -740,6 +743,10 @@ class LangextractAdapter(IInformationExtraction):
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
                     print(f"等待 {wait_time} 秒后进行下一次尝试...")
+                    # 变化提示词以避免模型记忆
+                    if not timeout_flag:
+                        prompt = self._generate_failed_prompt(prompt, "timeout", e)
+                        timeout_flag = True
                     time.sleep(wait_time)
             except Exception as e:
                 last_exception = e
@@ -751,6 +758,10 @@ class LangextractAdapter(IInformationExtraction):
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
                     print(f"等待 {wait_time} 秒后进行下一次尝试...")
+                    # 变化提示词以避免模型记忆
+                    if not failed_flag:
+                        prompt = self._generate_failed_prompt(prompt, "failed", e)
+                        failed_flag = True
                     time.sleep(wait_time)
 
                 # 特殊处理API限流错误
@@ -990,6 +1001,33 @@ class LangextractAdapter(IInformationExtraction):
                     source_texts=source_texts
                 )
         return list(merged_entities_map.values())
+
+    @staticmethod
+    def _generate_failed_prompt(
+            prompt,
+            reason,
+            error
+    ):
+        """
+        抽取失败时生成重试的提示词
+        :param prompt:
+        :return:
+        """
+        if reason == "timeout":
+            final_prompt = """
+    警告！上次问答超时，请你简化推理思考过程，重新生成答案。
+    """ + prompt
+        elif reason == "failed":
+            final_prompt = """
+    警告！上次问答结果失败或不可用，报错：
+    """ + str(error) + """
+    请您检查输入是否符合要求，重新生成答案。
+    """ + prompt
+        else:
+            logger.warning(f"抽取失败时产生未知原因，继续使用原提示词")
+            final_prompt = prompt
+        return final_prompt
+
 
     def merge_text_class(
             self,

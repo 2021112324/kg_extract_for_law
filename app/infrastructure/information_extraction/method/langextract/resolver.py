@@ -30,6 +30,12 @@ import operator
 from absl import logging
 import yaml
 
+try:
+    from json_repair import repair_json
+except ImportError:
+    repair_json = None
+    logging.warning("json_repair not available. Install it with 'pip install json-repair' to enable JSON repair functionality.")
+
 from . import data
 from . import exceptions
 from . import schema
@@ -214,6 +220,33 @@ class Resolver(AbstractResolver):
     Raises:
         ResolverParsingError: If the content within the string cannot be parsed
         due to formatting errors, or if the parsed content is not as expected.
+    ## resolve 函数功能解释
+
+    ### 主要功能
+    `resolve` 函数是 LangExtract 库中的核心解析器，用于处理包含 YAML/JSON 格式抽取数据的文本内容，并将其转换为标准化的抽取对象序列。
+
+    ### 输入参数
+    - `input_text`: 待处理的输入文本（包含YAML/JSON格式的抽取数据）
+    - `suppress_parse_errors`: 控制是否抑制解析错误（True则记录错误并继续执行，False则抛出异常）
+    - `**kwargs`: 额外的关键字参数
+
+    ### 处理流程
+    1. **日志记录**: 开始解析过程并记录输入文本信息
+    2. **文本解析**: 调用 `string_to_extraction_data` 方法将输入文本转换为抽取数据格式
+    3. **错误处理**: 捕获解析异常，根据 `suppress_parse_errors` 参数决定是否继续执行
+    4. **数据处理**: 调用 `extract_ordered_extractions` 方法处理抽取数据
+    5. **结果返回**: 返回处理后的 `data.Extraction` 对象序列
+
+    ### 返回值
+    - 类型: `Sequence[data.Extraction]`
+    - 内容: 经过解析和处理的标准化抽取对象序列
+
+    ### 异常处理
+    - 抛出 `ResolverParsingError` 异常当内容无法解析或格式错误时
+    - 支持错误抑制模式，允许在解析失败时继续执行流程
+
+    ### 应用场景
+    主要用于知识图谱信息抽取流程中，将非结构化的文本数据解析为结构化的抽取对象，便于后续处理和存储。
     """
     logging.info("Starting resolver process for input text.")
     logging.debug("Input Text: %s", input_text)
@@ -320,6 +353,42 @@ class Resolver(AbstractResolver):
 
     Returns:
         The parsed Python object (dict or list).
+    # 函数定义
+    _extract_and_parse_content 函数用于从输入字符串中提取并解析YAML或JSON格式的内容。
+    # 功能说明
+    此函数是一个辅助函数，用于根据分隔符提取和解析内容，并将其解析为YAML或JSON格式。它首先检查输入字符串是否为空或非字符串类型，然后根据配置决定是否从三重反引号标记中提取内容，最后将内容解析为Python对象。
+    # 参数
+    self: 类实例引用
+    input_string: 待处理的输入字符串
+    # 返回值
+    解析后的Python对象（字典或列表）
+    类型为 Mapping[str, ExtractionValueType] 或 Sequence[Mapping[str, ExtractionValueType]]
+    # 处理流程
+    记录开始解析的日志信息
+    验证输入字符串是否非空且为字符串类型
+    如果 fence_output 为真，则：
+    查找开始标记（``` + 格式类型值）和结束标记（```）
+    提取标记之间的内容并去除首尾空白
+    如果 fence_output 为假，则直接使用整个输入字符串作为内容
+    根据 format_type 属性选择解析器：
+    如果是YAML格式，使用 yaml.safe_load 解析
+    否则使用 json.loads 解析
+    解析成功时记录调试日志
+    解析失败时进行异常处理，记录详细的错误信息
+    返回解析后的数据
+    # 异常处理
+    ValueError: 当输入字符串为空、非字符串类型或不包含有效标记时抛出
+    ResolverParsingError: 当解析内容失败时抛出
+    yaml.YAMLError: YAML解析错误时捕获并处理
+    json.JSONDecodeError: JSON解析错误时捕获并处理
+    # 错误诊断功能
+    详细记录JSON解析错误的位置、列号和消息
+    显示错误位置附近的上下文内容
+    输出待解析内容的前200个字符用于调试
+    检查并报告控制字符问题
+    记录完整的待解析内容以便调试
+    # 应用场景
+    主要用于从大语言模型输出的包含代码块标记的文本中提取真正的YAML/JSON内容，并将其解析为Python数据结构。
     """
     logging.info("Starting string parsing.")
     logging.debug("input_string: %s", input_string)
@@ -356,6 +425,18 @@ class Resolver(AbstractResolver):
         logging.error("Error context: %s", repr(content[max(0, e.pos-30):e.pos+30]))
         # 输出完整内容的前200个字符，便于调试
         logging.error("Full content (first 200 chars): %s", repr(content[:200]))
+        
+        # TODO: 优化1-14 如果是JSON格式且json_repair可用，则尝试修复
+        if self.format_type == data.FormatType.JSON and repair_json is not None:
+          logging.info("Attempting to repair JSON content...")
+          try:
+            repaired_content = repair_json(content)
+            parsed_data = json.loads(repaired_content)
+            logging.info("Successfully parsed repaired JSON content.")
+            return parsed_data
+          except Exception as repair_error:
+            logging.error("Failed to repair and parse JSON: %s", str(repair_error))
+        
         # 检查特殊字符
         for i, char in enumerate(content):
           if ord(char) < 32 and char not in ['\n', '\r', '\t']:
@@ -389,6 +470,35 @@ class Resolver(AbstractResolver):
     Raises:
         ResolverParsingError: If the content within the string cannot be parsed.
         ValueError: If the input is invalid or does not contain expected format.
+    ## string_to_extraction_data 函数功能解释
+
+    ### 主要功能
+    `string_to_extraction_data` 函数用于将包含 YAML 或 JSON 格式的字符串解析为抽取数据，是信息抽取流程中的关键解析组件。
+
+    ### 输入参数
+    - `input_string`: 包含YAML或JSON格式内容的字符串，通常用三重反引号包围
+    ### 处理流程
+    内容提取: 调用 _extract_and_parse_content 方法从输入字符串中提取并解析内容
+    数据验证: 验证解析结果是否为字典类型
+    键值检查: 确认内容包含 'extractions' 键
+    列表验证: 验证 'extractions' 键对应的值是否为列表类型
+    元素校验: 遍历列表中的每个项目，验证它们是否为字典类型
+    类型检查: 检查每个项目的键值对类型（键必须为字符串，值必须为允许的类型）
+    ### 返回值
+    类型: Sequence[Mapping[str, ExtractionValueType]]
+    内容: 解析后的抽取对象序列，每个对象都是字符串到抽取值类型的映射
+    ### 异常处理
+    抛出 ResolverParsingError 当内容格式不符合预期时
+    抛出 ValueError 当输入无效时
+    ### 数据验证规则
+    解析后的内容必须是字典类型
+    字典必须包含 'extractions' 键
+    'extractions' 键对应的值必须是列表
+    列表中的每个元素必须是字典
+    字典中的键必须是字符串类型
+    字典中的值必须是字符串、整数、浮点数、字典或None类型
+    ### 应用场景
+    主要用于将大语言模型输出的YAML/JSON格式文本转换为结构化的抽取数据，为后续的信息抽取处理提供标准化输入。
     """
     parsed_data = self._extract_and_parse_content(input_string)
 

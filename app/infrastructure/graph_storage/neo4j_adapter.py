@@ -187,8 +187,8 @@ class Neo4jAdapter(IGraphStorage):
             merge_strategy: int = 1
     ) -> bool:
         """
+        # TODO：待测试
         向neo4j数据库添加子图，使用合并策略
-        # TODO：或许可优化同义合并，但困难
         """
 
         if graph_level not in ['DocumentLevel', 'DomainLevel', 'GlobalLevel']:
@@ -230,24 +230,27 @@ class Neo4jAdapter(IGraphStorage):
                                     query += (
                                         ", n.filename = CASE "
                                         "WHEN n.filename IS NULL THEN [$node_filename_param] "
-                                        "ELSE apoc.coll.union(n.filename, [$node_filename_param]) "
-                                        "END "
+                                        "WHEN NOT $node_filename_param IN n.filename THEN n.filename + [$node_filename_param] "
+                                        "ELSE n.filename END "
                                     )
-                                    params['node_filename_param'] = [node_filename_str]
-                            elif filename:
-                                # 处理函数参数中的filename（转换为字符串）
+                                    params['node_filename_param'] = node_filename_str
+
+                            # 处理整体filename（转换为字符串）
+                            if filename:
                                 filename_str = str(filename) if filename else ""
                                 if filename_str and filename_str != "None":
                                     query += (
                                         ", n.filename = CASE "
                                         "WHEN n.filename IS NULL THEN [$param_filename] "
-                                        "ELSE apoc.coll.union(n.filename, [$param_filename]) "
-                                        "END "
+                                        "WHEN NOT $param_filename IN n.filename THEN n.filename + [$param_filename] "
+                                        "ELSE n.filename END "
                                     )
-                                    params['param_filename'] = [filename_str]
+                                    params['param_filename'] = filename_str
+
                             # 处理其他属性 - 简化策略，直接设置
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
+
                         else:
                             # 默认处理方式
                             query = (
@@ -255,18 +258,35 @@ class Neo4jAdapter(IGraphStorage):
                                 "SET n.name = $name, n.label = $label, n.graph_tag = $graph_tag, "
                                 "n.graph_level = $graph_level "
                             )
+
+                            # 处理节点自身的filename（在默认策略下）
+                            node_filename = node.get('filename')
+                            if node_filename is not None:
+                                node_filename_str = str(node_filename)
+                                if node_filename_str and node_filename_str != "None":
+                                    query += (
+                                        ", n.filename = CASE "
+                                        "WHEN n.filename IS NULL THEN [$node_filename_param] "
+                                        "WHEN NOT $node_filename_param IN n.filename THEN n.filename + [$node_filename_param] "
+                                        "ELSE n.filename END "
+                                    )
+                                    params['node_filename_param'] = node_filename_str
+
+                            # 处理整体filename（转换为字符串）
                             if filename:
                                 filename_str = str(filename) if filename else ""
                                 if filename_str and filename_str != "None":
                                     query += (
                                         ", n.filename = CASE "
                                         "WHEN n.filename IS NULL THEN [$filename] "
-                                        "ELSE apoc.coll.union(n.filename, [$filename]) "
-                                        "END "
+                                        "WHEN NOT $filename IN n.filename THEN n.filename + [$filename] "
+                                        "ELSE n.filename END "
                                     )
-                                    params['filename'] = [filename_str]
+                                    params['filename'] = filename_str
+
                             for prop_key, prop_value in sanitized_properties.items():
                                 query += f", n.`{prop_key}` = ${prop_key} "
+
                         tx.run(query, params)
 
                     # 处理边
@@ -274,12 +294,16 @@ class Neo4jAdapter(IGraphStorage):
                         subject_id = edge.get('source_id')
                         predicate = edge.get('relation_type')
                         object_id = edge.get('target_id')
+
                         relation_label = edge.get('properties', {}).get('label', '') if edge.get('properties') else ''
+
                         # 处理关系名
                         safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)
+
                         # 处理边的属性
                         edge_properties = edge.get('properties', {}) or {}
                         sanitized_edge_properties = self._sanitize_properties(edge_properties)
+
                         # 准备边的参数
                         params = {
                             'subject_id': subject_id,
@@ -289,6 +313,7 @@ class Neo4jAdapter(IGraphStorage):
                             'graph_level': graph_level,
                             **sanitized_edge_properties
                         }
+
                         if merge_strategy == 1:
                             query = (
                                 f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
@@ -296,6 +321,7 @@ class Neo4jAdapter(IGraphStorage):
                                 "ON CREATE SET r.graph_tag = $graph_tag, r.label = $relation_label, "
                                 "r.graph_level = $graph_level "
                             )
+
                             # 处理边的filename（直接转换为字符串）
                             edge_filename = edge.get('filename')
                             if edge_filename is not None:
@@ -304,13 +330,15 @@ class Neo4jAdapter(IGraphStorage):
                                     query += (
                                         ", r.filename = CASE "
                                         "WHEN r.filename IS NULL THEN [$edge_filename_param] "
-                                        "ELSE apoc.coll.union(r.filename, [$edge_filename_param]) "
-                                        "END "
+                                        "WHEN NOT $edge_filename_param IN r.filename THEN r.filename + [$edge_filename_param] "
+                                        "ELSE r.filename END "
                                     )
-                                    params['edge_filename_param'] = [edge_filename_str]
+                                    params['edge_filename_param'] = edge_filename_str
+
                             # 设置边的其他属性
                             for prop_key, prop_value in sanitized_edge_properties.items():
                                 query += f", r.`{prop_key}` = ${prop_key} "
+
                         else:
                             query = (
                                 f"MATCH (a:{graph_tag} {{id: $subject_id}}), (b:{graph_tag} {{id: $object_id}}) "
@@ -318,6 +346,7 @@ class Neo4jAdapter(IGraphStorage):
                                 "SET r.graph_tag = $graph_tag, r.label = $relation_label, "
                                 "r.graph_level = $graph_level "
                             )
+
                             # 处理边的filename（直接转换为字符串）
                             edge_filename = edge.get('filename')
                             if edge_filename is not None:
@@ -326,13 +355,15 @@ class Neo4jAdapter(IGraphStorage):
                                     query += (
                                         ", r.filename = CASE "
                                         "WHEN r.filename IS NULL THEN [$edge_filename_param] "
-                                        "ELSE apoc.coll.union(r.filename, [$edge_filename_param]) "
-                                        "END "
+                                        "WHEN NOT $edge_filename_param IN r.filename THEN r.filename + [$edge_filename_param] "
+                                        "ELSE r.filename END "
                                     )
-                                    params['edge_filename_param'] = [edge_filename_str]
+                                    params['edge_filename_param'] = edge_filename_str
+
                             # 设置边的其他属性
                             for prop_key, prop_value in sanitized_edge_properties.items():
                                 query += f", r.`{prop_key}` = ${prop_key} "
+
                         # 处理整体filename（统一转换为字符串）
                         if filename:
                             filename_str = str(filename) if filename else ""
@@ -340,11 +371,13 @@ class Neo4jAdapter(IGraphStorage):
                                 query += (
                                     ", r.filename = CASE "
                                     "WHEN r.filename IS NULL THEN [$filename] "
-                                    "ELSE apoc.coll.union(r.filename, [$filename]) "
-                                    "END "
+                                    "WHEN NOT $filename IN r.filename THEN r.filename + [$filename] "
+                                    "ELSE r.filename END "
                                 )
-                                params['filename'] = [filename_str]
+                                params['filename'] = filename_str
+
                         query += " RETURN r"
+
                         tx.run(query, **params)
 
                     tx.commit()
@@ -551,6 +584,78 @@ class Neo4jAdapter(IGraphStorage):
                 edge_count=0,
                 error=str(e)
             )
+
+    def get_graph_full_stats(self, graph_tag: str) -> dict:
+        """获取子图统计信息"""
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return {
+                "nodes_count": 0,
+                "edges_count": 0,
+                "properties_count": 0,
+                "properties_count_without_inherent": 0
+            }
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 获取节点数量
+                result = session.run("""
+                    MATCH (n)
+                    WHERE $graph_tag IN labels(n)
+                    RETURN count(n) as nodeCount
+                """, graph_tag=graph_tag)
+                node_count = result.single()["nodeCount"]
+
+                # 获取关系数量
+                result = session.run("""
+                    MATCH (n)-[r]->(m)
+                    WHERE $graph_tag IN labels(n) AND $graph_tag IN labels(m)
+                    RETURN count(r) as edgeCount
+                """, graph_tag=graph_tag)
+                edge_count = result.single()["edgeCount"]
+
+                # 获取所有属性数量（包括固有属性）
+                result = session.run("""
+                    MATCH (n)
+                    WHERE $graph_tag IN labels(n)
+                    WITH collect(keys(n)) as all_keys
+                    UNWIND all_keys as keys_list
+                    RETURN sum(size(keys_list)) as totalProperties
+                """, graph_tag=graph_tag)
+                record = result.single()
+                properties_count = record["totalProperties"] if record and record["totalProperties"] else 0
+
+                # 获取关系属性数量
+                result = session.run("""
+                    MATCH ()-[r]->()
+                    WHERE $graph_tag IN labels(startNode(r)) AND $graph_tag IN labels(endNode(r))
+                    WITH collect(keys(r)) as all_rel_keys
+                    UNWIND all_rel_keys as keys_list
+                    RETURN sum(size(keys_list)) as totalRelProperties
+                """, graph_tag=graph_tag)
+                rel_record = result.single()
+                rel_properties_count = rel_record["totalRelProperties"] if rel_record and rel_record["totalRelProperties"] else 0
+
+                # 总属性数（节点属性+关系属性）
+                total_properties = properties_count + rel_properties_count
+
+                total_non_inherent_props = total_properties - node_count * 6
+
+                return {
+                    "nodes_count": node_count,
+                    "edges_count": edge_count,
+                    "properties_count": total_properties,
+                    "properties_count_without_inherent": total_non_inherent_props
+                }
+        except Neo4jError as e:
+            logger.error(f"获取Neo4j子图统计信息失败: {str(e)}")
+            return {
+                "nodes_count": 0,
+                "edges_count": 0,
+                "properties_count": 0,
+                "properties_count_without_inherent": 0
+            }
+
 
     def create_vector_index(self, name: str, dimension: int = 1536) -> bool:
         pass

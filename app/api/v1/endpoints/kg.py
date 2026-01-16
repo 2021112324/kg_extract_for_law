@@ -507,6 +507,43 @@ async def merge_kg_task(
         )
 
 
+@router.post("/kgs/{kg_id}/tasks/{task_id}/merge_all")
+async def merge_all_kg_task(
+        kg_id,  # 图谱ID参数，从URL路径中提取
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+    将已完成的图谱任务结果合并到主图谱中
+
+    Args:
+        kg_id (str/int): 知识图谱唯一标识符
+        db (Session): 数据库会话对象，通过依赖注入自动获取
+
+    Returns:
+        dict: 合并操作结果的响应
+            {
+                "code": 200,
+                "msg": "合并成功",
+                "data": null
+            }
+
+    Raises:
+        Exception: 当合并任务失败时返回错误响应
+    """
+    try:
+        return await kg_service.merge_all_graph(
+            kg_id=kg_id,
+            merge_flag=True,
+            db=db
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"合并任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+
 # 将已完成的图谱任务结果合并到主图谱中，并将节点和文件节点关联，包括两步：
 # 1. 获取与子图匹配的文件节点，供前端确认
 # 2. 将单个子图与文件节点关联，合并图谱

@@ -5,7 +5,7 @@ if __name__ == "__main__":
     # 创建知识图谱
     neo4j_adapter.connect()
     print("开始导入数据...")
-    neo4j_adapter.merge_graphs("专利_kg_533208308668956672", "enterprise_regulations")
+    neo4j_adapter.merge_graphs("专利案例库_kg_533965669998264320", "part_of_cases")
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")

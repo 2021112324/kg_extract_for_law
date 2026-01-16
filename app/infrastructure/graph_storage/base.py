@@ -113,6 +113,11 @@ class IGraphStorage(ABC):
         pass
 
     @abstractmethod
+    def get_graph_full_stats(self, graph_tag: str) -> dict:
+        """获取图全量统计信息"""
+        pass
+
+    @abstractmethod
     def create_vector_index(self, name: str, dimension: int = 1536) -> bool:
         """创建向量索引"""
         pass
