@@ -21,10 +21,13 @@ BATCH_LENGTH = int(os.getenv("BATCH_LENGTH", "5"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
 MAX_CHAR_BUFFER = int(os.getenv("MAX_CHAR_BUFFER", "5000"))
 
-LENGTH_THRESHOLD = 3000
+LENGTH_THRESHOLD = 0
 
-MAX_CHUNK_SIZE = int(os.getenv("MAX_CHUNK_SIZE", "5000"))
-OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", "500"))
+# MAX_CHUNK_SIZE = int(os.getenv("MAX_CHUNK_SIZE", "5000"))
+MAX_CHUNK_SIZE = 30000
+# OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", "500"))
+OVERLAP_SIZE = 2000
+
 
 TIMEOUT = int(os.getenv("TIMEOUT", "300"))
 

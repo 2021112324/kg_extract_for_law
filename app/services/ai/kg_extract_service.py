@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -62,7 +63,8 @@ class KGExtractService():
         )
         self.graph_extract = GraphExtraction(
             ModelConfig(
-                model_name="qwen-long",
+                # model_name="qwen-long",# 45分钟
+                model_name="qwen3-max", #25分钟
                 api_key="sk-742c7c766efd4426bd60a269259aafaf",
                 api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
             )
@@ -301,7 +303,7 @@ class KGExtractService():
                 final_result = {
                     "nodes": list(merged_nodes.values()),
                     "edges": list(merged_edges.values()),
-                    # 改进1-7：增加文本类
+                    # 改进1-7：增加文本类，
                     "text_classes": list(merged_text_classes.values())
                 }
                 return final_result
@@ -323,6 +325,7 @@ class KGExtractService():
                     final_result.append({
                         "nodes": nodes,
                         "edges": edges,
+                        # TODO：暂时放弃溯源
                         "text_classes": text_classes
                     })
                 return final_result
@@ -357,7 +360,9 @@ class KGExtractService():
             minio_file_name = minio_path
         try:
             # 先获取文件元数据，判断文件大小
-            file_metadata = self.file_storage.get_file_metadata(bucket_name, minio_file_name)
+            file_metadata = await asyncio.get_event_loop().run_in_executor(
+                None, self.file_storage.get_file_metadata, bucket_name, minio_file_name
+            )
             file_size = file_metadata.size if file_metadata else None
             
             # 如果文件过大，使用分块处理
@@ -393,7 +398,11 @@ class KGExtractService():
         """
         正常方式处理文件（小文件）
         """
-        response = self.file_storage.get_file_stream(bucket_name, file_name)
+        # 使用线程池执行同步的文件读取操作，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        # 在线程池中执行 get_file_stream 操作
+        response = await loop.run_in_executor(None, self.file_storage.get_file_stream, bucket_name, file_name)
+
         if not response:
             print(f"无法从MinIO获取文件: {bucket_name}/{file_name}")
             return None
@@ -433,7 +442,11 @@ class KGExtractService():
         分块处理大文件，避免内存溢出
         每块处理完后释放内存，最后合并结果
         """
-        response = self.file_storage.get_file_stream(bucket_name, file_name)
+        # 使用线程池执行同步的文件读取操作，避免阻塞事件循环
+        loop = asyncio.get_event_loop()
+        # 在线程池中执行 get_file_stream 操作
+        response = await loop.run_in_executor(None, self.file_storage.get_file_stream, bucket_name, file_name)
+
         if not response:
             print(f"无法从MinIO获取文件: {bucket_name}/{file_name}")
             return None

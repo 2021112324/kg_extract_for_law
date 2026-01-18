@@ -1,5 +1,8 @@
+import asyncio
 import os
 import re
+from asyncio import Semaphore
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional, List
@@ -82,10 +85,10 @@ class KGService:
             kgs = []
             for kg in result:
                 kgs.append({
-                   "id": kg["id"],
-                   "name": kg["name"],
-                   "description": kg["description"],
-                   "status": kg["status"],
+                    "id": kg["id"],
+                    "name": kg["name"],
+                    "description": kg["description"],
+                    "status": kg["status"],
                 })
             return success_response(
                 data={
@@ -192,7 +195,8 @@ class KGService:
                 )
 
             # 查询该知识图谱下的任务总数
-            total_query = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.del_flag == 0)
+            total_query = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id,
+                                                            KGExtractionTask.del_flag == 0)
             total = total_query.count()
 
             # 分页查询任务列表
@@ -239,10 +243,11 @@ class KGService:
                     entity="知识图谱",
                 )
             # 2. 遍历该图谱对应的每个任务，判断任务状态，若有任务状态为creating，则执行终止任务相关操作（该步骤暂时省略）
-            tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.del_flag == 0).all()
+            tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id,
+                                                      KGExtractionTask.del_flag == 0).all()
             for task in tasks:
                 # 判断任务状态
-                if task.status == 1:     # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                if task.status == 1:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                     # TODO: 执行终止任务相关操作
                     print(f"任务 {task.id} 正在创建中，暂不支持终止操作")
                     return error_response(
@@ -305,7 +310,7 @@ class KGService:
                 )
             # 2. 判断任务状态
             # 3. 若任务状态为running，则执行终止任务相关操作（该步骤暂时省略）
-            if task.status == 1:        # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+            if task.status == 1:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 # TODO: 执行终止任务相关操作
                 return error_response(
                     code=409,
@@ -520,7 +525,8 @@ class KGService:
         重新执行知识图谱任务
         """
         try:
-            task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id, KGExtractionTask.del_flag == 0).first()
+            task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id,
+                                                     KGExtractionTask.del_flag == 0).first()
             if not task:
                 return not_found_response(
                     entity="任务"
@@ -577,7 +583,8 @@ class KGService:
                     entity="知识图谱",
                 )
             # 3. 查询任务是否存在
-            task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id, KGExtractionTask.del_flag == 0).first()
+            task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id,
+                                                     KGExtractionTask.del_flag == 0).first()
             if not task:
                 return not_found_response(
                     entity="任务",
@@ -620,7 +627,7 @@ class KGService:
                     return not_found_response(
                         entity="文件",
                     )
-            if task.status == 4:        # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+            if task.status == 4:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 task.retry_count = task.retry_count + 1
             try:
                 # 6.执行抽取任务
@@ -658,7 +665,7 @@ class KGService:
                 # task.progress = 100
             except Exception as e:
                 print(f"执行任务时出错: {str(e)}")
-                task.status = 4             # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                task.status = 4  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 # task.message = "任务执行失败"
                 raise e
             finally:
@@ -689,6 +696,145 @@ class KGService:
             data=result,
             msg="任务执行完毕"
         )
+
+    async def execute_batch_kg_task(
+            self,
+            kg_id,
+            task_id,
+            kg_level: str = "DomainLevel"
+    ):
+        """
+        执行知识图谱任务编排
+        注意：现在为每个任务创建独立的数据库会话以支持并发
+        """
+        loop = asyncio.get_event_loop()
+
+        # 将整个数据库操作包装在线程池中执行
+        def run_db_operation():
+            db_gen = get_db()
+            db = next(db_gen)
+
+            try:
+                # 1. 查询任图谱是否存在
+                kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+                if not kg:
+                    return not_found_response(
+                        entity="知识图谱",
+                    )
+
+                # 3. 查询任务是否存在
+                task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id,
+                                                         KGExtractionTask.del_flag == 0).first()
+                if not task:
+                    return not_found_response(
+                        entity="任务",
+                    )
+
+                # 获取任务图谱名称
+                graph_name = task.graph_name
+                # 获取任务提示词
+                user_prompt = task.prompt
+                prompt_parameters = {}
+
+                if KG_EXTRACT_METHOD == "langextract":
+                    examples = task.parameters.get("examples", [])
+                    prompt_parameters["examples"] = examples
+                    kg_schema = task.parameters.get("schema", [])
+                    prompt_parameters["schema"] = kg_schema
+
+                # 4. 获取任务对应的md文件路径列表
+                task_files = db.query(KGFile).filter(KGFile.kg_id == kg_id, KGFile.task_id == task_id).all()
+
+                if task_files:
+                    minio_files = []
+                    for file in task_files:
+                        file_minio_path = file.minio_path
+                        filename = file.filename
+                        if not file_minio_path or not filename:
+                            continue
+                        minio_files.append(
+                            {
+                                "minio_path": file_minio_path,
+                                "filename": filename
+                            }
+                        )
+                else:
+                    minio_files = []
+
+                # 5. 判断文件列表中各文件是否存在minio中的md文件（同步方式）
+                for minio_file in minio_files:
+                    minio_path = minio_file.get("minio_path", "")
+                    if not self._is_md_exist_in_minio_sync(minio_path):  # 需要同步版本
+                        return not_found_response(
+                            entity="文件",
+                        )
+
+                if task.status == 4:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                    task.retry_count = task.retry_count + 1
+
+                # 6.执行抽取任务 - 这部分已经在异步上下文中，需要特殊处理
+                # 注意：这里的数据库操作仍需同步执行
+                result = asyncio.run_coroutine_threadsafe(
+                    self.kg_extract_service.extract_kg_from_minio_paths(
+                        minio_files=minio_files,
+                        user_prompt=user_prompt,
+                        prompt_parameters=prompt_parameters,
+                        kg_level=kg_level
+                    ),
+                    loop
+                ).result()
+
+                try:
+                    # 7. 将抽取出的图谱保存到图数据库中
+                    if result:
+                        # 保存到图数据库也需要异步处理
+                        asyncio.run_coroutine_threadsafe(
+                            self.save_kg_result_to_storage_new(
+                                result=result,
+                                graph_name=graph_name,
+                                kg_level=kg_level
+                            ),
+                            loop
+                        ).result()
+
+                        # 只有在result不为None时才设置计数
+                        task.status = 2  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                        task.entity_count = len(result.get("nodes", []))
+                        task.relation_count = len(result.get("edges", []))
+                    else:
+                        task.status = 2
+                        task.entity_count = 0
+                        task.relation_count = 0
+
+                    db.commit()
+
+                except Exception as e:
+                    print(f"保存图谱数据时出错: {str(e)}")
+                    db.rollback()
+                    raise e
+            except Exception as e:
+                print(f"处理任务时出错: {str(e)}")
+                db.rollback()
+                raise e
+            finally:
+                try:
+                    db.close()
+                except Exception as e:
+                    print(f"关闭数据库会话时出错: {str(e)}")
+                try:
+                    next(db_gen)
+                except StopIteration:
+                    pass  # 正常情况，生成器已耗尽
+
+            return success_response(
+                data=result,
+                msg="任务执行完毕"
+            )
+
+        # 使用线程池执行同步的数据库操作
+        with ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, run_db_operation)
+            return result
 
     @staticmethod
     async def get_kg_task_detail(
@@ -831,8 +977,9 @@ class KGService:
         if kg_level == "DomainLevel":
             if not isinstance(result, dict):
                 raise ValueError("参数result必须是列表")
-            # TODO：生成文本节点，并建立节点关系
-            kg_data = self.process_source_text(result)
+            # TODO：生成文本节点，并建立节点关系，暂时放弃溯源
+            # kg_data = self.process_source_text(result)
+            kg_data = result
             self.graph_storage.connect()
             self.graph_storage.add_subgraph_with_merge(
                 kg_data=kg_data,
@@ -857,6 +1004,62 @@ class KGService:
                 )
             self.graph_storage.disconnect()
 
+    async def save_kg_result_to_storage_new(
+            self,
+            result: dict | list[dict],
+            graph_name: str,
+            kg_level: str = "DomainLevel",
+    ) -> bool:
+        """
+        将图谱保存到图数据库中（异步版本）
+        """
+        loop = asyncio.get_event_loop()
+
+        if kg_level == "DomainLevel":
+            if not isinstance(result, dict):
+                raise ValueError("参数result必须是字典")
+
+            kg_data = result
+            # 使用线程池执行同步的图数据库操作
+            with ThreadPoolExecutor() as executor:
+                await loop.run_in_executor(
+                    executor,
+                    lambda: (
+                        self.graph_storage.connect(),
+                        self.graph_storage.add_subgraph_with_merge(
+                            kg_data=kg_data,
+                            graph_tag=graph_name,
+                            graph_level="DomainLevel"
+                        ),
+                        self.graph_storage.disconnect()
+                    )
+                )
+        elif kg_level == "DocumentLevel":
+            if not isinstance(result, list):
+                raise ValueError("参数result必须是列表")
+
+            # 对于DocumentLevel，可以并发处理每个文档的保存
+            async def save_single_doc(kg_data):
+                filename = kg_data.get("filename") or ""
+                with ThreadPoolExecutor() as executor:
+                    await loop.run_in_executor(
+                        executor,
+                        lambda: (
+                            self.graph_storage.connect(),
+                            self.graph_storage.add_subgraph_with_merge(
+                                kg_data=kg_data,
+                                graph_tag=graph_name,
+                                graph_level="DocumentLevel",
+                                filename=filename
+                            ),
+                            self.graph_storage.disconnect()
+                        )
+                    )
+
+            # 并发保存所有文档
+            await asyncio.gather(*[save_single_doc(kg_data) for kg_data in result])
+
+        return True
     async def merge_kg_task(
             self,
             kg_id,
@@ -882,13 +1085,13 @@ class KGService:
                 return not_found_response(
                     entity="任务"
                 )
-            if task.status != 2:        # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+            if task.status != 2:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 return error_response(
                     code=400,
                     msg="任务未完成，请等待任务完成"
                 )
             if not merge_flag:
-                task.status = 5         # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+                task.status = 5  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 db.commit()
                 return success_response(
                     data={
@@ -942,7 +1145,7 @@ class KGService:
                 return not_found_response(
                     entity="任务"
                 )
-            if task.status != 2:        # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
+            if task.status != 2:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                 return error_response(
                     code=400,
                     msg="任务未完成，请等待任务完成"
@@ -1241,12 +1444,177 @@ class KGService:
             msg="任务执行完毕"
         )
 
+    async def create_kg_task_by_file_with_merge_and_run_batch(
+            self,
+            kg_id,
+            task_data: KGTaskCreateByFile,
+            file_contents: List[dict],
+            db: Session,
+    ):
+        """
+        创建知识图谱任务
+        """
+        kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+        if not kg:
+            return not_found_response(
+                entity="知识图谱"
+            )
+        error_file_list = []
+        task_ids = []
+        for file_content in file_contents:
+            file_name = file_content.get("filename")
+            if not file_name:
+                continue
+            try:
+                task_name = os.path.splitext(file_name)[0]
+                task_description = f"{task_data.dir}-{task_name}"
+                existed_task = db.query(KGExtractionTask).filter(
+                    KGExtractionTask.name == task_name,
+                    KGExtractionTask.kg_id == kg_id,
+                    KGExtractionTask.del_flag == 0
+                ).first()
+                if existed_task:
+                    continue
+                # 生成任务的子图名称
+                graph_name = generate_unique_name(f"{kg.name}_task")
+                parameters = {
+                    "schema": task_data.schema.model_dump(),
+                    "examples": task_data.examples,
+                }
+                # 创建新的任务对象
+                new_task = KGExtractionTask(
+                    kg_id=kg_id,
+                    name=task_name,
+                    description=task_description,
+                    prompt=task_data.prompt,
+                    parameters=parameters,
+                    graph_name=graph_name,
+                )
+                # 添加到数据库
+                db.add(new_task)
+                db.flush()  # 刷新以获取任务ID
+
+                # 上传文件
+                minio_bucket = MINIO_BUCKET
+                minio_name = generate_unique_name("kg_task_file")
+                content = file_content['content']
+                content_type = file_content.get('content_type', 'application/octet-stream')
+                filename = file_content.get('filename', 'unknown')
+                try:
+                    # 修复：确保传入的是字节流而不是字符串
+                    if isinstance(content, str):
+                        content = content.encode('utf-8')
+                    self.file_storage.upload_file_object(
+                        file_data=content,
+                        bucket_name=minio_bucket,
+                        object_name=minio_name,
+                        content_type=content_type
+                    )
+                except Exception as e:
+                    print(f"{filename}文件上传出现问题，请检查！" + e)
+                    continue
+
+                # 创建KGFile关联记录
+                kg_file = KGFile(
+                    kg_id=kg_id,
+                    task_id=new_task.id,
+                    minio_filename=minio_name,
+                    filename=filename,
+                    minio_bucket=minio_bucket,
+                    minio_path=minio_bucket + '/' + minio_name
+                )
+                db.add(kg_file)
+                new_task.status = 1
+                # 提交所有更改
+                db.commit()
+                db.refresh(new_task)
+                task_ids.append(new_task.id)
+            except Exception as e:
+                db.rollback()
+                error_file_list.append(file_name)
+                print(f"Error: {file_name}文件处理出现问题，请检查！" + str(e))
+                continue
+
+        # 使用信号量控制并发执行任务，最多同时执行5个任务
+        semaphore = Semaphore(5)
+
+        # 定义带信号量控制的异步任务执行函数
+        async def execute_task_with_semaphore(task_id):
+            async with semaphore:  # 限制最多5个并发任务
+                try:
+                    result = await self.execute_kg_task_new(kg_id, task_id)
+                    return {"task_id": task_id, "result": result, "exception": None}
+                except Exception as e:
+                    return {"task_id": task_id, "result": None, "exception": e}
+
+        # 创建所有任务
+        tasks = [execute_task_with_semaphore(task_id) for task_id in task_ids]
+        # 并发执行所有任务
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 处理结果
+        for result in results:
+            if isinstance(result, dict) and "task_id" in result:
+                task_id = result["task_id"]
+                exception = result["exception"]
+
+                if exception is not None:
+                    print(f"任务 {task_id} 执行时发生异常: {str(exception)}")
+                    error_file_list.append(str(task_id) + ": " + str(exception))  # 记录发生异常的任务ID
+                else:
+                    task_result = result["result"]
+                    if task_result.get("code") == 200:
+                        print(f"任务 {task_id} 执行成功")
+                    else:
+                        print(f"任务 {task_id} 执行失败")
+                        # 将失败的任务ID加入错误列表
+                        error_file_list.append(str(task_id) + ": " + str(task_result.get("msg")))
+            else:
+                print(f"任务执行时发生未知错误: {str(result)}")
+
+        # 使用项目根目录的相对路径
+        error_file_path = project_root + "/tests/failed_file_list.txt"
+
+        try:
+            with open(error_file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(str(file_name) for file_name in error_file_list))
+                print(f"已输出错误文件列表到 {error_file_path}")
+        except IOError as e:
+            print(f"写入错误文件列表失败: {e}")
+
+        # merge_result = await self.merge_all_graph_with_match(kg_id, db)
+        merge_result = await self.merge_all_graph(kg_id, db)
+        if merge_result.get("code") != 200:
+            return merge_result
+        return success_response(
+            data=None,
+            msg="任务执行完毕"
+        )
+
     async def _is_md_exist_in_minio(
             self,
             minio_path: str,
     ):
         """
         判断文件是否存在minio中
+        """
+        try:
+            # 解析路径，分离存储桶和文件名
+            if '/' in minio_path:
+                bucket_name, file_name = minio_path.split('/', 1)
+            else:
+                # 如果没有'/'分隔符，则使用默认存储桶
+                bucket_name = MINIO_BUCKET
+                file_name = minio_path
+            # 使用file_storage检查文件是否存在
+            return self.file_storage.file_exists(bucket_name, file_name)
+        except Exception as e:
+            print(f"检查文件是否存在时出错: {str(e)}")
+            return False
+
+    # 同时需要添加同步版本的文件检查方法
+    def _is_md_exist_in_minio_sync(self, minio_path: str):
+        """
+        同步版本的文件存在性检查
         """
         try:
             # 解析路径，分离存储桶和文件名
@@ -1419,7 +1787,6 @@ class KGService:
             return ""
         return self.sanitize_neo4j_property_name(os.path.splitext(name)[0])
 
-
     @staticmethod
     def find_best_match(
             target: str,
@@ -1458,9 +1825,12 @@ class KGService:
     # @staticmethod
     # def process_source_text():
 
+
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
     return f"{source_name}_{generate_snowflake_string_id()}"
+
+
 #
 #
 kg_service = KGService()

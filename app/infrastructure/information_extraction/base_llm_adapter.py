@@ -1,5 +1,6 @@
+
 """
-langextract抽取框架适配器
+base_llm抽取框架适配器
 """
 import hashlib
 import json
@@ -36,7 +37,7 @@ except ImportError:
         IInformationExtraction, SourceText, TextClass
     )
 
-from .method.base import LangextractConfig
+from .method.base import LangextractConfig, ModelConfig
 from .method.langextract import data
 from .method.prompt.examples import general_entity_examples, law_entity_examples, law_relationship_examples, \
     law_graph_examples
@@ -99,13 +100,13 @@ def run_with_timeout(func, args=(), kwargs=None, timeout=1800):
         raise TimeoutException(f"函数执行超时：超过{timeout}秒")
 
 
-class LangextractAdapter(IInformationExtraction):
-    """langextract抽取框架适配器"""
+class BaseLLMAdapter(IInformationExtraction):
+    """base_llm抽取框架适配器"""
 
     def __init__(
             self,
             max_retries: int = 5,
-            config: Optional[LangextractConfig] = None
+            config: Optional[ModelConfig] = None
     ):
         """
         初始化langextract抽取框架适配器
@@ -116,17 +117,6 @@ class LangextractAdapter(IInformationExtraction):
         """
         self.max_retries = max_retries
         self.default_config = config
-        self.langfuse = Langfuse(
-            secret_key="sk-lf-7d375833-5b71-4e24-924e-78be844889f0",
-            public_key="pk-lf-d7448fa2-0fb3-46ef-9e6d-e472a928ac31",
-            host="https://cloud.langfuse.com",
-            # secret_key="sk-lf-c0a7335b-b826-4071-bc93-3952bac9c3f0",
-            # public_key="pk-lf-3eaa9ef7-2d40-4fa9-85c3-ca0fa1d06657",
-            # host="http://60.205.171.106:3000",
-            flush_interval=10,  # 增加刷新间隔到10秒
-            flush_at=50,  # 每50个事件刷新一次
-            timeout=10,
-        )
 
     async def entity_and_relationship_extract(
             self,
@@ -183,40 +173,16 @@ class LangextractAdapter(IInformationExtraction):
             raise ValueError("langextract需要示例，但未提供示例数据")
 
         # 从Langfuse获取提示词
-        try:
-            raise Exception("跳过从Langfuse获取提示词")
-            # base_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/langextract/prompt_for_entity_and_relation_extraction",
-            #     label="production"
-            # )
-            # entity_def_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/definition_for_entity",
-            #     label="production"
-            # )
-            # relation_def_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/definition_for_relation",
-            #     label="production"
-            # )
-            # # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
-            # prompt = base_prompt.compile(
-            #     user_prompt=user_prompt,
-            #     schema=schema if schema else "",
-            #     entity_definition=entity_def_prompt.prompt,
-            #     relation_definition=relation_def_prompt.prompt
-            # )
-        except Exception as e:
-            print(f"从Langfuse获取提示词失败: {e}")
-            print("尝试使用默认提示词")
-            # print("schema内容：")
-            # print(schema)
-            if schema:
-                # 优化1-9：确保提示词实体schema在关系schema前
-                if isinstance(schema, dict) and "nodes" in schema:
-                    # 将 nodes 移到字典最前面
-                    schema = {"nodes": schema.pop("nodes"), **schema}
-                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, schema)
-            else:
-                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, "")
+        # print("schema内容：")
+        # print(schema)
+        if schema:
+            # 优化1-9：确保提示词实体schema在关系schema前
+            if isinstance(schema, dict) and "nodes" in schema:
+                # 将 nodes 移到字典最前面
+                schema = {"nodes": schema.pop("nodes"), **schema}
+            prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, schema)
+        else:
+            prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, "")
         try:
             input_examples = self.convert_examples_to_example_data(examples)
             extract_result = self.extract_list_of_dict(
@@ -240,84 +206,7 @@ class LangextractAdapter(IInformationExtraction):
             examples: list = None,
             langextract_config: Optional[LangextractConfig] = None
     ) -> tuple[list[Entity], list[TextClass]]:
-        """
-        执行实体抽取
-
-        Args:
-            user_prompt: 抽取提示
-            entity_schema: 实体定义
-            input_text: 输入文本
-            examples: 示例数据
-            langextract_config: Langextract配置对象
-
-        Returns:
-            list[Entity]: 实体列表
-        """
-        # 输入验证
-        if not user_prompt or not isinstance(user_prompt, str):
-            print(f"Warning: 提示词应当为str, got {type(user_prompt)}，使用默认提示词")
-            user_prompt = general_prompt
-
-        if not entity_schema or not isinstance(entity_schema, dict | list | str):
-            print(f"Warning: entity_schema 应当为 dict、list or str, got {type(entity_schema)}，使用默认schema")
-            entity_schema = general_entity_schema
-        # 将schema json转为markdown
-        schema_md = change_schema_json_to_md(entity_schema)
-        entity_schema = schema_md if schema_md else entity_schema
-
-        if not examples or not isinstance(examples, list):
-            print(f"Warning: 示例应当为 list, got {type(examples)}，使用默认示例")
-            examples = law_entity_examples
-
-        if not isinstance(input_text, str):
-            print(f"Error: input_text should be a string, got {type(input_text)}")
-            return [], []
-
-        if not input_text.strip():
-            print("Warning: input_text is empty or contains only whitespace")
-            return [], []
-
-        config = langextract_config or self.default_config
-
-        if examples is None:
-            raise Exception("langextract需要示例，但未提供示例数据")
-
-        # 从Langfuse获取提示词
-        try:
-            base_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/langextract/prompt_for_entity_extraction",
-                label="production"
-            )
-            entity_def_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/definition_for_entity",
-                label="production"
-            )
-            # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
-            prompt_for_entity = base_prompt.compile(
-                user_prompt=user_prompt,
-                entity_schema=entity_schema,
-                entity_definition=entity_def_prompt.prompt,
-            )
-        except Exception as e:
-            print(f"从Langfuse获取提示词失败: {e}")
-            print("尝试使用默认提示词")
-            prompt_for_entity = get_prompt_for_entity_extraction(user_prompt, str(entity_schema))
-            # return []
-        try:
-            # prompt_for_entity = self.default_prompt.prompt_for_entity(prompt_delete, entity_schema)
-            input_examples = self.convert_examples_to_example_data(examples)
-            extract_result = self.extract_list_of_dict(
-                prompt_for_entity,
-                input_examples,
-                input_text,
-                config
-            )
-            return self.convert_document_list_to_entity_list(extract_result)
-        except Exception as e:
-            print(f"Error extracting nodes: {e}")
-            # 打印完整的错误追踪信息
-            traceback.print_exc()
-            return [], []
+        pass
 
     async def relationship_extract(
             self,
@@ -328,127 +217,7 @@ class LangextractAdapter(IInformationExtraction):
             examples: list = None,
             langextract_config: Optional[LangextractConfig] = None
     ) -> tuple[list[Relationship], list[TextClass]]:
-        """
-        执行关系抽取
-
-        Args:
-            user_prompt: 抽取提示
-            entities_list: 实体列表
-            relation_schema: 关系定义
-            input_text: 输入文本
-            examples: 示例数据
-            langextract_config: Langextract配置对象
-
-        Returns:
-            list[Relationship]: 关系列表
-        """
-        # 输入验证
-        if not user_prompt or not isinstance(user_prompt, str):
-            print(f"Warning: 提示词应当为str, got {type(user_prompt)}，使用默认提示词")
-            user_prompt = general_prompt
-
-        if not isinstance(entities_list, list):
-            print(f"Error: entities_list should be a list, got {type(entities_list)}")
-            return [], []
-
-        if not relation_schema or not isinstance(relation_schema, dict | list | str):
-            print(f"Warning: relation_schema 应当为 dict、list or str, got {type(relation_schema)}，使用默认schema")
-            relation_schema = general_relation_schema
-        # 将schema json转为markdown
-        schema_md = change_schema_json_to_md(relation_schema)
-        relation_schema = schema_md if schema_md else relation_schema
-
-        if not examples or not isinstance(examples, list):
-            print(f"Error: 示例应当为 list, got {type(examples)}，使用默认示例")
-            examples = law_relationship_examples
-
-        if not isinstance(input_text, str):
-            print(f"Error: input_text should be a string, got {type(input_text)}")
-            return [], []
-
-        if not input_text.strip():
-            print("Warning: input_text is empty or contains only whitespace")
-            return [], []
-
-        config = langextract_config or self.default_config
-
-        if examples is None:
-            raise Exception("langextract需要示例，但未提供示例数据")
-
-        # 对examples做特殊处理。
-        temp_examples = []
-        for example in examples:
-            edges = example.get("extractions", [])
-            relations = []
-            for edge in edges:
-                relations.append(
-                    {
-                        "name": "",
-                        "type": "关系",
-                        "attributes": {
-                            "主体": edge.get("subject") or edge.get("主体") or edge.get("主语"),
-                            "谓词": edge.get("predicate") or edge.get("谓词") or edge.get("关系") or edge.get("谓语"),
-                            "客体": edge.get("object") or edge.get("客体") or edge.get("宾语"),
-                        }
-                    }
-                )
-            temp_examples.append({
-                "text": example.get("text"),
-                "extractions": relations
-            })
-        examples = temp_examples
-
-        # 从Langfuse获取提示词
-        try:
-            base_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/langextract/prompt_for_relation_extraction",
-                label="production"
-            )
-            relation_def_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/definition_for_relation",
-                label="production"
-            )
-            # schema_json = json.dumps(relation_schema, ensure_ascii=False, indent=2)
-            prompt_for_relation = base_prompt.compile(
-                user_prompt=user_prompt,
-                node_list=entities_list,
-                relation_schema=relation_schema,
-                relation_definition=relation_def_prompt.prompt,
-            )
-        except Exception as e:
-            print(f"从Langfuse获取提示词失败: {e}")
-            print("尝试使用默认提示词")
-            prompt_for_relation = get_prompt_for_relation_extraction(user_prompt, str(entities_list), str(relation_schema))
-            # return []
-
-        try:
-            # 遍历实体，记录实体名称列表
-            entity_names = []
-            for i, entity in enumerate(entities_list):
-                # 确保entity是Entity对象且包含name属性
-                if isinstance(entity, Entity) and hasattr(entity, 'name'):
-                    entity_names.append(entity.name)
-                else:
-                    print(
-                        f"Warning: entity at index {i} should be an Entity object with 'name' attribute, got {type(entity)}")
-
-            # prompt_for_relation = self.default_prompt.prompt_for_relation(prompt_delete, entity_names,
-            # relation_schema)
-            input_examples = self.convert_examples_to_example_data(examples)
-            extract_result = self.extract_list_of_dict(
-                prompt_for_relation,
-                input_examples,
-                input_text,
-                config
-            )
-
-            # 将提取结果转换为关系列表
-            return self.convert_document_list_to_relationship_list(extract_result)
-        except Exception as e:
-            print(f"Error extracting relationships: {e}")
-            # 打印完整的错误追踪信息
-            traceback.print_exc()
-            return [], []
+        pass
 
     def convert_document_list_to_graph_dict(
             self,
@@ -580,45 +349,6 @@ class LangextractAdapter(IInformationExtraction):
         }
 
         return result
-
-    def convert_document_list_to_entity_list(
-            self,
-            extraction_result: list
-    ) -> tuple[list[Entity], list[TextClass]]:
-        """
-        将LangExtract提取结果转换为节点列表格式
-
-        Args:
-            extraction_result (dict): LangExtract的提取结果
-
-        Returns:
-            list[Entity]: 包含实体的列表，每个实体以指定格式表示
-        :return:
-        """
-        if not extraction_result:
-            return [], []
-        graph_result = self.convert_document_list_to_graph_dict(extraction_result)
-        if not graph_result:
-            return [], []
-        return graph_result.get("entities", []), graph_result.get("texts", [])
-
-    def convert_document_list_to_relationship_list(
-            self,
-            extraction_result: list
-    ) -> tuple[list[Relationship], list[TextClass]]:
-        """
-        将LangExtract提取结果转换为关系列表格式
-
-        Args:
-            extraction_result (dict): LangExtract的提取结果
-
-        Returns:
-            list[Relationship]: 包含关系的列表
-        """
-        if not extraction_result:
-            return [], []
-        graph_result = self.convert_document_list_to_graph_dict(extraction_result)
-        return graph_result.get("relations", []), graph_result.get("texts", [])
 
     def extract_list_of_dict(
             self,
@@ -785,104 +515,20 @@ class LangextractAdapter(IInformationExtraction):
             self,
             annotated_doc_list: list[lx.data.AnnotatedDocument]
     ) -> list:
-        """
-        notatedDocument 列表转换为标准字典结构。
-        该结构带有溯源文本
-
-        :param annotated_doc_list:
-        :return:
-        """
-        # 处理空输入
-        if not annotated_doc_list:
-            return [{'text': '', 'extractions': []}]
-
-        document_list = []
-        for annotated_doc in annotated_doc_list:
-            document_list.append(self._convert_annotated_document_to_dict(annotated_doc))
-
-        return document_list
+        pass
 
     @staticmethod
     def _process_extraction(extraction) -> dict:
         """
         处理单个提取项并转换为字典格式
-        
+
         Args:
             extraction: 单个提取项对象
-            
+
         Returns:
             dict: 提取项的字典表示
         """
-        if not extraction:
-            return {}
-
-        # 处理 char_interval
-        char_interval_dict = None
-        if hasattr(extraction, 'char_interval') and extraction.char_interval:
-            char_interval_dict = {
-                'start_pos': getattr(extraction.char_interval, 'start_pos', None),
-                'end_pos': getattr(extraction.char_interval, 'end_pos', None)
-            }
-
-        # 处理 alignment_status
-        alignment_status_value = None
-        if hasattr(extraction, 'alignment_status') and extraction.alignment_status:
-            alignment_status_value = extraction.alignment_status.value \
-                if hasattr(extraction.alignment_status, 'value') else str(extraction.alignment_status)
-
-        # 处理 token_interval
-        token_interval_dict = None
-        if hasattr(extraction, 'token_interval') and extraction.token_interval:
-            token_interval_dict = {
-                'start_index': getattr(extraction.token_interval, 'start_index', None),
-                'end_index': getattr(extraction.token_interval, 'end_index', None)
-            }
-
-        # 构建每个提取项的字典
-        return {
-            'extraction_class': getattr(extraction, 'extraction_class', ''),
-            'extraction_text': getattr(extraction, 'extraction_text', ''),
-            'char_interval': char_interval_dict,
-            'alignment_status': alignment_status_value,
-            'extraction_index': getattr(extraction, 'extraction_index', None),
-            'group_index': getattr(extraction, 'group_index', None),
-            'description': getattr(extraction, 'description', None),
-            'attributes': getattr(extraction, 'attributes', {}),  # attributes 本身应该是一个字典
-            'token_interval': token_interval_dict
-        }
-
-    def _convert_annotated_document_to_dict(
-            self,
-            annotated_doc: lx.data.AnnotatedDocument
-    ) -> dict:
-        """
-        将 AnnotatedDocument 对象转换为标准字典结构。
-
-        参数:
-            annotated_doc: AnnotatedDocument 对象
-
-        返回:
-            dict: 包含文档原文和所有提取信息的字典
-        """
-        # 处理空输入
-        if not annotated_doc:
-            return {'text': '', 'extractions': []}
-
-        # 初始化提取信息列表
-        extractions_list = []
-
-        # 遍历每个 Extraction 对象
-        if annotated_doc.extractions:
-            for extraction in annotated_doc.extractions:
-                extraction_dict = self._process_extraction(extraction)
-                if extraction_dict:  # 只添加非空的提取项
-                    extractions_list.append(extraction_dict)
-
-        # 构建最终返回的文档字典
-        return {
-            'text': getattr(annotated_doc, 'text', ''),
-            'extractions': extractions_list
-        }
+        pass
 
     @staticmethod
     def convert_examples_to_example_data(
@@ -897,64 +543,7 @@ class LangextractAdapter(IInformationExtraction):
         Returns:
             list: ExampleData 对象列表
         """
-        # 检查输入是否为列表
-        if not isinstance(examples_list, list):
-            print(f"Warning: examples_list should be a list, got {type(examples_list)}")
-            return []
-
-        examples = []
-        for i, example in enumerate(examples_list):
-            # 确保example是字典格式
-            if not isinstance(example, dict):
-                print(f"Warning: example at index {i} should be a dict, got {type(example)}")
-                continue
-
-            # 获取文本内容，默认为空字符串
-            text = example.get("text", "")
-
-            # 获取extractions字段
-            extractions_data = example.get("extractions", [])
-            if not isinstance(extractions_data, list):
-                print(f"Warning: extractions at index {i} should be a list, got {type(extractions_data)}")
-                extractions_data = []
-
-            extractions = []
-            for j, extraction in enumerate(extractions_data):
-                # 确保extraction是字典格式
-                if not isinstance(extraction, dict):
-                    print(f"Warning: extraction at index {i}-{j} should be a dict, got {type(extraction)}")
-                    continue
-
-                # 获取必要字段，提供默认值
-                extraction_text = extraction.get("name", "")
-                extraction_class = extraction.get("type", "")
-                attributes = extraction.get("attributes", {})
-
-                # 确保attributes是字典格式
-                if not isinstance(attributes, dict):
-                    print(f"Warning: attributes at index {i}-{j} should be a dict, got {type(attributes)}")
-                    attributes = {}
-
-                # 跳过空的提取项
-                if not extraction_class and not extraction_text:
-                    print(f"Warning: skipping empty extraction at index {i}-{j}")
-                    continue
-
-                extractions.append(
-                    lx.data.Extraction(
-                        extraction_class=extraction_class,
-                        extraction_text=extraction_text,
-                        attributes=attributes
-                    )
-                )
-
-            examples.append(
-                lx.data.ExampleData(
-                    text=text,
-                    extractions=extractions
-                )
-            )
-        return examples
+        pass
 
     def _merge_entities(
             self,
@@ -1050,7 +639,8 @@ class LangextractAdapter(IInformationExtraction):
                 for text_class_b in text_classes_b:
                     for text_class_a in text_classes_a:
                         if text_class_a.id == text_class_b.id:
-                            text_class_b.text = text_class_a.text if len(text_class_a.text) > len(text_class_b.text) else text_class_b.text
+                            text_class_b.text = text_class_a.text if len(text_class_a.text) > len \
+                                (text_class_b.text) else text_class_b.text
                     text_classes.append(text_class_b)
             # 方案一：遍历文本,目前存在的问题：合并重复文本后，节点和边对应关系丢失
             if flag == 1:
@@ -1131,7 +721,7 @@ class LangextractAdapter(IInformationExtraction):
 
 
 def change_schema_json_to_md(
-    schema_json,
+        schema_json,
 ):
     """
     将json格式的schema转换为markdown形式

@@ -223,17 +223,25 @@ class Neo4jAdapter(IGraphStorage):
                             # 应该分别处理不同的filename来源
                             node_filename = node.get('filename')
                             if node_filename is not None:
-                                # 处理节点中的filename（直接转换为字符串）
-                                node_filename_str = str(node_filename)  # 直接使用str()转换
-
-                                if node_filename_str and node_filename_str != "None":  # 确保有实际值且不是"None"字符串
+                                # 处理节点中的filename（如果是列表则直接使用，否则转换为字符串）
+                                if isinstance(node_filename, list):
+                                    # 如果是列表，直接使用列表值
+                                    node_filename_processed = node_filename
+                                else:
+                                    # 如果不是列表，转换为字符串
+                                    node_filename_str = str(node_filename)
+                                    if node_filename_str and node_filename_str != "None":
+                                        node_filename_processed = [node_filename_str]
+                                    else:
+                                        node_filename_processed = None
+                                if node_filename_processed:
                                     query += (
                                         ", n.filename = CASE "
-                                        "WHEN n.filename IS NULL THEN [$node_filename_param] "
-                                        "WHEN NOT $node_filename_param IN n.filename THEN n.filename + [$node_filename_param] "
+                                        "WHEN n.filename IS NULL THEN $node_filename_param "
+                                        "WHEN $node_filename_param IS NOT NULL THEN n.filename + $node_filename_param "
                                         "ELSE n.filename END "
                                     )
-                                    params['node_filename_param'] = node_filename_str
+                                    params['node_filename_param'] = node_filename_processed
 
                             # 处理整体filename（转换为字符串）
                             if filename:
