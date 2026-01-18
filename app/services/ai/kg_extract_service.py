@@ -339,6 +339,240 @@ class KGExtractService():
             traceback.print_exception(exc_type, exc_value, exc_traceback)
             raise e
 
+    async def extract_kg_from_tasks(
+            self,
+            kg_extract_params,
+            kg_level: str = "DomainLevel"
+    ) -> dict | list[dict]:
+        """
+        当kg_level为"DomainLevel"，将多个图谱合并，返回的结果类型为dict
+        当kg_level为"DocumentLevel", 保留每个文件的图谱和文件信息，返回的结果类型为list[dict]
+
+        从解析文档(markdown)中抽取图谱
+        1.测试大模型是否可用
+        2.获取大模型配置
+        3.将任务和参数交由线程池
+        返回结构：
+        {
+            "nodes":[GraphNodeBase],
+            "edges":[GraphEdgeBase]
+        }
+        """
+        try:
+            parameters_list = []
+            for kg_extract_param in kg_extract_params:
+                task_id = kg_extract_param.get("task_id")
+                user_prompt = kg_extract_param.get("user_prompt", "")
+                prompt_parameters = kg_extract_param.get("prompt_parameters", {})
+                minio_path = kg_extract_param.get("minio_path")
+                filename = kg_extract_param.get("filename")
+                if not minio_path or not filename or not task_id:
+                    continue
+                parameters = {
+                    "task_id": task_id,
+                    "minio_path": minio_path,
+                    "filename": filename,
+                    "prompt": user_prompt,
+                    "schema": prompt_parameters.get("schema", {}),
+                    "examples": prompt_parameters.get("examples", [])
+                }
+                parameters_list.append(parameters)
+            task_result_list = await self.kgExtractionTaskManager.run_async_tasks(
+                self.extract_kg_from_minio_with_kg_name,
+                parameters_list
+            )
+            result_map = {}
+            for result in task_result_list:
+                task_id = result.get("task_id", "")
+                if not task_id:
+                    continue
+                if task_id not in result_map:
+                    result_map[task_id] = [result]
+                else:
+                    result_map[task_id].append(result)
+            final_result_map = {}
+            for task_id, result_list in result_map.items():
+                if kg_level == "DomainLevel":
+                    # 合并所有结果中的节点和边
+                    merged_nodes = {}
+                    merged_edges = {}
+                    # 改进1-7：使用字典合并节点和边
+                    merged_text_classes = {}
+                    for result in result_list:
+                        if result is None:
+                            continue
+                        filename = result.get("filename")
+                        # 合并节点
+                        if "nodes" in result:
+                            for node in result["nodes"]:
+                                node_id = node.node_id  # 改为对象属性访问
+                                if node_id in merged_nodes:
+                                    # 按规则合并节点
+                                    existing_node = merged_nodes[node_id]
+                                    existing_node["node_name"] = getattr(node, "node_name", existing_node["node_name"])
+                                    existing_node["node_type"] = getattr(node, "node_type", existing_node["node_type"])
+                                    existing_node["description"] = getattr(node, "description", existing_node["description"])
+                                    node_filename = filename
+                                    if isinstance(node_filename, str):
+                                        node_filename = [node_filename]
+                                    elif not isinstance(node_filename, list):
+                                        node_filename = []
+                                    existing_node_filename = existing_node.get("filename", [])
+                                    if isinstance(existing_node_filename, str):
+                                        existing_node_filename = [existing_node_filename]
+                                    elif not isinstance(existing_node_filename, list):
+                                        existing_node_filename = []
+                                    # 合并两个列表并去重
+                                    existing_node_filename.extend(node_filename)
+                                    existing_node_filename = list(set(existing_node_filename))
+
+                                    existing_node["filename"] = existing_node_filename
+                                    # 合并properties，后者覆盖前者
+                                    if hasattr(node, "properties") and node.properties:
+                                        if "properties" not in existing_node:
+                                            existing_node["properties"] = {}
+                                        existing_node["properties"].update(node.properties)
+
+                                    # 改进1-7:合并source_text_info
+                                    if hasattr(node, "source_text_info") and node.source_text_info and isinstance(node.source_text_info, dict):
+                                        if "source_text_info" not in existing_node:
+                                            existing_node["source_text_info"] = {}
+                                        for text_id, new_positions in node.source_text_info.items():
+                                            if text_id in existing_node["source_text_info"]:
+                                                # 合并位置并去重
+                                                existing_positions = existing_node["source_text_info"][text_id]
+                                                # 方法1: 简单追加（如果不担心重复）
+                                                existing_positions.extend(new_positions)
+                                            else:
+                                                # 新文档
+                                                existing_node["source_text_info"][text_id] = new_positions.copy()
+                                else:
+                                    # 转换为字典格式存储
+                                    # filename = getattr(node, "filename", [])
+                                    if isinstance(filename, str):
+                                        filename = [filename]
+                                    elif not isinstance(filename, list):
+                                        filename = []
+                                    merged_nodes[node_id] = {
+                                        "node_id": node.node_id,
+                                        "node_name": node.node_name,
+                                        "node_type": node.node_type,
+                                        "description": node.description,
+                                        "filename": filename,
+                                        "properties": getattr(node, "properties", {}),
+                                        # 改进1-7:添加source_text_info
+                                        "source_text_info": getattr(node, "source_text_info", {})
+                                    }
+                        # 合并边部分
+                        if "edges" in result:
+                            for edge in result["edges"]:
+                                source_id = edge.source_id  # 改为对象属性访问
+                                target_id = edge.target_id  # 改为对象属性访问
+                                relation_type = edge.relation_type  # 改为对象属性访问
+                                # 以source_id、target_id、relation_type三者综合为唯一标识符
+                                edge_key = (source_id, target_id, relation_type)
+                                if edge_key in merged_edges:
+                                    # 按规则合并边
+                                    existing_edge = merged_edges[edge_key]
+                                    existing_edge["weight"] = getattr(edge, "weight", existing_edge["weight"])
+                                    existing_edge["bidirectional"] = getattr(edge, "bidirectional",
+                                                                             existing_edge["bidirectional"])
+                                    # 合并properties，后者覆盖前者
+                                    if hasattr(edge, "properties") and edge.properties:
+                                        if "properties" not in existing_edge:
+                                            existing_edge["properties"] = {}
+                                        existing_edge["properties"].update(edge.properties)
+                                    # 改进1-7:合并source_text_info
+                                    if hasattr(edge, "source_text_info") and edge.source_text_info and isinstance(edge.source_text_info, dict):
+                                        if "source_text_info" not in existing_edge:
+                                            existing_edge["source_text_info"] = {}
+                                        for text_id, new_positions in edge.source_text_info.items():
+                                            if text_id in existing_edge["source_text_info"]:
+                                                # 合并位置并去重
+                                                existing_positions = existing_edge["source_text_info"][text_id]
+                                                # 方法1: 简单追加（如果不担心重复）
+                                                existing_positions.extend(new_positions)
+                                            else:
+                                                # 新文档
+                                                merged_edges[edge_key]["source_text_info"][text_id] = new_positions.copy()
+                                else:
+                                    # 转换为字典格式存储
+                                    merged_edges[edge_key] = {
+                                        "source_id": edge.source_id,
+                                        "target_id": edge.target_id,
+                                        "relation_type": edge.relation_type,
+                                        "weight": getattr(edge, "weight", 1.0),
+                                        "bidirectional": getattr(edge, "bidirectional", False),
+                                        "properties": getattr(edge, "properties", {}),
+                                        # 改进1-7:添加source_text_info
+                                        "source_text_info": getattr(edge, "source_text_info", {})
+                                    }
+                        # 合并文本节点
+                        if "text_classes" in result:
+                            text_classes = result["text_classes"]
+                            if not isinstance(text_classes, list):
+                                text_classes = []
+                            for text_class in text_classes:
+                                text_id = getattr(text_class, "text_id", None)
+                                text = getattr(text_class, "text", None)
+                                if not text_id or not text:
+                                    continue
+                                if text_id in merged_text_classes:
+                                    existing_text = merged_text_classes[text_id].get("text", "")
+                                    # 只在新文本更长时才更新
+                                    if len(text) > len(existing_text):
+                                        merged_text_classes[text_id]["text"] = text
+                                    if "filename" in merged_text_classes[text_id] and filename not in merged_text_classes[text_id]["filename"]:
+                                        merged_text_classes[text_id]["filename"].append(filename)
+
+                                else:
+                                    merged_text_classes[text_id] = {
+                                        "text_id": text_id,
+                                        "text": text,
+                                        "filename": [filename]
+                                    }
+                        # TODO:处理多溯源（可能用不到）
+                    # 转换为列表格式返回
+                    final_result = {
+                        "nodes": list(merged_nodes.values()),
+                        "edges": list(merged_edges.values()),
+                        # 改进1-7：增加文本类，
+                        "text_classes": list(merged_text_classes.values())
+                    }
+                    final_result_map[task_id] = final_result
+                elif kg_level == "DocumentLevel":
+                    final_result = []
+                    for result in result_list:
+                        nodes = []
+                        edges = []
+                        text_classes = []
+                        if "nodes" in result:
+                            for node in result["nodes"]:
+                                nodes.append(node.model_dump())
+                        if "edges" in result:
+                            for edge in result["edges"]:
+                                edges.append(edge.model_dump())
+                        if "text_classes" in result:
+                            for text_class in result["text_classes"]:
+                                text_classes.append(text_class.model_dump())
+                        final_result.append({
+                            "nodes": nodes,
+                            "edges": edges,
+                            # TODO：暂时放弃溯源
+                            "text_classes": text_classes
+                        })
+                    final_result_map[task_id] = final_result
+                else:
+                    logging.error("kg_level不支持!")
+            return final_result_map
+        except Exception as e:
+            print(f"从解析文档(markdown)中抽取图谱时出错: {str(e)}")
+            # 打印完整的 traceback 信息
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            print("完整错误追踪:")
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+            raise e
+
     async def extract_kg_from_minio(
             self,
             minio_path: str,
@@ -378,6 +612,56 @@ class KGExtractService():
                 )
             if result and isinstance(result, dict):
                 result["filename"] = filename
+            return result
+
+        except Exception as e:
+            print(f"从MinIO获取文件内容时出错: {str(e)}")
+            # 添加详细 traceback
+            import traceback
+            traceback.print_exc()
+            return None
+
+    async def extract_kg_from_minio_with_kg_name(
+            self,
+            task_id: str,
+            minio_path: str,
+            filename: str,
+            prompt: str,
+            schema: dict,
+            examples: list = None,
+    ):
+        """
+        从解析文档(markdown)中抽取图谱
+        支持大文件分块处理，避免内存溢出
+        """
+        if '/' in minio_path:
+            bucket_name, minio_file_name = minio_path.split('/', 1)
+        else:
+            # 默认存储桶
+            bucket_name = MD_BUCKET
+            minio_file_name = minio_path
+        try:
+            # 先获取文件元数据，判断文件大小
+            file_metadata = await asyncio.get_event_loop().run_in_executor(
+                None, self.file_storage.get_file_metadata, bucket_name, minio_file_name
+            )
+            file_size = file_metadata.size if file_metadata else None
+
+            # 如果文件过大，使用分块处理
+            if file_size and file_size > MEMORY_THRESHOLD:
+                print(
+                    f"文件大小 {file_size / (1024 * 1024):.2f}MB 超过阈值 {MEMORY_THRESHOLD / (1024 * 1024):.2f}MB，启用分块处理")
+                result = await self._extract_kg_from_minio_chunked(
+                    bucket_name, minio_file_name, prompt, schema, examples
+                )
+            else:
+                # 小文件，使用原有方式处理
+                result = await self._extract_kg_from_minio_normal(
+                    bucket_name, minio_file_name, prompt, schema, examples
+                )
+            if result and isinstance(result, dict):
+                result["filename"] = filename
+                result["task_id"] = task_id
             return result
 
         except Exception as e:

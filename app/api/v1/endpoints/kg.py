@@ -793,6 +793,7 @@ async def kg_extract_by_local_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器
         data_dir: str,
         prompt: str,
+        type: int = 1,
         db: Session = Depends(get_db),  # 数据库会话依赖注入
 ):
     """
@@ -813,6 +814,7 @@ async def kg_extract_by_local_dir(
         background_tasks (BackgroundTasks): FastAPI后台任务管理器
         data_dir (str): 本体抽取的文件目录位置
         prompt (str): 提示词文件位置
+        type (int): 任务类型，默认为1
         db (Session): 数据库会话对象，通过依赖注入自动获取
 
     Returns:
@@ -872,11 +874,9 @@ async def kg_extract_by_local_dir(
         )
         kg_result = await kg_service.create_kg(new_kg, db)
         kg_id = kg_result.get("data").get("id")
-        kg_graph_name = kg_result.get("data").get("graph_name")
-        # 迁移图谱
-        neo4j_adapter = Neo4jAdapter(
-
-        )
+        # kg_graph_name = kg_result.get("data").get("graph_name")
+        # # 迁移图谱
+        # neo4j_adapter = Neo4jAdapter()
         # neo4j_adapter.connect()
         # neo4j_adapter.merge_graphs("law_top_rules", kg_graph_name)
         # neo4j_adapter.disconnect()
@@ -899,11 +899,18 @@ async def kg_extract_by_local_dir(
             schema=KGSchema(**prompt_dict.get("schema")),
             examples=prompt_dict.get("examples")
         )
-        background_tasks.add_task(
-            kg_task_manager.run_async_function,
-            kg_service.create_kg_task_by_file_with_merge,
-            {"kg_id": kg_id, "task_data": task_data, "db": db, "file_contents": file_contents}
-        )
+        if type == 1:
+            background_tasks.add_task(
+                kg_task_manager.run_async_function,
+                kg_service.create_kg_task_by_file_with_merge,
+                {"kg_id": kg_id, "task_data": task_data, "db": db, "file_contents": file_contents}
+            )
+        elif type == 2:
+            background_tasks.add_task(
+                kg_task_manager.run_async_function,
+                kg_service.create_kg_task_by_file_with_merge_and_run_batch,
+                {"kg_id": kg_id, "task_data": task_data, "db": db, "file_contents": file_contents}
+            )
         return success_response(
             msg="任务开始执行",
             data=None

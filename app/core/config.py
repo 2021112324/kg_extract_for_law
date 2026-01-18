@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     MAX_CHAR_BUFFER: int = int(os.getenv("MAX_CHAR_BUFFER", 5000))
     MAX_CHUNK_SIZE: int = int(os.getenv("MAX_CHUNK_SIZE", 5000))
     OVERLAP_SIZE: int = int(os.getenv("OVERLAP_SIZE", 500))
-    THREAD_POOL_MAX_WORKERS: int = int(os.getenv("THREAD_POOL_MAX_WORKERS", 10))
+    THREAD_POOL_MAX_WORKERS: int = int(os.getenv("THREAD_POOL_MAX_WORKERS", 5))
     TIMEOUT: int = int(os.getenv("TIMEOUT", 300))
 
     class Config:

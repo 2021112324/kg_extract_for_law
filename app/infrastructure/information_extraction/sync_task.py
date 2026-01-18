@@ -20,7 +20,7 @@ load_dotenv(env_path)
 # 配置日志
 logger = logging.getLogger(__name__)
 
-THREAD_POOL_MAX_WORKERS = int(os.getenv('THREAD_POOL_MAX_WORKERS', '10'))
+THREAD_POOL_MAX_WORKERS = int(os.getenv('THREAD_POOL_MAX_WORKERS', 5))
 
 # 创建全局线程池执行器
 # 限制最大工作线程数，避免资源耗尽

@@ -371,12 +371,12 @@ class GraphExtraction:
                     temp_source_texts_info = existing_node.source_text_info
                     new_sources_texts_info = {}
                     if temp_source_texts_info and isinstance(temp_source_texts_info, dict):
-                        new_source_texts_info = self._merge_source_texts_to_info_map(source_texts, temp_source_texts_info)
+                        new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, temp_source_texts_info)
                     else:
-                        new_source_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
+                        new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
                     # for text_id in new_sources_texts_info.keys():
                     #     text_class_id_set.add(text_id)
-                    existing_node.source_text_info = new_source_texts_info
+                    existing_node.source_text_info = new_sources_texts_info
 
         # 处理边数据 (Relationship对象列表)
         relations = extract_result.get("relations", [])
@@ -528,11 +528,13 @@ class GraphExtraction:
             chunks = self._split_text_by_paragraphs(input_text, MAX_CHUNK_SIZE, OVERLAP_SIZE)
             parameters_list = []
             print("分块数：", len(chunks))
-            for chunk in chunks:
+            for i, chunk in enumerate(chunks):
+                # 为每个分块添加提示，告知这是文本片段及分块序号
+                enhanced_chunk = f"[文本片段 {i+1}/{len(chunks)}] 以下内容是原文档的一部分，请勿将其视为独立文档：\n\n{chunk}"
                 parameters = {
                     "user_prompt": prompt,
                     "schema": schema,
-                    "input_text": chunk,
+                    "input_text": enhanced_chunk,
                     "examples": examples
                 }
                 parameters_list.append(parameters)
@@ -599,17 +601,20 @@ class GraphExtraction:
                 temp_text_info_list = text_info_map[source_text_id]
                 if not temp_text_info_list or not isinstance(temp_text_info_list, list):
                     temp_text_info_list = []
+                is_duplicate = False
                 for temp_text_info in temp_text_info_list:
                     # 避免重复
                     if start_pos == temp_text_info.get("start_pos") or end_pos == temp_text_info.get("end_pos"):
-                        continue
-                temp_text_info_list.append(
-                    {
-                        "start_pos": start_pos,
-                        "end_pos": end_pos,
-                        "alignment_status": alignment_status
-                    }
-                )
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    temp_text_info_list.append(
+                        {
+                            "start_pos": start_pos,
+                            "end_pos": end_pos,
+                            "alignment_status": alignment_status
+                        }
+                    )
         return text_info_map
 
     @staticmethod

@@ -700,103 +700,84 @@ class KGService:
     async def execute_batch_kg_task(
             self,
             kg_id,
-            task_id,
+            task_ids,
             kg_level: str = "DomainLevel"
     ):
         """
-        执行知识图谱任务编排
-        注意：现在为每个任务创建独立的数据库会话以支持并发
+        批量执行知识图谱任务编排
         """
-        loop = asyncio.get_event_loop()
-
-        # 将整个数据库操作包装在线程池中执行
-        def run_db_operation():
-            db_gen = get_db()
-            db = next(db_gen)
-
-            try:
+        db_gen = get_db()
+        db = next(db_gen)
+        failed_tasks = []
+        try:
+            kg_extract_params = []
+            for task_id in task_ids:
                 # 1. 查询任图谱是否存在
                 kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
                 if not kg:
                     return not_found_response(
                         entity="知识图谱",
                     )
-
-                # 3. 查询任务是否存在
+                # 2. 查询任务是否存在
                 task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id,
                                                          KGExtractionTask.del_flag == 0).first()
                 if not task:
                     return not_found_response(
                         entity="任务",
                     )
-
-                # 获取任务图谱名称
-                graph_name = task.graph_name
                 # 获取任务提示词
                 user_prompt = task.prompt
                 prompt_parameters = {}
-
                 if KG_EXTRACT_METHOD == "langextract":
                     examples = task.parameters.get("examples", [])
                     prompt_parameters["examples"] = examples
                     kg_schema = task.parameters.get("schema", [])
                     prompt_parameters["schema"] = kg_schema
-
                 # 4. 获取任务对应的md文件路径列表
                 task_files = db.query(KGFile).filter(KGFile.kg_id == kg_id, KGFile.task_id == task_id).all()
-
                 if task_files:
-                    minio_files = []
                     for file in task_files:
                         file_minio_path = file.minio_path
                         filename = file.filename
                         if not file_minio_path or not filename:
                             continue
-                        minio_files.append(
+                        if not self._is_md_exist_in_minio_sync(file_minio_path):
+                            return not_found_response(
+                                entity="文件",
+                            )
+                        kg_extract_params.append(
                             {
+                                "task_id": task_id,
+                                "user_prompt": user_prompt,
+                                "prompt_parameters": prompt_parameters,
                                 "minio_path": file_minio_path,
                                 "filename": filename
                             }
                         )
-                else:
-                    minio_files = []
-
-                # 5. 判断文件列表中各文件是否存在minio中的md文件（同步方式）
-                for minio_file in minio_files:
-                    minio_path = minio_file.get("minio_path", "")
-                    if not self._is_md_exist_in_minio_sync(minio_path):  # 需要同步版本
-                        return not_found_response(
-                            entity="文件",
-                        )
-
                 if task.status == 4:  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                     task.retry_count = task.retry_count + 1
 
-                # 6.执行抽取任务 - 这部分已经在异步上下文中，需要特殊处理
-                # 注意：这里的数据库操作仍需同步执行
-                result = asyncio.run_coroutine_threadsafe(
-                    self.kg_extract_service.extract_kg_from_minio_paths(
-                        minio_files=minio_files,
-                        user_prompt=user_prompt,
-                        prompt_parameters=prompt_parameters,
-                        kg_level=kg_level
-                    ),
-                    loop
-                ).result()
-
+            # 6.执行抽取任务 - 这部分已经在异步上下文中，需要特殊处理
+            result_map = await self.kg_extract_service.extract_kg_from_tasks(
+                kg_extract_params=kg_extract_params,
+                kg_level=kg_level
+            )
+            for task_id, result in result_map.items():
                 try:
                     # 7. 将抽取出的图谱保存到图数据库中
+                    task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id,
+                                                             KGExtractionTask.del_flag == 0).first()
+                    if not task:
+                        raise not_found_response(
+                            entity="任务",
+                        )
                     if result:
                         # 保存到图数据库也需要异步处理
-                        asyncio.run_coroutine_threadsafe(
-                            self.save_kg_result_to_storage_new(
-                                result=result,
-                                graph_name=graph_name,
-                                kg_level=kg_level
-                            ),
-                            loop
-                        ).result()
-
+                        await self.save_kg_result_to_storage_new(
+                            result=result,
+                            graph_name=task.graph_name,
+                            kg_level=kg_level
+                        )
                         # 只有在result不为None时才设置计数
                         task.status = 2  # 图谱状态：0-pending, 1-running, 2-completed, 3-merged, 4-failed, 5-cancelled
                         task.entity_count = len(result.get("nodes", []))
@@ -805,36 +786,29 @@ class KGService:
                         task.status = 2
                         task.entity_count = 0
                         task.relation_count = 0
-
                     db.commit()
-
                 except Exception as e:
                     print(f"保存图谱数据时出错: {str(e)}")
                     db.rollback()
+                    failed_tasks.append(f"{task_id}执行失败：{str(e)}")
                     raise e
+        except Exception as e:
+            print(f"处理任务时出错: {str(e)}")
+            db.rollback()
+            raise e
+        finally:
+            try:
+                db.close()
             except Exception as e:
-                print(f"处理任务时出错: {str(e)}")
-                db.rollback()
-                raise e
-            finally:
-                try:
-                    db.close()
-                except Exception as e:
-                    print(f"关闭数据库会话时出错: {str(e)}")
-                try:
-                    next(db_gen)
-                except StopIteration:
-                    pass  # 正常情况，生成器已耗尽
-
-            return success_response(
-                data=result,
-                msg="任务执行完毕"
-            )
-
-        # 使用线程池执行同步的数据库操作
-        with ThreadPoolExecutor() as executor:
-            result = await loop.run_in_executor(executor, run_db_operation)
-            return result
+                print(f"关闭数据库会话时出错: {str(e)}")
+            try:
+                next(db_gen)
+            except StopIteration:
+                pass  # 正常情况，生成器已耗尽
+        return success_response(
+            data=failed_tasks,
+            msg="任务执行完毕"
+        )
 
     @staticmethod
     async def get_kg_task_detail(
@@ -1535,41 +1509,12 @@ class KGService:
                 print(f"Error: {file_name}文件处理出现问题，请检查！" + str(e))
                 continue
 
-        # 使用信号量控制并发执行任务，最多同时执行5个任务
-        semaphore = Semaphore(5)
-
-        # 定义带信号量控制的异步任务执行函数
-        async def execute_task_with_semaphore(task_id):
-            async with semaphore:  # 限制最多5个并发任务
-                try:
-                    result = await self.execute_kg_task_new(kg_id, task_id)
-                    return {"task_id": task_id, "result": result, "exception": None}
-                except Exception as e:
-                    return {"task_id": task_id, "result": None, "exception": e}
-
-        # 创建所有任务
-        tasks = [execute_task_with_semaphore(task_id) for task_id in task_ids]
-        # 并发执行所有任务
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        # 处理结果
-        for result in results:
-            if isinstance(result, dict) and "task_id" in result:
-                task_id = result["task_id"]
-                exception = result["exception"]
-
-                if exception is not None:
-                    print(f"任务 {task_id} 执行时发生异常: {str(exception)}")
-                    error_file_list.append(str(task_id) + ": " + str(exception))  # 记录发生异常的任务ID
-                else:
-                    task_result = result["result"]
-                    if task_result.get("code") == 200:
-                        print(f"任务 {task_id} 执行成功")
-                    else:
-                        print(f"任务 {task_id} 执行失败")
-                        # 将失败的任务ID加入错误列表
-                        error_file_list.append(str(task_id) + ": " + str(task_result.get("msg")))
-            else:
-                print(f"任务执行时发生未知错误: {str(result)}")
+        result = await self.execute_batch_kg_task(kg_id, task_ids)
+        if result.get("code") == 200:
+            failed_tasks = result.get("data", [])
+            if failed_tasks:
+                for task_info in failed_tasks:
+                    error_file_list.append(task_info)
 
         # 使用项目根目录的相对路径
         error_file_path = project_root + "/tests/failed_file_list.txt"
