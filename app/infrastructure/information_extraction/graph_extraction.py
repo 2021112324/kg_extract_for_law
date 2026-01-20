@@ -3,13 +3,16 @@
 """
 import logging
 import os
+import re
 import uuid
+from difflib import SequenceMatcher
 
 from dotenv import load_dotenv
 
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.method.base import LangextractConfig, ModelConfig
 from app.infrastructure.information_extraction.sync_task import sync_task_manager
+from app.infrastructure.information_extraction.union.union_find import UnionFind
 from app.schemas.kg import GraphEdgeBase, GraphNodeBase, TextClass
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -25,6 +28,7 @@ LENGTH_THRESHOLD = 0
 
 # MAX_CHUNK_SIZE = int(os.getenv("MAX_CHUNK_SIZE", "5000"))
 MAX_CHUNK_SIZE = 30000
+CHUNK_MAX_LENGTH = 30000
 # OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", "500"))
 OVERLAP_SIZE = 2000
 
@@ -395,14 +399,39 @@ class GraphExtraction:
 
             # 尝试查找源节点和目标节点的键
             for (name, entity_type), node_id in node_map.items():
-                if name == source_name and source_key is None:
-                    source_key = (source_name, entity_type)
-                if name == target_name and target_key is None:
-                    target_key = (target_name, entity_type)
+                if "_" not in source_name:
+                    if source_name == name and source_key is None:
+                        source_key = (name, entity_type)
+                else:
+                    if source_name == f"{entity_type}_{name}" and source_key is None:
+                        source_key = (name, entity_type)
+                if "_" not in target_name:
+                    if target_name == name and target_key is None:
+                        target_key = (name, entity_type)
+                else:
+                    if target_name == f"{entity_type}_{name}" and target_key is None:
+                        target_key = (name, entity_type)
 
                 # 如果都找到了，就跳出循环
                 if source_key is not None and target_key is not None:
                     break
+
+            # 如果精确匹配未找到，尝试模糊匹配
+            if source_key is None or target_key is None:
+                logging.warning("节点匹配：关系中的源节点或目标节点未找到，尝试模糊匹配")
+                for (name, entity_type), node_id in node_map.items():
+                    if source_key is None and "_" in source_name:
+                        source_entity_type = source_name.split("_")[0]
+                        source_entity_name = source_name.split("_")[1]
+                        if source_entity_type == entity_type and clean_and_calculate_similarity(source_entity_name, name) > 0.9:
+                            source_key = (name, entity_type)
+                            logging.warning(f"节点匹配：找到源节点 {source_name} 的模糊匹配 {name}")
+                    if target_key is None and "_" in target_name:
+                        target_entity_type = target_name.split("_")[0]
+                        target_entity_name = target_name.split("_")[1]
+                        if target_entity_type == entity_type and clean_and_calculate_similarity(target_entity_name, name) > 0.9:
+                            target_key = (name, entity_type)
+                            logging.warning(f"节点匹配：找到目标节点 {target_name} 的模糊匹配 {name}")
 
             source_id = node_map.get(source_key) if source_key else None
             target_id = node_map.get(target_key) if target_key else None
@@ -514,6 +543,15 @@ class GraphExtraction:
         # 使用UUID确保生成的ID是唯一的
         unique_uuid = uuid.uuid4()
         return f"{node_type}_{node_name}_{unique_uuid}"
+
+    @staticmethod
+    def get_node_id_without_uuid(
+            node_id: str
+    ) -> str:
+        """
+        生成节点ID
+        """
+        return node_id.split("_")[0] + "_" + node_id.split("_")[1]
 
     async def _split_to_sync_extract(
             self,
@@ -738,3 +776,82 @@ class GraphExtraction:
 
 
 graph_extractor = GraphExtraction()
+
+
+def clean_and_calculate_similarity(str1: str, str2: str) -> float:
+    """
+    清洗字符串并使用SequenceMatcher计算两个字符串的相似度
+
+    Args:
+        str1: 第一个字符串
+        str2: 第二个字符串
+
+    Returns:
+        float: 相似度值 [0.0, 1.0]，1.0表示完全相同
+    """
+    def clean_string(text: str) -> str:
+        """
+        清洗字符串：移除中文标点符号
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            str: 清洗后的文本
+        """
+        # 定义中文和英文标点符号的正则表达式
+        punctuation_pattern = r'[^\w\s\u4e00-\u9fff]'
+        return re.sub(punctuation_pattern, '', text)
+
+    # 1. 清洗字符串
+    cleaned_str1 = clean_string(str1)
+    cleaned_str2 = clean_string(str2)
+
+    # 2. 使用SequenceMatcher计算相似度
+    similarity = SequenceMatcher(None, cleaned_str1, cleaned_str2).ratio()
+
+    return similarity
+
+
+if __name__ == "__main__":
+    # 测试用例1: 完全相同的字符串
+    print("测试用例1 - 完全相同的字符串:")
+    result1 = clean_and_calculate_similarity("这是一个测试", "这是一个测试")
+    print(f"相似度: {result1}")  # 期望输出: 1.0
+
+    # 测试用例2: 完全不同的字符串
+    print("\n测试用例2 - 完全不同的字符串:")
+    result2 = clean_and_calculate_similarity("这是测试A", "完全不同B")
+    print(f"相似度: {result2}")  # 期望输出: 接近 0.0
+
+    # 测试用例3: 部分相似的字符串
+    print("\n测试用例3 - 部分相似的字符串:")
+    result3 = clean_and_calculate_similarity("这是一个测试文本", "这是一个验证文本")
+    print(f"相似度: {result3}")  # 期望输出: 0.5 左右
+
+    # 测试用例4: 包含标点符号的字符串（会被清洗）
+    print("\n测试用例4 - 包含标点符号的字符串:")
+    result4 = clean_and_calculate_similarity("你好，世界！", "你好世界")
+    print(f"相似度: {result4}")  # 期望输出: 1.0 (因为标点被清洗掉了)
+
+    # 测试用例5: 中英文混合带标点
+    print("\n测试用例5 - 中英文混合带标点:")
+    result5 = clean_and_calculate_similarity("Hello, 世界！test.", "Hello 世界 test")
+    print(f"相似度: {result5}")  # 期望输出: 1.0
+
+    # 测试用例6: 长度差异很大的字符串
+    print("\n测试用例6 - 长度差异很大的字符串:")
+    result6 = clean_and_calculate_similarity("短", "这是一个非常长的测试字符串")
+    print(f"相似度: {result6}")  # 期望输出: 接近 0.0
+
+    # 测试用例7: 相似的长字符串
+    print("\n测试用例7 - 相似的长字符串:")
+    str_a = "法律条文规定了公民的权利和义务，包括言论自由、宗教信仰自由等基本权利"
+    str_b = "法律规定了公民的权利与义务，包含言论自由、宗教信仰自由等基本权利"
+    result7 = clean_and_calculate_similarity(str_a, str_b)
+    print(f"相似度: {result7}")  # 期望输出: 高相似度 (如 0.8+)
+
+    # 测试用例8: 仅有标点符号差异
+    print("\n测试用例8 - 仅有标点符号差异:")
+    result8 = clean_and_calculate_similarity("测试文本，包含标点！", "测试文本包含标点")
+    print(f"相似度: {result8}")  # 期望输出: 1.0 (标点被清洗)
