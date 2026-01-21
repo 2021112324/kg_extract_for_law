@@ -930,3 +930,62 @@ class Neo4jAdapter(IGraphStorage):
             logger.error(f"获取节点列表失败: {str(e)}")
             return []
 
+    def get_nodes_by_properties(
+            self,
+            graph_tag: str,
+            properties: Dict[str, Any],
+    ):
+        """
+        通过属性键值对查找neo4j节点数据
+
+        Args:
+            graph_tag (str): 图谱标签
+            properties (Dict[str, Any]): 要匹配的属性键值对
+
+        Returns:
+            list: 符合条件的节点列表
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return []
+
+        try:
+            with self.driver.session(database=self.database) as session:
+                # 构建动态查询条件
+                where_conditions = []
+                params = {'graph_tag': graph_tag}
+                
+                for key, value in properties.items():
+                    # 为每个属性创建参数和条件
+                    param_name = f"prop_{key}"
+                    where_conditions.append(f"n.`{key}` = ${param_name}")
+                    params[param_name] = value
+                
+                where_clause = " AND ".join(where_conditions) if where_conditions else "TRUE"
+                
+                # 查询指定标签和属性条件的节点
+                query = f"""
+                    MATCH (n:`{graph_tag}`)
+                    WHERE {where_clause}
+                    RETURN n
+                """
+                
+                result = session.run(query, params)
+
+                nodes = []
+                for record in result:
+                    node = record["n"]
+                    # 转换节点数据
+                    node_properties = dict(node)
+                    nodes.append(GraphNode(
+                        id=node_properties.get('id', ''),
+                        name=node_properties.get('name', ''),
+                        label=node_properties.get('label', ''),
+                        properties=node_properties
+                    ))
+
+                return nodes
+
+        except Exception as e:
+            logger.error(f"获取节点列表失败: {str(e)}")
+            return []

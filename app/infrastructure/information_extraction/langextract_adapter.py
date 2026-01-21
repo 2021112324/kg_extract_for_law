@@ -38,8 +38,7 @@ except ImportError:
 
 from .method.base import LangextractConfig
 from .method.langextract import data
-from .method.prompt.examples import general_entity_examples, law_entity_examples, law_relationship_examples, \
-    law_graph_examples
+from .method.prompt.examples import general_entity_examples, general_graph_examples, general_relationship_examples
 from .method.prompt.prompt import get_prompt_for_entity_extraction, get_prompt_for_relation_extraction, general_prompt, \
     get_prompt_for_entity_and_relation_extraction
 from .method.prompt.schema import general_entity_schema, general_relation_schema, general_schema
@@ -167,7 +166,7 @@ class LangextractAdapter(IInformationExtraction):
 
         if not examples or not isinstance(examples, list):
             print(f"Warning: examples 应当为 list, got {type(examples)}, 使用默认示例数据")
-            examples = law_graph_examples
+            examples = general_graph_examples
 
         if not isinstance(input_text, str):
             print(f"Error: input_text should be a string, got {type(input_text)}")
@@ -267,7 +266,7 @@ class LangextractAdapter(IInformationExtraction):
 
         if not examples or not isinstance(examples, list):
             print(f"Warning: 示例应当为 list, got {type(examples)}，使用默认示例")
-            examples = law_entity_examples
+            examples = general_entity_examples
 
         if not isinstance(input_text, str):
             print(f"Error: input_text should be a string, got {type(input_text)}")
@@ -360,7 +359,7 @@ class LangextractAdapter(IInformationExtraction):
 
         if not examples or not isinstance(examples, list):
             print(f"Error: 示例应当为 list, got {type(examples)}，使用默认示例")
-            examples = law_relationship_examples
+            examples = general_relationship_examples
 
         if not isinstance(input_text, str):
             print(f"Error: input_text should be a string, got {type(input_text)}")

@@ -1,6 +1,9 @@
 import asyncio
+import importlib.util
+import logging
 import os
 import re
+import uuid
 from asyncio import Semaphore
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
@@ -16,7 +19,7 @@ from app.infrastructure.graph_storage.factory import GraphStorageFactory
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.models.kg import KG as KGModel, KGExtractionTask, KGFile
-from app.schemas.kg import KGCreate, KGTaskCreate, KGTaskCreateByFile
+from app.schemas.kg import KGCreate, KGTaskCreate, KGTaskCreateByFile, KGSchema
 from app.services.ai.kg_extract_service import kg_extract_service
 from app.utils.snowflake_id import generate_snowflake_string_id
 
@@ -1273,7 +1276,7 @@ class KGService:
                     error_list.append(task.id)
                     continue
             # 使用项目根目录的相对路径
-            error_file_path = project_root + "/tests/error_task_list.txt"
+            error_file_path = project_root + "/tests/failed_task_list.txt"
 
             try:
                 with open(error_file_path, "w", encoding="utf-8") as f:
@@ -1333,7 +1336,7 @@ class KGService:
                     error_list.append(task.id)
                     continue
             # 使用项目根目录的相对路径
-            error_file_path = project_root + "/tests/error_task_list.txt"
+            error_file_path = project_root + "/tests/failed_task_list.txt"
 
             try:
                 with open(error_file_path, "w", encoding="utf-8") as f:
@@ -1509,12 +1512,16 @@ class KGService:
                 print(f"Error: {file_name}文件处理出现问题，请检查！" + str(e))
                 continue
 
-        result = await self.execute_batch_kg_task(kg_id, task_ids)
-        if result.get("code") == 200:
-            failed_tasks = result.get("data", [])
-            if failed_tasks:
-                for task_info in failed_tasks:
-                    error_file_list.append(task_info)
+        # 按每10个任务为一组进行批量处理
+        batch_size = 10
+        for i in range(0, len(task_ids), batch_size):
+            batch_task_ids = task_ids[i:i + batch_size]
+            result = await self.execute_batch_kg_task(kg_id, batch_task_ids)
+            if result.get("code") == 200:
+                failed_tasks = result.get("data", [])
+                if failed_tasks:
+                    for task_info in failed_tasks:
+                        error_file_list.append(task_info)
 
         # 使用项目根目录的相对路径
         error_file_path = project_root + "/tests/failed_file_list.txt"
@@ -1767,6 +1774,158 @@ class KGService:
         else:
             return None
 
+    async def kg_extract_by_local_dir(
+            self,
+            file_dir,
+            prompt_dict,
+            db: Session,
+    ):
+        file_dir = file_dir.replace('\\', '/')
+        root_name = file_dir.split("/")[-1]
+        root_node = {
+            "node_id": f"规章制度类别_{root_name}",
+            "node_name": root_name,
+            "node_type": "法律规章类别",
+            "description": f"{root_name}是指企业在经营活动中需要遵守的各项法律法规和规章制度，确保企业运营合法合规的管理要求。",
+            "properties": {}
+        }
+        # 存储生成的知识图谱数据
+        kg_data = {
+            "nodes": [],
+            "edges": []
+        }
+        # 添加根节点
+        kg_data["nodes"].append(root_node)
+        top_kg_name = f"{root_name}_{uuid.uuid4().hex}"
+        # 遍历目录下的所有文件夹
+        for folder_name in os.listdir(file_dir):
+            folder_path = os.path.join(file_dir, folder_name)
+            # 确保是文件夹而不是文件
+            if os.path.isdir(folder_path):
+                # 创建文件夹节点
+                folder_node = {
+                    "node_id": f"法律规章类别_{root_name}_{folder_name}",
+                    "node_name": folder_name,
+                    "node_type": "法律规章类别",
+                    "description": "",
+                    "properties": {}
+                }
+                # 创建包含关系
+                relationship = {
+                    "source_id": root_node["node_id"],
+                    "target_id": folder_node["node_id"],
+                    "relation_type": "包含",
+                    "directionality": "单向",
+                    "description": "包含关系表示一个节点作为容器或父级实体，将其下属的子节点或成员纳入其管理范围内的层级隶属关系。",
+                    "properties": {}
+                }
+                kg_data["nodes"].append(folder_node)
+                kg_data["edges"].append(relationship)
+        self.graph_storage.connect()
+        self.graph_storage.add_subgraph_with_merge(kg_data, top_kg_name, "DomainLevel")
+        self.graph_storage.disconnect()
+        processed_files = set()
+        duplicate_files_tuples = []
+        for folder_name in os.listdir(file_dir):
+            folder_path = os.path.join(file_dir, folder_name)
+            # 确保是文件夹而不是文件
+            if os.path.isdir(folder_path):
+                new_kg = KGCreate(
+                    name=file_dir.split("/")[-1],
+                    description="",
+                )
+                kg_result = await kg_service.create_kg(new_kg, db)
+                kg_id = kg_result.get("data").get("id")
+                files = os.listdir(folder_path)
+                file_contents = []
+                file_names = set()
+                for file in files:
+                    file_path = os.path.join(file_dir, file)
+                    file_path = file_path.replace('\\', '/')  # 统一使用正斜杠
+                    # 只处理md或txt文件
+                    if file.endswith('.md') or file.endswith('.txt'):
+                        filename = file.split(".")[0]
+                        if filename in processed_files:
+                            self.graph_storage.connect()
+                            find_map = {
+                                "label": "法规文件",
+                                "法规名称": filename
+                            }
+                            nodes = self.graph_storage.get_nodes_by_properties(top_kg_name, find_map)
+                            if nodes:
+                                for node in nodes:
+                                    duplicate_files_tuples.append((node.id, folder_name))
+                                logging.warning(f"重复法律文件：文件{file}已存在，跳过处理")
+                                continue
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        file_contents.append({
+                            'filename': file,
+                            'content': content,
+                            'content_type': 'text/markdown' if file.endswith('.md') else 'text/plain'
+                        })
+                        file_names.add(filename)
+                task_data = KGTaskCreateByFile(
+                    dir=file_dir.split("/")[-1],
+                    prompt=prompt_dict.get("prompt"),
+                    schema=KGSchema(**prompt_dict.get("schema")),
+                    examples=prompt_dict.get("examples")
+                )
+                result = await self.create_kg_task_by_file_with_merge_and_run_batch(
+                    kg_id=kg_id,
+                    task_data=task_data,
+                    file_contents=file_contents,
+                    db=db
+                )
+                if result.get("code") == 200:
+                    kg = db.query(KGModel).filter(KGModel.id == kg_id, KGModel.del_flag == 0).first()
+                    kg_name = kg.graph_name
+                    self.graph_storage.connect()
+                    file_nodes = self.graph_storage.get_nodes_by_type(kg_name, "法规文件")
+                    # if len(files) != len(file_nodes):
+                    #     # 将文件夹名称写入到失败目录文件中
+                    #     failed_dir_path = "F:/企业大脑知识库系统/8.1项目/抽取代码/kg_extract_for_law/app/tests/failed_dir.txt"
+                    #     with open(failed_dir_path, 'a', encoding='utf-8') as f:
+                    #         f.write(f"文件数量不匹配: {folder_name}")
+                    self.graph_storage.merge_graphs(kg_name, top_kg_name)
+                    kg_data = {
+                        "nodes": [],
+                        "edges": []
+                    }
+                    for file_node in file_nodes:
+                        file_node_id = file_node.id
+                        if not file_node_id:
+                            logging.error("File node ID is None")
+                        kg_data["edges"].append({
+                            "source_id": file_node_id,
+                            "target_id": f"法律规章类别_{root_name}_{folder_name}",
+                            "relation_type": "属于",
+                            "directionality": "单向",
+                            "description": "法规文件属于对应文件夹",
+                            "properties": {}
+                        })
+                    self.graph_storage.add_subgraph_with_merge(kg_data, top_kg_name, "DomainLevel")
+                    self.graph_storage.disconnect()
+                    logging.info(f"文件夹{folder_name}下文件处理成功")
+                    processed_files.update(file_names)
+                else:
+                    logging.error(f"文件夹{folder_name}下文件处理失败")
+                    # 将文件夹名称写入到失败目录文件中
+                    failed_dir_path = "F:/企业大脑知识库系统/8.1项目/抽取代码/kg_extract_for_law/app/tests/failed_dir.txt"
+                    with open(failed_dir_path, 'a', encoding='utf-8') as f:
+                        f.write(f"文件夹{folder_name}下文件处理失败")
+        self.graph_storage.connect()
+        for (file_id, folder_name) in duplicate_files_tuples:
+            kg_data["edges"].append({
+                "source_id": file_id,
+                "target_id": f"法律规章类别_{root_name}_{folder_name}",
+                "relation_type": "属于",
+                "directionality": "单向",
+                "description": "法规文件属于对应文件夹",
+                "properties": {}
+            })
+        self.graph_storage.add_subgraph_with_merge(kg_data, top_kg_name, "DomainLevel")
+        self.graph_storage.disconnect()
     # @staticmethod
     # def process_source_text():
 
@@ -1776,6 +1935,30 @@ def generate_unique_name(source_name):
     return f"{source_name}_{generate_snowflake_string_id()}"
 
 
-#
-#
 kg_service = KGService()
+
+
+if __name__ == "__main__":
+    file_dir = r"F:\企业大脑知识库系统\8.1项目\数据处理\清洗的数据\国家规章库"
+    prompt = r"F:\企业大脑知识库系统\8.1项目\抽取代码\kg_extract_for_law\tests\prompt\国家规章库v2.py"
+    prompt_path = prompt.replace('\\', '/')
+    if not os.path.exists(prompt_path):
+        raise Exception(f"Python文件不存在: {prompt_path}")
+    # 动态导入Python文件
+    spec = importlib.util.spec_from_file_location("prompt_module", prompt_path)
+    prompt_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prompt_module)
+    # 获取需要的变量（假设文件中有prompt、schema、examples等变量）
+    prompt_dict = {
+        'prompt': getattr(prompt_module, 'prompt', ''),
+        'schema': getattr(prompt_module, 'schema', {}),
+        'examples': getattr(prompt_module, 'examples', [])
+    }
+    # 创建数据库会话
+    db_gen = get_db()
+    db = next(db_gen)
+    asyncio.run(kg_service.kg_extract_by_local_dir(
+        file_dir,
+        prompt_dict,
+        db=db
+    ))

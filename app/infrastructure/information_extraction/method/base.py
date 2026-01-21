@@ -24,7 +24,7 @@ class LangextractConfig(ModelConfig):
     language_model_type: Type[lx.LanguageModelT] = lx.inference.CustomAPIModel  # 用于推理的语言模型类型
     format_type: lx.data.FormatType = lx.data.FormatType.JSON  # 输出格式类型（JSON或YAML）
     max_char_buffer: int = 1000  # 推理时的最大字符数
-    temperature: float = 0.5  # 生成时的采样温度，较高值可以减少重复输出
+    temperature: float = 0.1  # 生成时的采样温度，较高值可以减少重复输出
     fence_output: bool = False  # 是否期望/生成带围栏的输出
     use_schema_constraints: bool = True  # 是否为模型生成模式约束以启用结构化输出
     batch_length: int = 10  # 每批处理的文本块数量

@@ -32,6 +32,7 @@ CHUNK_MAX_LENGTH = 30000
 # OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", "500"))
 OVERLAP_SIZE = 2000
 
+
 TIMEOUT = int(os.getenv("TIMEOUT", "300"))
 
 
@@ -290,7 +291,7 @@ class GraphExtraction:
     def build_graph_structure(self, extract_result: dict) -> dict:
         """
         使用GraphNodeBase和GraphEdgeBase构建图谱结构数据
-        
+
         Args:
             extract_result: 包含entities和relations的抽取结果，其中
                             entities是list[Entity]格式，
@@ -374,8 +375,7 @@ class GraphExtraction:
                     temp_source_texts_info = existing_node.source_text_info
                     new_sources_texts_info = {}
                     if temp_source_texts_info and isinstance(temp_source_texts_info, dict):
-                        new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts,
-                                                                                      temp_source_texts_info)
+                        new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, temp_source_texts_info)
                     else:
                         new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
                     # for text_id in new_sources_texts_info.keys():
@@ -423,15 +423,13 @@ class GraphExtraction:
                     if source_key is None and "_" in source_name:
                         source_entity_type = source_name.split("_")[0]
                         source_entity_name = source_name.split("_")[1]
-                        if source_entity_type == entity_type and clean_and_calculate_similarity(source_entity_name,
-                                                                                                name) > 0.9:
+                        if source_entity_type == entity_type and clean_and_calculate_similarity(source_entity_name, name) > 0.9:
                             source_key = (name, entity_type)
                             logging.warning(f"节点匹配：找到源节点 {source_name} 的模糊匹配 {name}")
                     if target_key is None and "_" in target_name:
                         target_entity_type = target_name.split("_")[0]
                         target_entity_name = target_name.split("_")[1]
-                        if target_entity_type == entity_type and clean_and_calculate_similarity(target_entity_name,
-                                                                                                name) > 0.9:
+                        if target_entity_type == entity_type and clean_and_calculate_similarity(target_entity_name, name) > 0.9:
                             target_key = (name, entity_type)
                             logging.warning(f"节点匹配：找到目标节点 {target_name} 的模糊匹配 {name}")
 
@@ -477,8 +475,7 @@ class GraphExtraction:
                     graph_data["edges"].append(edge)
                 else:
                     # 重复变关系，更新属性
-                    existing_edge = [edge for edge in graph_data["edges"] if
-                                     edge.source_id == source_id and edge.target_id == target_id and edge.relation_type == relation_type]
+                    existing_edge = [edge for edge in graph_data["edges"] if edge.source_id == source_id and edge.target_id == target_id and edge.relation_type == relation_type]
                     if existing_edge:
                         edges_properties = existing_edge[0].properties
                         if edges_properties and isinstance(edges_properties, dict):
@@ -489,8 +486,7 @@ class GraphExtraction:
                         if source_texts and isinstance(source_texts, list):
                             sources_texts_info = existing_edge[0].source_text_info
                             if sources_texts_info and isinstance(sources_texts_info, dict):
-                                new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts,
-                                                                                              sources_texts_info)
+                                new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, sources_texts_info)
                             else:
                                 new_sources_texts_info = self._merge_source_texts_to_info_map(source_texts, {})
                             # for text_id in new_sources_texts_info.keys():
@@ -568,25 +564,70 @@ class GraphExtraction:
             if len(input_text) <= 0:
                 return None
             chunks = self._split_text_by_paragraphs(input_text, MAX_CHUNK_SIZE, OVERLAP_SIZE)
-            result_list = []
             print("分块数：", len(chunks))
+            chunks_with_results = []
             for i, chunk in enumerate(chunks):
                 # 为每个分块任务的提示词添加提示，告知这是文本片段及分块序号
-                chunk_prompt = f"注意：当前处理的是文档的第{i + 1}个分块，共{len(chunks)}个分块,请结合整体文档上下文进行抽取，不要将其视为独立文档。\n\n{prompt}"
-                result = await self.node_extractor.entity_and_relationship_extract(
+                chunk_prompt = f"注意：当前处理的是文档的第{i+1}个分块，共{len(chunks)}个分块。以下内容来自原文档的一部分，请结合整体文档上下文进行抽取，不要将其视为独立文档。\n\n{prompt}"
+                result = self.node_extractor.entity_and_relationship_extract(
                     user_prompt=chunk_prompt,
                     schema=schema,
                     input_text=chunk,
                     examples=examples
                 )
-                result_list.append(result)
+                chunks_with_results.append((chunk, result))
+
+            # 使用并查集进行分块合并
+            n = len(chunks_with_results)
+            uf = UnionFind(n)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    _, result_i = chunks_with_results[i]
+                    _, result_j = chunks_with_results[j]
+
+                    # 提取实体名称集合
+                    entities_i = result_i.get("entities", [])
+                    entities_j = result_j.get("entities", [])
+
+                    # 如果有相同实体，合并分块
+                    if self._is_duplicate_entity(entities_i, entities_j):  # 集合交集
+                        uf.union(i, j)
+                # 按连通分量分组
+            groups = {}
+            for i in range(n):
+                root = uf.find(i)
+                if root not in groups:
+                    groups[root] = []
+                groups[root].append(i)
+
+            # 处理每个连通分量
+            final_results = []
+            for group in groups.values():
+                if len(group) == 1:
+                    # 单个分块，使用原有结果
+                    final_results.append(chunks_with_results[group[0]][1])
+                else:
+                    # 多个分块合并，需要重新抽取
+                    merged_text = ""
+                    for idx in group:
+                        merged_text += chunks_with_results[idx][0] + "\n\n"
+
+                    # 重新抽取合并后的文本
+                    new_result = self.node_extractor.entity_and_relationship_extract(
+                        user_prompt=prompt,
+                        schema=schema,
+                        input_text=merged_text,
+                        examples=examples
+                    )
+                    final_results.append(new_result)
+
             # print("抽取结果数：", result_list)
             graph_result = {
                 "entities": [],
                 "relations": [],
                 "texts_classes": []
             }
-            for i, result in enumerate(result_list):
+            for i, result in enumerate(final_results):
                 if not isinstance(result, dict):
                     print(f"第{i}个文段块抽取失败")
                 graph_result["entities"] = graph_result["entities"] + result.get("entities", [])
@@ -600,60 +641,22 @@ class GraphExtraction:
             print("分段抽取失败：", e)
             raise e
 
-    async def _split_to_sync_extract_old(
+    def _is_duplicate_entity(
             self,
-            prompt,
-            schema,
-            input_text,
-            examples
+            entities_i,
+            entities_j
     ):
-        """
-        TODO: DELETE
-        :param prompt:
-        :param schema:
-        :param input_text:
-        :param examples:
-        :return:
-        """
-        try:
-            if len(input_text) <= 0:
-                return None
-            chunks = self._split_text_by_paragraphs(input_text, MAX_CHUNK_SIZE, OVERLAP_SIZE)
-            parameters_list = []
-            print("分块数：", len(chunks))
-            for i, chunk in enumerate(chunks):
-                # 为每个分块添加提示，告知这是文本片段及分块序号
-                enhanced_chunk = f"[文本片段 {i + 1}/{len(chunks)}] 以下内容是原文档的一部分，请勿将其视为独立文档：\n\n{chunk}"
-                parameters = {
-                    "user_prompt": prompt,
-                    "schema": schema,
-                    "input_text": enhanced_chunk,
-                    "examples": examples
-                }
-                parameters_list.append(parameters)
-            result_list = await sync_task_manager.run_async_tasks(
-                self.node_extractor.entity_and_relationship_extract,
-                parameters_list
-            )
-            # print("抽取结果数：", result_list)
-            graph_result = {
-                "entities": [],
-                "relations": [],
-                "texts_classes": []
-            }
-            for i, result in enumerate(result_list):
-                if not isinstance(result, dict):
-                    print(f"第{i}个文段块抽取失败")
-                graph_result["entities"] = graph_result["entities"] + result.get("entities", [])
-                graph_result["relations"] = graph_result["relations"] + result.get("relations", [])
-                graph_result["texts_classes"] = self.node_extractor.merge_text_class(
-                    graph_result["texts_classes"],
-                    result.get("texts_classes", [])
-                )
-            return graph_result
-        except Exception as e:
-            print("分段抽取失败：", e)
-            raise e
+        for entity_i in entities_i:
+            for entity_j in entities_j:
+                i_name = getattr(entity_i, "name", None)
+                i_type = getattr(entity_i, "entity_type", None)
+                j_name = getattr(entity_j, "name", None)
+                j_type = getattr(entity_j, "entity_type", None)
+                if not i_name or not i_type or not j_name or not j_type:
+                    continue
+                if i_type == j_type and clean_and_calculate_similarity(i_name, j_name) > 0.9:
+                    return True
+        return False
 
     def _merge_source_texts_to_info_map(
             self,
@@ -735,36 +738,21 @@ class GraphExtraction:
         paragraphs = text.split("\n\n")
         chunks = []
 
-        # 先将段落按顺序尝试合并，再处理过长段落
-        processed_paragraphs = []
-        temp_chunk = ""
-
         for paragraph in paragraphs:
-            if not paragraph.strip():  # 跳过空段落
-                continue
-
-            if not temp_chunk:
-                temp_chunk = paragraph
-            else:
-                combined_length = len(temp_chunk) + len(paragraph) + 2
-                if combined_length <= max_chunk_size:
-                    temp_chunk = temp_chunk + "\n\n" + paragraph
+            if len(paragraph) <= max_chunk_size:
+                # 段落长度合适，直接添加
+                if chunks:
+                    # 与前一个块合并（考虑重叠）
+                    last_chunk = chunks[-1]
+                    if len(last_chunk) + len(paragraph) + 2 <= max_chunk_size:
+                        chunks[-1] = last_chunk + "\n\n" + paragraph
+                    else:
+                        chunks.append(paragraph)
                 else:
-                    # 当前组合超长，保存临时块并开始新的临时块
-                    processed_paragraphs.append(temp_chunk)
-                    temp_chunk = paragraph
-
-        # 添加最后一个临时块
-        if temp_chunk:
-            processed_paragraphs.append(temp_chunk)
-
-        # 对处理后的段落进行最终的长度检查和分割
-        for para in processed_paragraphs:
-            if len(para) <= max_chunk_size:
-                chunks.append(para)
+                    chunks.append(paragraph)
             else:
-                # 段落仍然过长，需要进一步分割
-                sub_chunks = GraphExtraction._split_long_text(para, max_chunk_size, overlap_size)
+                # 段落过长，需要进一步分割
+                sub_chunks = GraphExtraction._split_long_text(paragraph, max_chunk_size, overlap_size)
                 chunks.extend(sub_chunks)
 
         return chunks
@@ -859,7 +847,6 @@ def clean_and_calculate_similarity(str1: str, str2: str) -> float:
     Returns:
         float: 相似度值 [0.0, 1.0]，1.0表示完全相同
     """
-
     def clean_string(text: str) -> str:
         """
         清洗字符串：移除中文标点符号

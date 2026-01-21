@@ -921,3 +921,79 @@ async def kg_extract_by_local_dir(
             code=500,
             data=None
         )
+
+
+@router.post("/kgs/{kg_id}/law_kg_extract_by_dir")
+async def kg_extract_by_local_dir(
+        background_tasks: BackgroundTasks,  # 后台任务管理器
+        data_dir: str,
+        prompt: str,
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+    功能特例化：
+    输入目录、提示词文件位置，
+    以目录为基础创建一个kg，
+    然后遍历目录下的每个文件，
+    每个文件创建一个任务，
+    目录下的文件对应任务全执行完后合并图谱
+
+    以此，json请求格式为：
+    {
+        "data_dir": "文件位置",
+        "prompt": "提示词位置"
+    }
+
+    Args:
+        background_tasks (BackgroundTasks): FastAPI后台任务管理器
+        data_dir (str): 本体抽取的文件目录位置
+        prompt (str): 提示词文件位置
+        type (int): 任务类型，默认为1
+        db (Session): 数据库会话对象，通过依赖注入自动获取
+
+    Returns:
+        dict: 任务创建结果的响应
+            {
+                "code": 200,
+                "msg": "任务开始执行",
+                "data": null
+            }
+
+    Raises:
+        Exception: 当创建任务失败时返回错误响应
+    """
+    try:
+        # 检验参数
+        file_dir = data_dir.replace('\\', '/')
+        if not os.path.exists(file_dir):
+            raise Exception(f"文件目录不存在: {file_dir}")
+        if not os.path.isdir(file_dir):
+            raise Exception(f"文件目录不是目录: {file_dir}")
+        prompt_path = prompt.replace('\\', '/')
+        if not os.path.exists(prompt_path):
+            raise Exception(f"Python文件不存在: {prompt_path}")
+        # 动态导入Python文件
+        spec = importlib.util.spec_from_file_location("prompt_module", prompt_path)
+        prompt_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(prompt_module)
+        # 获取需要的变量（假设文件中有prompt、schema、examples等变量）
+        prompt_dict = {
+            'prompt': getattr(prompt_module, 'prompt', ''),
+            'schema': getattr(prompt_module, 'schema', {}),
+            'examples': getattr(prompt_module, 'examples', [])
+        }
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.kg_extract_by_local_dir,
+            {"file_dir": file_dir, "prompt_dict": prompt_dict, "db": db}
+        )
+        return success_response(
+            msg="任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行任务失败: {str(e)}",
+            code=500,
+            data=None
+        )

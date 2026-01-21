@@ -160,4 +160,10 @@ class IGraphStorage(ABC):
     ):
         pass
 
-
+    @abstractmethod
+    def get_nodes_by_properties(
+            self,
+            graph_tag: str,
+            properties: Dict[str, Any],
+    ):
+        pass

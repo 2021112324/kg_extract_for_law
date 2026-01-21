@@ -50,8 +50,8 @@ def get_prompt_for_entity_and_relation_extraction(
 {
     "extractions": [
         {
-            "类别实体": "提取的实体",
-            "类别实体_attributes": {
+            "实体类型A": "实体名称a",
+            "实体类型A_attributes": {
                 "属性名1": "属性值1",
                 "属性名2": "属性值2",
                 ...
@@ -59,11 +59,11 @@ def get_prompt_for_entity_and_relation_extraction(
         },
         ...
         {
-            "关系": "关系文本",
+            "关系": "关系文本x",
             "关系_attributes": {
-                "主体": "华为", 
-                "谓词": "研发", 
-                "客体": "麒麟芯片"
+                "主体": "实体类型A_实体名称a", 
+                "谓词": "关系名称X", 
+                "客体": "实体类型B_实体名称b"
             }
         },
         ...
@@ -102,8 +102,8 @@ def get_prompt_for_entity_extraction(
 {
     "extractions": [
         {
-            "类别实体": "提取的实体",
-            "类别实体_attributes": {
+            "实体类型A": "实体名称a",
+            "实体类型A_attributes": {
                 "属性名1": "属性值1",
                 "属性名2": "属性值2",
                 ...
@@ -147,11 +147,11 @@ def get_prompt_for_relation_extraction(
 {
     "extractions": [
         {
-            "关系": "关系文本",
+            "关系": "关系文本x",
             "关系_attributes": {
-                "主体": "华为", 
-                "谓词": "研发", 
-                "客体": "麒麟芯片"
+                "主体": "实体类型A_实体名称a", 
+                "谓词": "关系名称X", 
+                "客体": "实体类型B_实体名称b"
             }
         }
     ]

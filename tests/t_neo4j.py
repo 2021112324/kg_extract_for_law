@@ -5,7 +5,7 @@ if __name__ == "__main__":
     # 创建知识图谱
     neo4j_adapter.connect()
     print("开始导入数据...")
-    neo4j_adapter.merge_graphs("专利案例库_kg_533965669998264320", "part_of_cases")
+    neo4j_adapter.merge_graphs("附录_kg_536421429038546944", "合规案例库v8_kg_536094435075686400")
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")
@@ -44,6 +44,14 @@ if __name__ == "__main__":
     #     print(f"  名称: {node.name}")
     #     print(f"  标签: {node.label}")
     #     # print(f"  属性: {node.properties}")
-
-
-
+# if __name__ == "__main__":
+#     neo4j_adapter = Neo4jAdapter()
+#     node_map = {
+#         "label": "法规条款依据",
+#         "法规名称": "《中华人民共和国刑法》"
+#     }
+#     neo4j_adapter.connect()
+#     nodes = neo4j_adapter.get_nodes_by_properties(graph_tag="合规案例库v7_kg_536069077999812608", properties=node_map)
+#     neo4j_adapter.disconnect()
+#     for node in nodes:
+#         print(node)

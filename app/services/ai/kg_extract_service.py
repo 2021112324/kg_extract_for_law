@@ -64,10 +64,20 @@ class KGExtractService():
         self.graph_extract = GraphExtraction(
             ModelConfig(
                 # model_name="qwen-long",# 45分钟
-                model_name="qwen3-max", #25分钟
+                model_name="qwen3-max", # 25分钟  # 14分钟
                 api_key="sk-742c7c766efd4426bd60a269259aafaf",
                 api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
             )
+            # ModelConfig(
+            #     model_name="glm-4-plus",  # 25分钟  # 1小时+ 输出json格式总不正确
+            #     api_key="9072ce38f0654f809c6e1e488d017da9.E9zeF7NQn5hlHt18",
+            #     api_url="https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            # )
+            # ModelConfig(
+            #     model_name="deepseek-chat",  # 25分钟  # 1小时+ 输出json格式总不正确
+            #     api_key="sk-01f0b057b3c543cd9cfa6a0f01ca1614",
+            #     api_url="https://api.deepseek.com/chat/completions",
+            # )
         )
         self.file_storage = StorageFactory.get_default_storage()
         self.file_storage.initialize()
@@ -662,6 +672,8 @@ class KGExtractService():
             if result and isinstance(result, dict):
                 result["filename"] = filename
                 result["task_id"] = task_id
+            # TODO：针对法律文件，将其中的法规文本统一成相同名称
+
             return result
 
         except Exception as e:
