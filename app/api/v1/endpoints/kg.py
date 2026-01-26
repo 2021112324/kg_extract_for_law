@@ -533,7 +533,6 @@ async def merge_all_kg_task(
     try:
         return await kg_service.merge_all_graph(
             kg_id=kg_id,
-            merge_flag=True,
             db=db
         )
     except Exception as e:

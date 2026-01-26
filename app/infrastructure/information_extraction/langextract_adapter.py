@@ -261,8 +261,8 @@ class LangextractAdapter(IInformationExtraction):
             print(f"Warning: entity_schema 应当为 dict、list or str, got {type(entity_schema)}，使用默认schema")
             entity_schema = general_entity_schema
         # 将schema json转为markdown
-        schema_md = change_schema_json_to_md(entity_schema)
-        entity_schema = schema_md if schema_md else entity_schema
+        # schema_md = change_schema_json_to_md(entity_schema)
+        # entity_schema = schema_md if schema_md else entity_schema
 
         if not examples or not isinstance(examples, list):
             print(f"Warning: 示例应当为 list, got {type(examples)}，使用默认示例")

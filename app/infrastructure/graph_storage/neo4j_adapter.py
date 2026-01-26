@@ -98,7 +98,7 @@ class Neo4jAdapter(IGraphStorage):
         for prop_key, prop_value in properties.items():
             sanitized_key = self._sanitize_property_name(prop_key)
             # 处理属性值，确保为Neo4j支持的类型
-            if prop_value is None:
+            if not prop_value:
                 continue
             elif isinstance(prop_value, (str, int, float, bool)):
                 sanitized_properties[sanitized_key] = prop_value
@@ -201,14 +201,19 @@ class Neo4jAdapter(IGraphStorage):
                 with session.begin_transaction() as tx:
                     # 处理节点
                     for node in kg_data.get('nodes', []):
+                        node_id = node.get('node_id')
+                        node_name = node.get('node_name')
+                        node_type = node.get('node_type')
+                        if not node_id or not node_name or not node_type:
+                            continue
                         # 处理其他属性 - 简化策略，直接设置
                         properties = node.get('properties', {}) or {}
                         sanitized_properties = self._sanitize_properties(properties)
                         # 准备参数
                         params = {
-                            'id': node.get('node_id'),
-                            'name': node.get('node_name'),
-                            'label': node.get('node_type'),
+                            'id': node_id,
+                            'name': node_name,
+                            'label': node_type,
                             'graph_tag': graph_tag,
                             'graph_level': graph_level,
                             **sanitized_properties
@@ -302,8 +307,10 @@ class Neo4jAdapter(IGraphStorage):
                         subject_id = edge.get('source_id')
                         predicate = edge.get('relation_type')
                         object_id = edge.get('target_id')
+                        if not subject_id or not predicate or not object_id:
+                            continue
 
-                        relation_label = edge.get('properties', {}).get('label', '') if edge.get('properties') else ''
+                        relation_label = edge.get('properties', {}).get('label', '') if edge.get('properties') else predicate
 
                         # 处理关系名
                         safe_predicate = ''.join(c if c.isalnum() else '_' for c in predicate)

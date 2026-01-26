@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app.infrastructure.graph_storage.factory import GraphStorageFactory
-from app.infrastructure.information_extraction.graph_extraction import GraphExtraction
+from app.infrastructure.information_extraction.graph_extraction import GraphExtraction, clean_and_calculate_similarity
 from app.infrastructure.information_extraction.method.base import ModelConfig
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.services.tasks.kg_tasks import KGExtractionTaskManager
@@ -62,12 +62,12 @@ class KGExtractService():
             }
         )
         self.graph_extract = GraphExtraction(
-            ModelConfig(
-                # model_name="qwen-long",# 45分钟
-                model_name="qwen3-max", # 25分钟  # 14分钟
-                api_key="sk-742c7c766efd4426bd60a269259aafaf",
-                api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            )
+            # ModelConfig(
+            #     # model_name="qwen-long",# 45分钟
+            #     model_name="qwen3-max", # 25分钟  # 14分钟
+            #     api_key="sk-742c7c766efd4426bd60a269259aafaf",
+            #     api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            # )
             # ModelConfig(
             #     model_name="glm-4-plus",  # 25分钟  # 1小时+ 输出json格式总不正确
             #     api_key="9072ce38f0654f809c6e1e488d017da9.E9zeF7NQn5hlHt18",
@@ -78,6 +78,11 @@ class KGExtractService():
             #     api_key="sk-01f0b057b3c543cd9cfa6a0f01ca1614",
             #     api_url="https://api.deepseek.com/chat/completions",
             # )
+            ModelConfig(
+                model_name="qwen3-30b-a3b-instruct-2507",  # 25分钟  # 1小时+ 输出json格式总不正确
+                api_key="gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847",
+                api_url="http://222.171.219.26:20001/v1/chat/completions",
+            )
         )
         self.file_storage = StorageFactory.get_default_storage()
         self.file_storage.initialize()
@@ -494,7 +499,7 @@ class KGExtractService():
                                         existing_edge["properties"].update(edge.properties)
                                     # 改进1-7:合并source_text_info
                                     if hasattr(edge, "source_text_info") and edge.source_text_info and isinstance(edge.source_text_info, dict):
-                                        if "source_text_info" not in existing_edge:
+                                        if "source_text_info" not in existing_edge or not existing_edge["source_text_info"]:
                                             existing_edge["source_text_info"] = {}
                                         for text_id, new_positions in edge.source_text_info.items():
                                             if text_id in existing_edge["source_text_info"]:
@@ -673,6 +678,33 @@ class KGExtractService():
                 result["filename"] = filename
                 result["task_id"] = task_id
             # TODO：针对法律文件，将其中的法规文本统一成相同名称
+            # 去除filename后缀
+            temp_filename = filename.split('.')[0]
+            pick_file_node = None
+            # deleting_file_nodes = []
+            # deleting_file_node_ids = []
+            top_rate = 0
+            for node in result.get("nodes", []):
+                if getattr(node, "node_type", None) == "法规文件":
+                    node_name = getattr(node, "node_name", "")
+                    if not node_name:
+                        continue
+                    new_rate = clean_and_calculate_similarity(node_name, temp_filename)
+                    if new_rate > top_rate:
+                        top_rate = new_rate
+                        # if pick_file_node:
+                            # deleting_file_nodes.append(pick_file_node)
+                            # deleting_file_node_ids.append(pick_file_node.node_id)
+                        pick_file_node = node
+                    # else:
+                        # deleting_file_nodes.append(node)
+                        # deleting_file_node_ids.append(node.node_id)
+            if pick_file_node:
+                pick_filename_id = pick_file_node.node_id
+                for edge in result.get("edges", []):
+                    if edge.relation_type == "包含":
+                        if edge.source_id != pick_filename_id:
+                            edge.source_id = pick_filename_id
 
             return result
 

@@ -248,26 +248,26 @@ class Resolver(AbstractResolver):
     ### 应用场景
     主要用于知识图谱信息抽取流程中，将非结构化的文本数据解析为结构化的抽取对象，便于后续处理和存储。
     """
-    logging.info("Starting resolver process for input text.")
-    logging.debug("Input Text: %s", input_text)
+    logging.info("Starting resolver process for input text.")  # 记录解析过程开始的日志
+    logging.debug("Input Text: %s", input_text)  # 记录输入文本的调试日志
 
-    try:
-      extraction_data = self.string_to_extraction_data(input_text)
-      logging.debug("Parsed content: %s", extraction_data)
+    try:  # 开始try-except块进行错误处理
+      extraction_data = self.string_to_extraction_data(input_text)  # 调用string_to_extraction_data方法解析输入文本
+      logging.debug("Parsed content: %s", extraction_data)  # 记录解析后内容的调试日志
 
-    except (ResolverParsingError, ValueError) as e:
-      if suppress_parse_errors:
-        logging.exception(
-            "Failed to parse input_text: %s, error: %s", input_text, e
+    except (ResolverParsingError, ValueError) as e:  # 捕获ResolverParsingError或ValueError异常
+      if suppress_parse_errors:  # 如果设置了抑制解析错误
+        logging.exception(  # 记录异常日志
+          "Failed to parse input_text: %s, error: %s", input_text, e  # 解析input_text失败：输入文本，错误信息
         )
-        return []
-      raise ResolverParsingError("Failed to parse content.") from e
+        return []  # 返回空列表
+      raise ResolverParsingError("Failed to parse content.") from e  # 抛出ResolverParsingError异常，原因为捕获的异常
 
-    processed_extractions = self.extract_ordered_extractions(extraction_data)
+    processed_extractions = self.extract_ordered_extractions(extraction_data)  # 调用extract_ordered_extractions方法处理抽取数据
 
-    logging.debug("Completed the resolver process.")
+    logging.debug("Completed the resolver process.")  # 记录解析过程完成的调试日志
 
-    return processed_extractions
+    return processed_extractions  # 返回处理后的抽取结果
 
   def align(
       self,
@@ -275,63 +275,70 @@ class Resolver(AbstractResolver):
       source_text: str,
       token_offset: int,
       char_offset: int | None = None,
-      enable_fuzzy_alignment: bool = False,
+      enable_fuzzy_alignment: bool = True,
       fuzzy_alignment_threshold: float = _FUZZY_ALIGNMENT_MIN_THRESHOLD,
       accept_match_lesser: bool = True,
   ) -> Iterator[data.Extraction]:
-    """Aligns annotated extractions with source text.
-
-    This uses WordAligner which is based on Python's difflib SequenceMatcher to
-    match tokens in the source text with tokens from the annotated extractions.
-    If
-    the extraction order is significantly different from the source text order,
-    difflib may skip some matches, leaving certain extractions unmatched.
-
-    Args:
-      extractions: Annotated extractions.
-      source_text: The text chunk in which to align the extractions.
-      token_offset: The starting token index of the chunk.
-      char_offset: The starting character index of the chunk.
-      enable_fuzzy_alignment: Whether to enable fuzzy alignment fallback.
-      fuzzy_alignment_threshold: Minimum overlap ratio required for fuzzy
-        alignment.
-      accept_match_lesser: Whether to accept partial exact matches (MATCH_LESSER
-        status).
-
-    Yields:
-        Iterator on aligned extractions.
     """
-    logging.info("Starting alignment process for provided chunk text.")
+对源文本进行对齐标注的提取。
 
-    if not extractions:
-      logging.debug(
-          "No extractions found in the annotated text; exiting alignment"
-          " process."
+这使用基于Python的difflib SequenceMatcher的WordAligner来匹配源文本中的标记和标注提取中的标记。
+如果提取顺序与源文本顺序显著不同，difflib可能会跳过某些匹配，使某些提取未匹配。
+
+参数:
+  extractions: 标注的提取结果。
+  source_text: 在其中对提取进行对齐的文本块。
+  token_offset: 文本块的起始标记索引。
+  char_offset: 文本块的起始字符索引。
+  enable_fuzzy_alignment: 是否启用模糊对齐回退。
+  fuzzy_alignment_threshold: 模糊对齐所需的最小重叠比率。
+  accept_match_lesser: 是否接受部分精确匹配(MATCH_LESSER状态)。
+
+返回:
+    对齐提取结果的迭代器。
+    """
+    logging.info("Starting alignment process for provided chunk text.")  # 记录开始对齐过程的日志信息
+
+    if not extractions:  # 如果没有提取结果
+      logging.debug(  # 记录调试日志
+        "No extractions found in the annotated text; exiting alignment"  # 在标注文本中未找到提取结果；退出对齐
+        " process."  # 过程
       )
-      return
-    else:
-      extractions_group = [extractions]
+      return  # 直接返回
+    else:  # 如果有提取结果
+      extractions_group = [extractions]  # 将提取结果包装成列表
+    # TODO
+    logging.info(f"阶段一:enable_fuzzy_alignment:{enable_fuzzy_alignment}\naccept_match_lesser:{accept_match_lesser}")  # 记录开始对齐过程的日志信息
 
-    aligner = WordAligner()
+    aligner = WordAligner()  # 创建WordAligner实例
+    # TODO
+    logging.info("阶段二")  # 记录开始对齐过程的日志信息
+
+    # 调用aligner的align_extractions方法对提取结果进行对齐
     aligned_yaml_extractions = aligner.align_extractions(
-        extractions_group,
-        source_text,
-        token_offset,
-        char_offset or 0,
-        enable_fuzzy_alignment=enable_fuzzy_alignment,
-        fuzzy_alignment_threshold=fuzzy_alignment_threshold,
-        accept_match_lesser=accept_match_lesser,
+      extractions_group,  # 提取结果组
+      source_text,  # 源文本
+      token_offset,  # 标记偏移量
+      char_offset or 0,  # 字符偏移量，如果没有则默认为0
+      enable_fuzzy_alignment=enable_fuzzy_alignment,  # 启用模糊对齐设置
+      fuzzy_alignment_threshold=fuzzy_alignment_threshold,  # 模糊对齐阈值设置
+      accept_match_lesser=accept_match_lesser,  # 接受较小匹配设置
     )
+    # TODO
+    logging.info("阶段三")  # 记录开始对齐过程的日志信息
+
+    # 记录对齐后的提取结果数量
     logging.debug(
-        "Aligned extractions count: %d",
-        sum(len(group) for group in aligned_yaml_extractions),
+      "Aligned extractions count: %d",  # 对齐的提取结果数量：%d
+      sum(len(group) for group in aligned_yaml_extractions),  # 计算所有组中提取结果的总数
     )
 
-    for extraction in itertools.chain(*aligned_yaml_extractions):
-      logging.debug("Yielding aligned extraction: %s", extraction)
-      yield extraction
+    # 遍历所有对齐后的提取结果
+    for extraction in itertools.chain(*aligned_yaml_extractions):  # 使用itertools.chain展开嵌套的提取结果
+      logging.debug("Yielding aligned extraction: %s", extraction)  # 记录正在返回对齐提取结果的日志
+      yield extraction  # 生成对齐后的提取结果
 
-    logging.info("Completed alignment process for the provided source_text.")
+    logging.info("Completed alignment process for the provided source_text.")  # 记录完成对齐过程的日志信息
 
   def _extract_and_parse_content(
       self,
@@ -418,13 +425,13 @@ class Resolver(AbstractResolver):
         parsed_data = json.loads(content)
       logging.debug("Successfully parsed content.")
     except (yaml.YAMLError, json.JSONDecodeError) as e:
-      logging.exception("Failed to parse content.")
+      logging.warning("Failed to parse content.")
       if isinstance(e, json.JSONDecodeError):
-        logging.error("JSON decode error at line %d column %d: %s", e.lineno, e.colno, e.msg)
-        logging.error("Error position: %d", e.pos)
-        logging.error("Error context: %s", repr(content[max(0, e.pos-30):e.pos+30]))
+        logging.warning("JSON decode error at line %d column %d: %s", e.lineno, e.colno, e.msg)
+        logging.warning("Failed position: %d", e.pos)
+        logging.warning("Failed context: %s", repr(content[max(0, e.pos-30):e.pos+30]))
         # 输出完整内容的前200个字符，便于调试
-        logging.error("Full content (first 200 chars): %s", repr(content[:200]))
+        logging.warning("Full content (first 200 chars): %s", repr(content[:200]))
         
         # TODO: 优化1-14 如果是JSON格式且json_repair可用，则尝试修复
         if self.format_type == data.FormatType.JSON and repair_json is not None:
@@ -695,230 +702,308 @@ class WordAligner:
 
   def _fuzzy_align_extraction(
       self,
+      # extraction: 需要对齐的提取结果对象
       extraction: data.Extraction,
+      # source_tokens: 源文本的token列表
       source_tokens: list[str],
+      # tokenized_text: 分词后的源文本对象
       tokenized_text: tokenizer.TokenizedText,
+      # token_offset: 当前块的token偏移量
       token_offset: int,
+      # char_offset: 当前块的字符偏移量
       char_offset: int,
+      # fuzzy_alignment_threshold: 模糊匹配的最小比率阈值，默认为最小阈值
       fuzzy_alignment_threshold: float = _FUZZY_ALIGNMENT_MIN_THRESHOLD,
   ) -> data.Extraction | None:
-    """Fuzzy-align an extraction using difflib.SequenceMatcher on tokens.
+    """使用difflib.SequenceMatcher在tokens上进行模糊对齐。
 
-    The algorithm scans every candidate window in `source_tokens` and selects
-    the window with the highest SequenceMatcher `ratio`. It uses an efficient
-    token-count intersection as a fast pre-check to discard windows that cannot
-    meet the alignment threshold. A match is accepted when the ratio is ≥
-    `fuzzy_alignment_threshold`. This only runs on unmatched extractions, which
-    is usually a small subset of the total extractions.
+    该算法扫描source_tokens中的每个候选窗口，并选择具有最高SequenceMatcher比率的窗口。
+    它使用高效的token计数交集作为快速预检查，以排除无法达到对齐阈值的窗口。
+    当比率≥fuzzy_alignment_threshold时接受匹配。这只在未匹配的提取上运行，
+    这通常是总提取的一个小子集。
 
-    Args:
-      extraction: The extraction to align.
-      source_tokens: The tokens from the source text.
-      tokenized_text: The tokenized source text.
-      token_offset: The token offset of the current chunk.
-      char_offset: The character offset of the current chunk.
-      fuzzy_alignment_threshold: The minimum ratio for a fuzzy match.
+    参数:
+      extraction: 需要对齐的提取结果。
+      source_tokens: 源文本的tokens。
+      tokenized_text: 分词后的源文本。
+      token_offset: 当前块的token偏移量。
+      char_offset: 当前块的字符偏移量。
+      fuzzy_alignment_threshold: 模糊匹配的最小比率。
 
-    Returns:
-      The aligned data.Extraction if successful, None otherwise.
+    返回:
+      如果成功则返回对齐的data.Extraction，否则返回None。
     """
 
+    # 将提取文本分词为小写的token列表
     extraction_tokens = list(
         _tokenize_with_lowercase(extraction.extraction_text)
     )
-    # Work with lightly stemmed tokens so pluralisation doesn't block alignment
+    # 使用轻微词干化的tokens，以便复数形式不会阻止对齐
     extraction_tokens_norm = [_normalize_token(t) for t in extraction_tokens]
 
+    # 如果提取tokens为空，则返回None
     if not extraction_tokens:
       return None
 
+    # 记录调试信息：模糊对齐提取文本及其token数量
     logging.debug(
         "Fuzzy aligning %r (%d tokens)",
         extraction.extraction_text,
         len(extraction_tokens),
     )
 
+    # 初始化最佳比率为0.0
     best_ratio = 0.0
+    # 初始化最佳跨度为None（包含起始索引和窗口大小）
     best_span: tuple[int, int] | None = None  # (start_idx, window_size)
 
+    # 获取提取文本的长度
     len_e = len(extraction_tokens)
+    # 设置最大窗口大小为源tokens的长度
     max_window = len(source_tokens)
 
+    # 计算提取tokens的计数器
     extraction_counts = collections.Counter(extraction_tokens_norm)
+    # 计算最小重叠数量（长度乘以阈值）
     min_overlap = int(len_e * fuzzy_alignment_threshold)
 
+    # 创建SequenceMatcher对象，autojunk设为False，b参数为标准化的提取tokens
     matcher = difflib.SequenceMatcher(autojunk=False, b=extraction_tokens_norm)
 
+    # 遍历窗口大小（从提取文本长度到最大窗口大小）
     for window_size in range(len_e, max_window + 1):
+      # 如果窗口大小超过源tokens长度，则跳出循环
       if window_size > len(source_tokens):
         break
 
-      # Initialize for sliding window
+      # 初始化滑动窗口：创建包含前window_size个源tokens的双端队列
       window_deque = collections.deque(source_tokens[0:window_size])
+      # 计算窗口中标准化token的计数
       window_counts = collections.Counter(
           [_normalize_token(t) for t in window_deque]
       )
 
+      # 遍历可能的起始索引（确保窗口不会超出源tokens范围）
       for start_idx in range(len(source_tokens) - window_size + 1):
-        # Optimization: check if enough overlapping tokens exist before expensive
-        # sequence matching. This is an upper bound on the match count.
+        # 优化：在进行昂贵的序列匹配之前，检查是否存在足够的重叠tokens。
+        # 这是对匹配计数的上限估计。
+        # 如果提取tokens和窗口tokens的交集总数大于等于最小重叠数
         if (extraction_counts & window_counts).total() >= min_overlap:
+          # 将窗口中的tokens标准化
           window_tokens_norm = [_normalize_token(t) for t in window_deque]
+          # 设置matcher的第一个序列
           matcher.set_seq1(window_tokens_norm)
+          # 获取匹配块并计算匹配总数
           matches = sum(size for _, _, size in matcher.get_matching_blocks())
+          # 计算匹配比率
           if len_e > 0:
             ratio = matches / len_e
           else:
             ratio = 0.0
+          # 如果当前比率优于最佳比率
           if ratio > best_ratio:
+            # 更新最佳比率
             best_ratio = ratio
+            # 更新最佳跨度
             best_span = (start_idx, window_size)
 
-        # Slide the window to the right
+        # 将窗口向右滑动
+        # 如果起始索引+窗口大小小于源tokens长度
         if start_idx + window_size < len(source_tokens):
-          # Remove the leftmost token from the count
+          # 从计数中移除最左边的token
           old_token = window_deque.popleft()
           old_token_norm = _normalize_token(old_token)
           window_counts[old_token_norm] -= 1
+          # 如果该token计数变为0，则从计数器中删除
           if window_counts[old_token_norm] == 0:
             del window_counts[old_token_norm]
 
-          # Add the new rightmost token to the deque and count
+          # 将新的最右边token添加到队列和计数中
           new_token = source_tokens[start_idx + window_size]
           window_deque.append(new_token)
           new_token_norm = _normalize_token(new_token)
           window_counts[new_token_norm] += 1
 
+    # 如果找到了最佳跨度且最佳比率大于等于模糊对齐阈值
     if best_span and best_ratio >= fuzzy_alignment_threshold:
+      # 解包最佳跨度为起始索引和窗口大小
       start_idx, window_size = best_span
 
       try:
+        # 设置提取结果的token区间
         extraction.token_interval = tokenizer.TokenInterval(
+            # 设置起始索引（加上偏移量）
             start_index=start_idx + token_offset,
+            # 设置结束索引（加上偏移量和窗口大小）
             end_index=start_idx + window_size + token_offset,
         )
 
+        # 获取起始token
         start_token = tokenized_text.tokens[start_idx]
+        # 获取结束token
         end_token = tokenized_text.tokens[start_idx + window_size - 1]
+        # 设置提取结果的字符区间
         extraction.char_interval = data.CharInterval(
+            # 设置起始位置（加上字符偏移量和起始token的起始位置）
             start_pos=char_offset + start_token.char_interval.start_pos,
+            # 设置结束位置（加上字符偏移量和结束token的结束位置）
             end_pos=char_offset + end_token.char_interval.end_pos,
         )
 
+        # 设置对齐状态为模糊匹配
         extraction.alignment_status = data.AlignmentStatus.MATCH_FUZZY
+        # 返回对齐后的提取结果
         return extraction
       except IndexError:
+        # 如果发生索引错误，记录异常信息
         logging.exception(
             "Index error while setting intervals during fuzzy alignment."
         )
+        # 返回None
         return None
 
+    # 如果没有找到满足条件的最佳跨度，返回None
     return None
+
 
   def align_extractions(
       self,
+      # extraction_groups: 提取结果的分组，每个组包含多个Extraction对象
       extraction_groups: Sequence[Sequence[data.Extraction]],
+      # source_text: 源文本，用于与提取结果进行对齐
       source_text: str,
+      # token_offset: token区间起始和结束索引的偏移量，默认为0
       token_offset: int = 0,
+      # char_offset: 字符区间起始和结束位置的偏移量，默认为0
       char_offset: int = 0,
+      # delim: 用于分隔多token提取结果的分隔符，默认为Unicode单元分隔符
       delim: str = "\u241F",  # Unicode Symbol for unit separator
+      # enable_fuzzy_alignment: 是否在精确匹配失败时使用模糊对齐，默认为True
       enable_fuzzy_alignment: bool = True,
+      # fuzzy_alignment_threshold: 模糊对齐的最小token重叠比率(0-1)，默认为最小阈值
       fuzzy_alignment_threshold: float = _FUZZY_ALIGNMENT_MIN_THRESHOLD,
+      # accept_match_lesser: 是否接受部分精确匹配，默认为True
       accept_match_lesser: bool = True,
   ) -> Sequence[Sequence[data.Extraction]]:
-    """Aligns extractions with their positions in the source text.
+    """将提取结果与源文本中的位置对齐。
 
-    This method takes a sequence of extractions and the source text, aligning
-    each extraction with its corresponding position in the source text. It
-    returns a sequence of extractions along with token intervals indicating the
-    start and
-    end positions of each extraction in the source text. If an extraction cannot
-    be
-    aligned, its token interval is set to None.
+    此方法接收一系列提取结果和源文本，将每个提取结果与源文本中的相应位置对齐。
+    它返回一系列提取结果以及指示每个提取结果在源文本中起始和结束位置的token区间。
+    如果某个提取结果无法对齐，则其token区间被设置为None。
 
-    Args:
-      extraction_groups: A sequence of sequences, where each inner sequence
-        contains an Extraction object.
-      source_text: The source text against which extractions are to be aligned.
-      token_offset: The offset to add to the start and end indices of the token
-        intervals.
-      char_offset: The offset to add to the start and end positions of the
-        character intervals.
-      delim: Token used to separate multi-token extractions.
-      enable_fuzzy_alignment: Whether to use fuzzy alignment when exact matching
-        fails.
-      fuzzy_alignment_threshold: Minimum token overlap ratio for fuzzy alignment
-        (0-1).
-      accept_match_lesser: Whether to accept partial exact matches (MATCH_LESSER
-        status).
+    参数:
+      extraction_groups: 序列的序列，其中每个内部序列包含一个Extraction对象。
+      source_text: 用于对齐提取结果的源文本。
+      token_offset: 要添加到token区间起始和结束索引的偏移量。
+      char_offset: 要添加到字符区间起始和结束位置的偏移量。
+      delim: 用于分隔多token提取结果的分隔符。
+      enable_fuzzy_alignment: 当精确匹配失败时是否使用模糊对齐。
+      fuzzy_alignment_threshold: 模糊对齐的最小token重叠比率 (0-1)。
+      accept_match_lesser: 是否接受部分精确匹配 (MATCH_LESSER状态)。
 
-    Returns:
-      A sequence of extractions aligned with the source text, including token
-      intervals.
+    返回:
+      与源文本对齐的提取结果序列，包括token区间。
     """
+    # 记录调试信息：开始对提取结果与源文本进行对齐，打印待对齐的提取组
     logging.debug(
         "WordAligner: Starting alignment of extractions with the source text."
         " Extraction groups to align: %s",
         extraction_groups,
     )
+    # 如果没有提取组，则记录信息并返回空列表
     if not extraction_groups:
       logging.info("No extraction groups provided; returning empty list.")
       return []
-
+    # TODO
+    logging.info("阶段二-1")  # 记录开始对齐过程的日志信息
+    # 将源文本分词为小写形式的token列表
     source_tokens = list(_tokenize_with_lowercase(source_text))
-
+    # TODO
+    logging.info("阶段二-2")  # 记录开始对齐过程的日志信息
+    # 获取分隔符的token长度
     delim_len = len(list(_tokenize_with_lowercase(delim)))
+    # 如果分隔符不是单个token，则抛出ValueError异常
     if delim_len != 1:
       raise ValueError(f"Delimiter {delim!r} must be a single token.")
 
+    # 记录调试信息：使用指定分隔符进行提取对齐
     logging.debug("Using delimiter %r for extraction alignment", delim)
-
+    # TODO
+    logging.info("阶段二-3")  # 记录开始对齐过程的日志信息
+    # 将所有提取结果的文本用分隔符连接起来并进行分词
     extraction_tokens = _tokenize_with_lowercase(
         f" {delim} ".join(
+            # 遍历所有提取组中的提取结果，获取其文本内容
             extraction.extraction_text
             for extraction in itertools.chain(*extraction_groups)
         )
     )
-
+    # TODO
+    logging.info("阶段二-4")  # 记录开始对齐过程的日志信息
+    # 设置源token序列和提取token序列
     self._set_seqs(source_tokens, extraction_tokens)
 
+    # 创建索引到提取组的映射字典
     index_to_extraction_group = {}
+    # 初始化提取索引
     extraction_index = 0
+    # 遍历提取组及其索引
+    # TODO
+    logging.info("阶段二-5")  # 记录开始对齐过程的日志信息
     for group_index, group in enumerate(extraction_groups):
+      # 记录调试信息：处理提取组及其包含的提取数量
       logging.debug(
           "Processing extraction group %d with %d extractions.",
           group_index,
           len(group),
       )
+      # 遍历当前组中的每个提取结果
       for extraction in group:
-        # Validate delimiter doesn't appear in extraction text
+        # 验证分隔符是否出现在提取文本中
         if delim in extraction.extraction_text:
+          # 如果分隔符出现在提取文本中，则抛出ValueError异常
           raise ValueError(
               f"Delimiter {delim!r} appears inside extraction text"
               f" {extraction.extraction_text!r}. This would corrupt alignment"
               " mapping."
           )
 
+        # 将提取索引映射到提取对象和组索引
         index_to_extraction_group[extraction_index] = (extraction, group_index)
+        # 将当前提取文本分词为小写token列表
         extraction_text_tokens = list(
             _tokenize_with_lowercase(extraction.extraction_text)
         )
+        # 更新提取索引（加上当前提取文本的token数量和分隔符长度）
         extraction_index += len(extraction_text_tokens) + delim_len
-
+    # TODO
+    logging.info("阶段二-6")  # 记录开始对齐过程的日志信息
+    # 创建对齐后的提取组列表，为每个提取组初始化空列表
     aligned_extraction_groups: list[list[data.Extraction]] = [
         [] for _ in extraction_groups
     ]
+    # TODO
+    logging.info("阶段二-7")  # 记录开始对齐过程的日志信息
+    # 对源文本进行分词处理
     tokenized_text = tokenizer.tokenize(source_text)
-
-    # Track which extractions were aligned in the exact matching phase
+    # TODO
+    logging.info("阶段二-8")  # 记录开始对齐过程的日志信息
+    # 跟踪在精确匹配阶段对齐的提取结果
     aligned_extractions = []
+    # 初始化精确匹配计数器
     exact_matches = 0
+    # 初始化较短匹配计数器
     lesser_matches = 0
-
-    # Exact matching phase
+    # TODO
+    logging.info("阶段二-9")  # 记录开始对齐过程的日志信息
+    # 精确匹配阶段
+    # 遍历匹配块（i: 源文本起始位置, j: 提取文本起始位置, n: 匹配块大小）
     for i, j, n in self._get_matching_blocks()[:-1]:
+      # 根据j（提取文本起始位置）获取对应的提取对象和组索引
       extraction, _ = index_to_extraction_group.get(j, (None, None))
+      # 如果没有找到对应的提取对象，则跳过当前迭代
       if extraction is None:
+        # 记录调试信息：在difflib匹配块中未找到干净的起始索引
         logging.debug(
             "No clean start index found for extraction index=%d iterating"
             " Difflib matching_blocks",
@@ -926,62 +1011,95 @@ class WordAligner:
         )
         continue
 
+      # 设置提取结果的token区间
       extraction.token_interval = tokenizer.TokenInterval(
+          # 设置起始索引（加上偏移量）
           start_index=i + token_offset,
+          # 设置结束索引（加上偏移量和匹配块大小）
           end_index=i + n + token_offset,
       )
 
+      # 尝试设置字符区间
       try:
+        # 获取起始token
         start_token = tokenized_text.tokens[i]
+        # 获取结束token
         end_token = tokenized_text.tokens[i + n - 1]
+        # 设置字符区间（加上偏移量）
         extraction.char_interval = data.CharInterval(
+            # 设置起始位置（加上字符偏移量和起始token的起始位置）
             start_pos=char_offset + start_token.char_interval.start_pos,
+            # 设置结束位置（加上字符偏移量和结束token的结束位置）
             end_pos=char_offset + end_token.char_interval.end_pos,
         )
       except IndexError as e:
+        # 如果索引越界，则抛出IndexError异常
         raise IndexError(
             "Failed to align extraction with source text. Extraction token"
             f" interval {extraction.token_interval} does not match source text"
             f" tokens {tokenized_text.tokens}."
         ) from e
 
+      # 计算提取文本的token数量
       extraction_text_len = len(
           list(_tokenize_with_lowercase(extraction.extraction_text))
       )
+      # 如果提取文本长度小于匹配块大小
       if extraction_text_len < n:
+        # 抛出ValueError异常：分隔符阻止了大于提取长度的块
         raise ValueError(
             "Delimiter prevents blocks greater than extraction length: "
             f"extraction_text_len={extraction_text_len}, block_size={n}"
         )
+      # 如果提取文本长度等于匹配块大小（精确匹配）
       if extraction_text_len == n:
+        # 设置对齐状态为精确匹配
         extraction.alignment_status = data.AlignmentStatus.MATCH_EXACT
+        # 精确匹配计数加1
         exact_matches += 1
+        # 将当前提取结果添加到已对齐列表中
         aligned_extractions.append(extraction)
       else:
-        # Partial match (extraction longer than matched text)
+        # 部分匹配（提取文本比匹配文本长）
+        # 如果接受较短匹配
         if accept_match_lesser:
+          # 设置对齐状态为较短匹配
           extraction.alignment_status = data.AlignmentStatus.MATCH_LESSER
+          # 较短匹配计数加1
           lesser_matches += 1
+          # 将当前提取结果添加到已对齐列表中
           aligned_extractions.append(extraction)
         else:
-          # Reset intervals when not accepting lesser matches
+          # 如果不接受较短匹配，则重置区间
+          # 设置token区间为None
           extraction.token_interval = None
+          # 设置字符区间为None
           extraction.char_interval = None
+          # 设置对齐状态为None
           extraction.alignment_status = None
-
-    # Collect unaligned extractions
+    # TODO
+    logging.info("阶段二-10")  # 记录开始对齐过程的日志信息
+    # 收集未对齐的提取结果
     unaligned_extractions = []
+    # 遍历所有提取对象及其组索引
     for extraction, _ in index_to_extraction_group.values():
+      # 如果提取结果不在已对齐列表中，则添加到未对齐列表
       if extraction not in aligned_extractions:
         unaligned_extractions.append(extraction)
 
-    # Apply fuzzy alignment to remaining extractions
+    # 对剩余的提取结果应用模糊对齐
+    # 如果启用了模糊对齐且存在未对齐的提取结果
+    # TODO
+    logging.info("阶段二-11")  # 记录开始对齐过程的日志信息
     if enable_fuzzy_alignment and unaligned_extractions:
+      # 记录调试信息：开始对未对齐的提取结果进行模糊对齐
       logging.debug(
           "Starting fuzzy alignment for %d unaligned extractions",
           len(unaligned_extractions),
       )
+      # 遍历未对齐的提取结果
       for extraction in unaligned_extractions:
+        # 调用模糊对齐方法对提取结果进行对齐
         aligned_extraction = self._fuzzy_align_extraction(
             extraction,
             source_tokens,
@@ -990,41 +1108,57 @@ class WordAligner:
             char_offset,
             fuzzy_alignment_threshold,
         )
+        # 如果模糊对齐成功
         if aligned_extraction:
+          # 将对齐后的提取结果添加到已对齐列表中
           aligned_extractions.append(aligned_extraction)
+          # 记录调试信息：模糊对齐成功
           logging.debug(
               "Fuzzy alignment successful for extraction: %s",
               extraction.extraction_text,
           )
-
+    # TODO
+    logging.info("阶段二-12")  # 记录开始对齐过程的日志信息
+    # 将对齐后的提取结果分配到对应的组中
     for extraction, group_index in index_to_extraction_group.values():
+      # 将提取结果添加到对应组的列表中
       aligned_extraction_groups[group_index].append(extraction)
 
+    # 记录调试信息：最终对齐的提取组
     logging.debug(
         "Final aligned extraction groups: %s", aligned_extraction_groups
     )
+    # 返回对齐后的提取组
     return aligned_extraction_groups
 
 
+
 def _tokenize_with_lowercase(text: str) -> Iterator[str]:
-  """Extract and lowercase tokens from the input text into words.
+  """从输入文本中提取并转换为小写的token。
 
-  This function utilizes the tokenizer module to tokenize text and yields
-  lowercased words.
+  该函数利用tokenizer模块对文本进行分词，并产生小写的单词。
 
-  Args:
-    text (str): The text to be tokenized.
+  参数:
+    text (str): 需要分词的文本。
 
-  Yields:
-    Iterator[str]: An iterator over tokenized words.
+  产出:
+    Iterator[str]: 一个迭代器，用于遍历分词后的单词。
   """
+  # 使用tokenizer对文本进行分词处理，返回TokenizedText对象
   tokenized_pb2 = tokenizer.tokenize(text)
+  # 获取原始文本
   original_text = tokenized_pb2.text
+  # 遍历分词后的token列表
   for token in tokenized_pb2.tokens:
+    # 获取token的字符区间起始位置
     start = token.char_interval.start_pos
+    # 获取token的字符区间结束位置
     end = token.char_interval.end_pos
+    # 从原始文本中提取token对应的字符串
     token_str = original_text[start:end]
+    # 将token字符串转换为小写
     token_str = token_str.lower()
+    # 产出小写的token字符串
     yield token_str
 
 

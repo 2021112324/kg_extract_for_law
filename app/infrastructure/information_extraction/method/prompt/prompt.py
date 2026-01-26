@@ -23,7 +23,9 @@ def get_prompt_for_entity_and_relation_extraction(
         temp_schema = """
 # 提取内容
 本体任务提取的实体schema如下：
+# 实体类型
 """ + nodes_schema + """
+# 关系类型
 """ + edges_schema
     else:
         temp_schema = ""

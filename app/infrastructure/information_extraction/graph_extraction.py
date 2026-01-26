@@ -22,7 +22,9 @@ load_dotenv(env_path)
 
 BATCH_LENGTH = int(os.getenv("BATCH_LENGTH", "5"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
-MAX_CHAR_BUFFER = int(os.getenv("MAX_CHAR_BUFFER", "5000"))
+# MAX_CHAR_BUFFER = int(os.getenv("MAX_CHAR_BUFFER", "5000"))
+MAX_CHAR_BUFFER = 5000
+
 
 LENGTH_THRESHOLD = 0
 
@@ -32,7 +34,8 @@ CHUNK_MAX_LENGTH = 30000
 # OVERLAP_SIZE = int(os.getenv("OVERLAP_SIZE", "500"))
 OVERLAP_SIZE = 2000
 
-TIMEOUT = int(os.getenv("TIMEOUT", "300"))
+# TIMEOUT = int(os.getenv("TIMEOUT", "300"))
+TIMEOUT = 3000
 
 
 class GraphExtraction:
@@ -43,7 +46,7 @@ class GraphExtraction:
                 api_key="sk-742c7c766efd4426bd60a269259aafaf",
                 api_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                 config={
-                    "timeout": 300
+                    "timeout": TIMEOUT
                 }
             )
     ):
