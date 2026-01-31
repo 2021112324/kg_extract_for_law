@@ -1,6 +1,7 @@
 """
 langextract抽取框架适配器
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -51,9 +52,9 @@ class TimeoutException(Exception):
     pass
 
 
-def run_with_timeout(func, args=(), kwargs=None, timeout=1800):
+async def run_with_timeout_async(func, args=(), kwargs=None, timeout=1800):
     """
-    在指定时间内运行函数，超时则抛出异常
+    在指定时间内异步运行函数，超时则抛出异常
 
     Args:
         func: 要执行的函数
@@ -66,35 +67,20 @@ def run_with_timeout(func, args=(), kwargs=None, timeout=1800):
 
     Raises:
         TimeoutException: 超时异常
+        Exception: 函数执行过程中的异常
     """
     if kwargs is None:
         kwargs = {}
 
-    result_queue = queue.Queue()
-
-    def target():
-        try:
-            result = func(*args, **kwargs)
-            result_queue.put(('success', result))
-        except Exception as e:
-            result_queue.put(('error', e))
-
-    thread = threading.Thread(target=target)
-    thread.daemon = True
-    thread.start()
-    thread.join(timeout)
-
-    if thread.is_alive():
-        # 线程仍在运行，表示超时
-        raise TimeoutException(f"函数执行超时：超过{timeout}秒")
-
-    if not result_queue.empty():
-        status, result = result_queue.get()
-        if status == 'error':
-            raise result
+    # 使用asyncio.to_thread在单独的线程中运行阻塞函数
+    try:
+        # 使用asyncio.wait_for设置超时
+        result = await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=timeout
+        )
         return result
-    else:
-        # 队列为空，可能是线程异常退出
+    except asyncio.TimeoutError:
         raise TimeoutException(f"函数执行超时：超过{timeout}秒")
 
 
@@ -149,7 +135,8 @@ class LangextractAdapter(IInformationExtraction):
             dict: 实体列表
             {
                 "entities": list[Entity],
-                "relations": list[Relation]
+                "relations": list[Relationship],
+                "texts_classes": list[TextClass]
             }
         """
         # 输入验证
@@ -161,8 +148,8 @@ class LangextractAdapter(IInformationExtraction):
             print(f"Warning: schema 应当为 dict、list、str, got {type(schema)}, 使用默认schema")
             schema = general_schema
         # 将schema json转为markdown
-        schema_md = change_schema_json_to_md(schema)
-        schema = schema_md if schema_md else schema
+        # schema_md = change_schema_json_to_md(schema)
+        # schema = schema_md if schema_md else schema
 
         if not examples or not isinstance(examples, list):
             print(f"Warning: examples 应当为 list, got {type(examples)}, 使用默认示例数据")
@@ -182,43 +169,43 @@ class LangextractAdapter(IInformationExtraction):
             raise ValueError("langextract需要示例，但未提供示例数据")
 
         # 从Langfuse获取提示词
-        try:
-            raise Exception("跳过从Langfuse获取提示词")
-            # base_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/langextract/prompt_for_entity_and_relation_extraction",
-            #     label="production"
-            # )
-            # entity_def_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/definition_for_entity",
-            #     label="production"
-            # )
-            # relation_def_prompt = self.langfuse.get_prompt(
-            #     name="kg_extraction/definition_for_relation",
-            #     label="production"
-            # )
-            # # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
-            # prompt = base_prompt.compile(
-            #     user_prompt=user_prompt,
-            #     schema=schema if schema else "",
-            #     entity_definition=entity_def_prompt.prompt,
-            #     relation_definition=relation_def_prompt.prompt
-            # )
-        except Exception as e:
-            print(f"从Langfuse获取提示词失败: {e}")
-            print("尝试使用默认提示词")
-            # print("schema内容：")
-            # print(schema)
-            if schema:
-                # 优化1-9：确保提示词实体schema在关系schema前
-                if isinstance(schema, dict) and "nodes" in schema:
-                    # 将 nodes 移到字典最前面
-                    schema = {"nodes": schema.pop("nodes"), **schema}
-                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, schema)
-            else:
-                prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, "")
+        # try:
+        #     raise Exception("跳过从Langfuse获取提示词")
+        #     # base_prompt = self.langfuse.get_prompt(
+        #     #     name="kg_extraction/langextract/prompt_for_entity_and_relation_extraction",
+        #     #     label="production"
+        #     # )
+        #     # entity_def_prompt = self.langfuse.get_prompt(
+        #     #     name="kg_extraction/definition_for_entity",
+        #     #     label="production"
+        #     # )
+        #     # relation_def_prompt = self.langfuse.get_prompt(
+        #     #     name="kg_extraction/definition_for_relation",
+        #     #     label="production"
+        #     # )
+        #     # # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
+        #     # prompt = base_prompt.compile(
+        #     #     user_prompt=user_prompt,
+        #     #     schema=schema if schema else "",
+        #     #     entity_definition=entity_def_prompt.prompt,
+        #     #     relation_definition=relation_def_prompt.prompt
+        #     # )
+        # except Exception as e:
+        #     print(f"从Langfuse获取提示词失败: {e}")
+        #     print("尝试使用默认提示词")
+        #     # print("schema内容：")
+        #     # print(schema)
+        if schema:
+            # 优化1-9：确保提示词实体schema在关系schema前
+            if isinstance(schema, dict) and "nodes" in schema:
+                # 将 nodes 移到字典最前面
+                schema = {"nodes": schema.pop("nodes"), **schema}
+            prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, schema)
+        else:
+            prompt = get_prompt_for_entity_and_relation_extraction(user_prompt, "")
         try:
             input_examples = self.convert_examples_to_example_data(examples)
-            extract_result = self.extract_list_of_dict(
+            extract_result = await self.extract_list_of_dict(
                 prompt,
                 input_examples,
                 input_text,
@@ -282,30 +269,30 @@ class LangextractAdapter(IInformationExtraction):
             raise Exception("langextract需要示例，但未提供示例数据")
 
         # 从Langfuse获取提示词
-        try:
-            base_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/langextract/prompt_for_entity_extraction",
-                label="production"
-            )
-            entity_def_prompt = self.langfuse.get_prompt(
-                name="kg_extraction/definition_for_entity",
-                label="production"
-            )
-            # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
-            prompt_for_entity = base_prompt.compile(
-                user_prompt=user_prompt,
-                entity_schema=entity_schema,
-                entity_definition=entity_def_prompt.prompt,
-            )
-        except Exception as e:
-            print(f"从Langfuse获取提示词失败: {e}")
-            print("尝试使用默认提示词")
-            prompt_for_entity = get_prompt_for_entity_extraction(user_prompt, str(entity_schema))
+        # try:
+        #     base_prompt = self.langfuse.get_prompt(
+        #         name="kg_extraction/langextract/prompt_for_entity_extraction",
+        #         label="production"
+        #     )
+        #     entity_def_prompt = self.langfuse.get_prompt(
+        #         name="kg_extraction/definition_for_entity",
+        #         label="production"
+        #     )
+        #     # schema_json = json.dumps(entity_schema, ensure_ascii=False, indent=2)
+        #     prompt_for_entity = base_prompt.compile(
+        #         user_prompt=user_prompt,
+        #         entity_schema=entity_schema,
+        #         entity_definition=entity_def_prompt.prompt,
+        #     )
+        # except Exception as e:
+        #     print(f"从Langfuse获取提示词失败: {e}")
+        print("尝试使用默认提示词")
+        prompt_for_entity = get_prompt_for_entity_extraction(user_prompt, str(entity_schema))
             # return []
         try:
             # prompt_for_entity = self.default_prompt.prompt_for_entity(prompt_delete, entity_schema)
             input_examples = self.convert_examples_to_example_data(examples)
-            extract_result = self.extract_list_of_dict(
+            extract_result = await self.extract_list_of_dict(
                 prompt_for_entity,
                 input_examples,
                 input_text,
@@ -434,7 +421,7 @@ class LangextractAdapter(IInformationExtraction):
             # prompt_for_relation = self.default_prompt.prompt_for_relation(prompt_delete, entity_names,
             # relation_schema)
             input_examples = self.convert_examples_to_example_data(examples)
-            extract_result = self.extract_list_of_dict(
+            extract_result = await self.extract_list_of_dict(
                 prompt_for_relation,
                 input_examples,
                 input_text,
@@ -619,7 +606,7 @@ class LangextractAdapter(IInformationExtraction):
         graph_result = self.convert_document_list_to_graph_dict(extraction_result)
         return graph_result.get("relations", []), graph_result.get("texts", [])
 
-    def extract_list_of_dict(
+    async def extract_list_of_dict(
             self,
             prompt: str,
             examples: list,
@@ -667,24 +654,24 @@ class LangextractAdapter(IInformationExtraction):
                 print(f"尝试第 {attempt + 1}/{self.max_retries} 次提取...")
 
                 # 打印配置信息用于调试
-                print(f"配置信息: model_id={config.model_name}, format_type={config.format_type}")
+                # print(f"配置信息: model_id={config.model_name}, format_type={config.format_type}")
 
                 # 使用附加模型language_model_type=CustomAPIModel时，需要为language_model_params添加参数"api_url"
                 if config.language_model_type == lx.inference.CustomAPIModel:
                     config.config["api_url"] = config.api_url
-                    print(f"设置自定义API URL: {config.api_url}")
+                    # print(f"设置自定义API URL: {config.api_url}")
 
-                print("调用lx.extract方法...")
+                # print("调用lx.extract方法...")
                 # print("-----------------------------------------")
                 # print("input_text: " + input_text)
                 # print("prompt: " + prompt)
                 # print("examples: " + str(examples))
                 # print("-----------------------------------------")
-                print("分块大小: " + str(config.max_char_buffer))
-                print("文本长度: " + str(len(input_text)))
+                # print("分块大小: " + str(config.max_char_buffer))
+                # print("文本长度: " + str(len(input_text)))
 
                 # 使用带超时的函数执行lx.extract
-                result = run_with_timeout(
+                result = await run_with_timeout_async(
                     lx.extract,
                     args=(),
                     kwargs={
@@ -718,19 +705,19 @@ class LangextractAdapter(IInformationExtraction):
                 else:
                     result_list = list(result)
                 document_dict_list = self.convert_document_to_dict_with_text(result_list)
-                try:
-                    formatted_json = json.dumps(
-                        document_dict_list,
-                        indent=2,
-                        ensure_ascii=False,
-                        default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
-                    )
-                    # print("提取结果的格式化JSON输出:")
-                    # print(formatted_json)
-                    logger.info("提取结果的JSON输出:")
-                    logger.info(formatted_json)
-                except Exception as json_error:
-                    logger.warning("格式化JSON输出失败:")
+                # try:
+                #     formatted_json = json.dumps(
+                #         document_dict_list,
+                #         indent=2,
+                #         ensure_ascii=False,
+                #         default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
+                #     )
+                #     # print("提取结果的格式化JSON输出:")
+                #     # print(formatted_json)
+                #     logger.info("提取结果的JSON输出:")
+                #     logger.info(formatted_json)
+                # except Exception as json_error:
+                #     logger.warning("格式化JSON输出失败:")
                     # print(f"格式化JSON输出失败: {json_error}")
                 return document_dict_list
                 # return self.convert_annotated_document_to_dict(result)

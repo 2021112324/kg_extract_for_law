@@ -1,6 +1,8 @@
 import re
 from difflib import SequenceMatcher
 
+from modelscope.preprocessors.nlp.space.tokenizer import clean_string
+
 
 def clean_and_calculate_similarity(str1: str, str2: str) -> float:
     """
@@ -14,19 +16,7 @@ def clean_and_calculate_similarity(str1: str, str2: str) -> float:
         float: 相似度值 [0.0, 1.0]，1.0表示完全相同
     """
 
-    def clean_string(text: str) -> str:
-        """
-        清洗字符串：移除中文标点符号
 
-        Args:
-            text: 输入文本
-
-        Returns:
-            str: 清洗后的文本
-        """
-        # 定义中文和英文标点符号的正则表达式
-        punctuation_pattern = r'[^\w\s\u4e00-\u9fff]'
-        return re.sub(punctuation_pattern, '', text)
 
     # 1. 清洗字符串
     cleaned_str1 = clean_string(str1)

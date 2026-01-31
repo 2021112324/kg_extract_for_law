@@ -996,3 +996,62 @@ async def kg_extract_by_local_dir(
             code=500,
             data=None
         )
+
+
+"""
+改进的针对法律知识图谱单门设计抽取流程的接口
+"""
+
+@router.post("/kgs/{kg_id}/clause_extract_by_dir")
+async def clause_extract_by_dir(
+        background_tasks: BackgroundTasks,  # 后台任务管理器
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+基于单门的法规文件知识图谱抽取流程设计的接口
+功能：对指定目录下的法规文件进行知识图谱抽取，以指定目录为总图谱kg，每个文件生成一个图谱task，if_del_task设置合并图谱时是否删除task，默认为False
+1. 抽取流程核心代码：app/infrastructure/information_extraction/law_extract
+2. 提示词文件位置：app/infrastructure/information_extraction/law_extract/prompt
+
+以此，json请求格式为：
+{
+    "data_dir": "文件位置"
+}
+
+Args:
+    background_tasks (BackgroundTasks): FastAPI后台任务管理器
+    data_dir (str): 本体抽取的文件目录位置
+    if_del_task (bool): 合并图谱到总图谱时是否删除task，默认为False
+    db (Session): 数据库会话对象，通过依赖注入自动获取
+
+Returns:
+    dict: 任务创建结果的响应
+        {
+            "code": 200,
+            "msg": "任务开始执行",
+            "data": null
+        }
+
+Raises:
+    Exception: 当创建任务失败时返回错误响应
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_extract_by_local_dir,
+            {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+

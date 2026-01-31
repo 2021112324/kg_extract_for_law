@@ -28,7 +28,6 @@ import dataclasses
 import enum
 import re
 
-import jieba
 from absl import logging
 
 from . import exceptions
@@ -137,19 +136,13 @@ class TokenizedText:
 _LETTERS_PATTERN = r"[A-Za-z]+"
 _DIGITS_PATTERN = r"[0-9]+"
 _SYMBOLS_PATTERN = r"[^A-Za-z0-9\s]+"
-_END_OF_SENTENCE_PATTERN = re.compile(r"[.!?。！？…]+$")
+_END_OF_SENTENCE_PATTERN = re.compile(r"[.?!]$")
 _SLASH_ABBREV_PATTERN = r"[A-Za-z0-9]+(?:/[A-Za-z0-9]+)+"
-_CHINESE_CHAR_PATTERN = r"[\u4e00-\u9fff]+"  # 基本汉字
 
 _TOKEN_PATTERN = re.compile(
     rf"{_SLASH_ABBREV_PATTERN}|{_LETTERS_PATTERN}|{_DIGITS_PATTERN}|{_SYMBOLS_PATTERN}"
 )
 _WORD_PATTERN = re.compile(rf"(?:{_LETTERS_PATTERN}|{_DIGITS_PATTERN})\Z")
-
-# 修改正则表达式以包含中文字符
-_CHINESE_TOKEN_PATTERN = re.compile(
-    rf"{_SLASH_ABBREV_PATTERN}|{_LETTERS_PATTERN}|{_DIGITS_PATTERN}|{_CHINESE_CHAR_PATTERN}|{_SYMBOLS_PATTERN}"
-)
 
 # Known abbreviations that should not count as sentence enders.
 # TODO: This can potentially be removed given most use cases
@@ -201,127 +194,6 @@ def tokenize(text: str) -> TokenizedText:
     previous_end = end_pos
   logging.debug("Completed tokenize(). Total tokens: %d", len(tokenized.tokens))
   return tokenized
-  #
-  # # 判断文本是否包含中文
-  # has_chinese = bool(re.search(_CHINESE_CHAR_PATTERN, text))
-  #
-  # if has_chinese:
-  #   # 对于包含中文的文本，使用jieba分词
-  #   jieba_tokens = list(jieba.tokenize(text))
-  #
-  #   previous_end = 0
-  #   for token_index, (word, start_pos, end_pos) in enumerate(jieba_tokens):
-  #       matched_text = word
-  #
-  #       # 创建token
-  #       token = Token(
-  #           index=token_index,
-  #           char_interval=CharInterval(start_pos=start_pos, end_pos=end_pos),
-  #           token_type=TokenType.WORD,
-  #           first_token_after_newline=False,
-  #       )
-  #
-  #       # 检查前面是否有换行
-  #       if token_index > 0:
-  #           gap = text[previous_end:start_pos]
-  #           if "\n" in gap or "\r" in gap:
-  #               token.first_token_after_newline = True
-  #
-  #       # 分类token类型
-  #       if re.fullmatch(_DIGITS_PATTERN, matched_text):
-  #           token.token_type = TokenType.NUMBER
-  #       elif re.fullmatch(_SLASH_ABBREV_PATTERN, matched_text):
-  #           token.token_type = TokenType.ACRONYM
-  #       elif re.fullmatch(_LETTERS_PATTERN, matched_text):
-  #           token.token_type = TokenType.WORD
-  #       elif re.fullmatch(_CHINESE_CHAR_PATTERN, matched_text):
-  #           token.token_type = TokenType.WORD  # 中文字符作为WORD类型
-  #       elif re.fullmatch(_SYMBOLS_PATTERN, matched_text):
-  #           token.token_type = TokenType.PUNCTUATION
-  #       else:
-  #           # 对于混合字符（如中英文混合词），检查是否包含字母或数字
-  #           if re.search(r'[A-Za-z0-9]', matched_text):
-  #               # 如果包含字母或数字，尝试用原正则表达式进一步拆分
-  #               sub_tokens = list(_TOKEN_PATTERN.finditer(matched_text))
-  #               if len(sub_tokens) > 1:
-  #                   # 如果有多个子token，将它们分别添加
-  #                   for sub_index, sub_match in enumerate(sub_tokens):
-  #                       sub_start, sub_end = sub_match.span()
-  #                       sub_token = Token(
-  #                           index=len(tokenized.tokens),
-  #                           char_interval=CharInterval(
-  #                               start_pos=start_pos + sub_start,
-  #                               end_pos=start_pos + sub_end
-  #                           ),
-  #                           token_type=TokenType.WORD,
-  #                           first_token_after_newline=token.first_token_after_newline,
-  #                       )
-  #
-  #                       # 分类子token
-  #                       sub_text = sub_match.group()
-  #                       if re.fullmatch(_DIGITS_PATTERN, sub_text):
-  #                           sub_token.token_type = TokenType.NUMBER
-  #                       elif re.fullmatch(_SLASH_ABBREV_PATTERN, sub_text):
-  #                           sub_token.token_type = TokenType.ACRONYM
-  #                       elif re.fullmatch(_LETTERS_PATTERN, sub_text):
-  #                           sub_token.token_type = TokenType.WORD
-  #                       elif re.fullmatch(_CHINESE_CHAR_PATTERN, sub_text):
-  #                           sub_token.token_type = TokenType.WORD
-  #                       else:
-  #                           sub_token.token_type = TokenType.PUNCTUATION
-  #
-  #                       tokenized.tokens.append(sub_token)
-  #                   previous_end = end_pos
-  #                   continue
-  #               else:
-  #                   # 只有一个子token，按常规处理
-  #                   if re.fullmatch(_LETTERS_PATTERN, matched_text):
-  #                       token.token_type = TokenType.WORD
-  #                   elif re.fullmatch(_DIGITS_PATTERN, matched_text):
-  #                       token.token_type = TokenType.NUMBER
-  #                   else:
-  #                       token.token_type = TokenType.PUNCTUATION
-  #           else:
-  #               token.token_type = TokenType.PUNCTUATION
-  #
-  #       tokenized.tokens.append(token)
-  #       previous_end = end_pos
-  # else:
-  #   # 对于纯英文文本，使用原来的逻辑
-  #   previous_end = 0
-  #   for token_index, match in enumerate(_TOKEN_PATTERN.finditer(text)):
-  #       start_pos, end_pos = match.span()
-  #       matched_text = match.group()
-  #
-  #       # 创建token
-  #       token = Token(
-  #           index=token_index,
-  #           char_interval=CharInterval(start_pos=start_pos, end_pos=end_pos),
-  #           token_type=TokenType.WORD,
-  #           first_token_after_newline=False,
-  #       )
-  #
-  #       # 检查前面是否有换行
-  #       if token_index > 0:
-  #           gap = text[previous_end:start_pos]
-  #           if "\n" in gap or "\r" in gap:
-  #               token.first_token_after_newline = True
-  #
-  #       # 分类token类型
-  #       if re.fullmatch(_DIGITS_PATTERN, matched_text):
-  #           token.token_type = TokenType.NUMBER
-  #       elif re.fullmatch(_SLASH_ABBREV_PATTERN, matched_text):
-  #           token.token_type = TokenType.ACRONYM
-  #       elif _WORD_PATTERN.fullmatch(matched_text):
-  #           token.token_type = TokenType.WORD
-  #       else:
-  #           token.token_type = TokenType.PUNCTUATION
-  #
-  #       tokenized.tokens.append(token)
-  #       previous_end = end_pos
-  #
-  # logging.debug("Completed tokenize(). Total tokens: %d", len(tokenized.tokens))
-  # return tokenized
 
 
 def tokens_text(

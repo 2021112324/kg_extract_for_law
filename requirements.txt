@@ -86,3 +86,4 @@ ms-swift
 # 其他工具
 absl-py
 
+colorama

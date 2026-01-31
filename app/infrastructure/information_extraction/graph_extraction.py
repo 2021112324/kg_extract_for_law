@@ -23,7 +23,7 @@ load_dotenv(env_path)
 BATCH_LENGTH = int(os.getenv("BATCH_LENGTH", "5"))
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "3"))
 # MAX_CHAR_BUFFER = int(os.getenv("MAX_CHAR_BUFFER", "5000"))
-MAX_CHAR_BUFFER = 5000
+MAX_CHAR_BUFFER = 7500
 
 
 LENGTH_THRESHOLD = 0
