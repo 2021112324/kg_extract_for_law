@@ -192,9 +192,9 @@ class ClauseExtractor:
         :return:
         """
         # 定义正则表达式模式 - 匹配行首的"第X章/节/条 "格式（中间可能有空格，但后面必须有空格）
-        chapter_pattern = re.compile(r'^第[一二三四五六七八九十百千万\d]+\s*章\s+.*', re.MULTILINE)
-        section_pattern = re.compile(r'^第[一二三四五六七八九十百千万\d]+\s*节\s+.*', re.MULTILINE)
-        clause_pattern = re.compile(r'^第([一二三四五六七八九十百千万\d]+)\s*条\s*(.*)', re.MULTILINE)
+        chapter_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*章\s+.*', re.MULTILINE)
+        section_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*节\s+.*', re.MULTILINE)
+        clause_pattern = re.compile(r'^第([零一二三四五六七八九十百千万\d]+)\s*条\s*(.*)', re.MULTILINE)
 
         # 定义结束标志
         end_markers = ['附录', '附件', '附表', '后记', '参考文献', '索引']
@@ -280,6 +280,8 @@ class ClauseExtractor:
 
                     # 更新当前章
                     current_chapter = line.strip().lstrip(' \t\r\n\f\v#-*•·')
+                    # 清空当前节
+                    current_section = ""
                     continue
 
                 # 检查是否是节（匹配行首）
@@ -587,13 +589,13 @@ class ClauseExtractor:
                             # 获取条款单元
                             source_entity = clause_units.get(source_key)
                             if not source_entity:
-                                logging.warning("📄警告：引用关系的源节点不存在")
+                                logging.warning(f"📄警告：引用关系的源节点不存在{relation}")
                                 # TODO 启动模糊匹配
                                 continue
                             # 获取引用依据
                             target_entity = references.get(target_key)
                             if not target_entity:
-                                logging.warning("📄警告：引用关系的目标节点不存在")
+                                logging.warning(f"📄警告：引用关系的目标节点不存在{relation}")
                                 # TODO 启动模糊匹配
                                 continue
                             # 获取引用依据是否是内部条款
@@ -725,6 +727,8 @@ class ClauseExtractor:
             outer_reference_mapping = {}
             inner_reference_id_mapping = {}
             outer_reference_id_mapping = {}
+            # 条款单元到法条的映射
+            unit_to_clause_mapping = {}
             # 将extracted_success_clauses中的法条、条款单元、引用依据节点和关系加入
             for clause in extracted_success_clauses:
                 clause_node_id = clause.get("node_id")
@@ -755,7 +759,7 @@ class ClauseExtractor:
                 )
                 # 将法条作为内部引用依据之一
                 try:
-                    clause_article = clause.get("properties", {}).get("条")
+                    clause_article = clean_string_with_only_words(clause.get("properties", {}).get("条"))
                 except Exception:
                     clause_article = ""
                 if not clause_article:
@@ -790,9 +794,11 @@ class ClauseExtractor:
                             "filename": filename
                         }
                     )
+                    # 将条款单元到法条的映射加入
+                    unit_to_clause_mapping[unit_node_id] = clause_node_id
                     # 将条款单元作为内部引用依据之一
                     try:
-                        unit_article = unit.get("properties", {}).get("单元编号")
+                        unit_article = clean_string_with_only_words(unit.get("properties", {}).get("单元编号"))
                     except Exception:
                         unit_article = ""
                     if not unit_article:
@@ -813,11 +819,11 @@ class ClauseExtractor:
                 ref_node_name = inner_ref.get("node_name")
                 ref_node_type = inner_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
-                    logging.warning(f"📄🔧：引用依据信息不完整{ref}")
+                    logging.warning(f"📄🔧：引用依据信息不完整{inner_ref}")
                     continue
                 # 匹配内部条款单元
                 try:
-                    inner_ref_article = inner_ref.get("properties", {}).get("条款编号")
+                    inner_ref_article = clean_string_with_only_words(inner_ref.get("properties", {}).get("条款编号"))
                 except Exception:
                     inner_ref_article = ""
                 if not inner_ref_article:
@@ -827,6 +833,38 @@ class ClauseExtractor:
                     if not ref_unit_node_id:
                         logging.warning(f"📄🔧：引用依据款项编号未找到对应本文件条款单元{inner_ref}")
                         # TODO：加入模糊匹配
+                        # 如果是“第X条第X项”，则尝试匹配“第X条第一款第X项”
+                        match = re.match(
+                            r'^(第[零一二三四五六七八九十百千万\d]+条)(第[零一二三四五六七八九十百千万\d]+项)$',
+                            inner_ref_article)
+                        if match:
+                            article_part, item_part = match.groups()
+                            # 尝试"第X条第一款第X项"格式
+                            alternative_article = f"{article_part}第一款{item_part}"
+                            logging.warning(f"📄🔧：尝试匹配{alternative_article}")
+                            ref_unit_node_id = inner_reference_id_mapping.get(alternative_article)
+                        if not ref_unit_node_id:
+                            # 尝试匹配“第X条第X款”
+                            match = re.match(r'^(第[零一二三四五六七八九十百千万\d]+条)(第[零一二三四五六七八九十百千万\d]+款)$',
+                                             inner_ref_article)
+                            if match:
+                                article_part, clause_part = match.groups()
+                                alternative_article = f"{article_part}{clause_part}"
+                                logging.warning(f"📄🔧：尝试匹配{alternative_article}")
+                                ref_unit_node_id = inner_reference_id_mapping.get(alternative_article)
+                            if not ref_unit_node_id:
+                                # 如果含“第X条”，则尝试匹配“第X条”
+                                match = re.match(r'(第[零一二三四五六七八九十百千万\d]+条)', inner_ref_article)
+                                if match:
+                                    basic_article = match.group(1)
+                                    logging.warning(f"📄🔧：尝试匹配{basic_article}")
+                                    ref_unit_node_id = inner_reference_id_mapping.get(basic_article)
+                    if not ref_unit_node_id:
+                        logging.warning(f"📄🔧：模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}")
+                    if ref_unit_node_id == unit_node_id:
+                        logging.warning(f"📄🔧：引用依据款项编号与当前条款单元编号一致{inner_ref}")
+                    elif ref_unit_node_id == unit_to_clause_mapping.get(unit_node_id):
+                        logging.warning(f"📄🔧：引用依据款项编号与当前条款单元对应的法条编号一致{inner_ref}")
                     else:
                         final_kg["edges"].append(
                             {
@@ -845,10 +883,10 @@ class ClauseExtractor:
                 ref_node_name = outer_ref.get("node_name")
                 ref_node_type = outer_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
-                    logging.warning(f"📄🔧：引用依据信息不完整{ref}")
+                    logging.warning(f"📄🔧：引用依据信息不完整{outer_ref}")
                     continue
                 # 如果外部引用依据节点id映射不存在，则创建节点并建立关系
-                ref_unit_node_id = outer_reference_id_mapping.get(ref_node_name)
+                ref_unit_node_id = outer_reference_id_mapping.get(clean_string_with_only_words(ref_node_name))
                 # TODO:处理同义实体
                 if not ref_unit_node_id:
                     final_kg["nodes"].append(
@@ -870,7 +908,9 @@ class ClauseExtractor:
                             "filename": filename
                         }
                     )
-                    outer_reference_id_mapping[ref_node_name] = ref_unit_node_id
+                    outer_reference_id_mapping[clean_string_with_only_words(ref_node_name)] = ref_unit_node_id
+                elif ref_unit_node_id == unit_node_id:
+                    logging.warning(f"📄🔧：引用依据款项编号与当前条款单元编号一致{outer_ref}")
                 # 如果外部引用依据节点id映射存在，则直接创建关系
                 else:
                     final_kg["edges"].append(

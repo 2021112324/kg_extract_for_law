@@ -137,7 +137,7 @@ extractor = ClauseExtractor()
 
 async def split_clause_test():
     # 读取示例文件
-    file_path = r"F:\企业大脑知识库系统\8.1项目\数据处理\清洗的数据\国家规章库\安全生产\生产安全事故应急预案管理办法.txt"
+    file_path = r"F:\企业大脑知识库系统\8.1项目\抽取的数据文件\打包\国家法律法规数据库\污染\中华人民共和国土壤污染防治法.md"
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -221,7 +221,7 @@ async def kg_extract_from_clause_test():
 if __name__ == "__main__":
     logger.info("开始执行测试脚本")
     result = asyncio.run(
-        extract_kg_test()
+        split_clause_test()
     )
     logger.info("测试脚本执行完成")
 

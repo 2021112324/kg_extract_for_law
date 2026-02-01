@@ -2033,10 +2033,13 @@ class KGService:
         try:
             for graph_name in graph_names:
                 self.graph_storage.connect()
+                logging.info(f"正在处理图谱 {graph_name}")
                 self.graph_storage.merge_graphs(graph_name, kg_graph_name)
                 if if_del_task:
                     self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"图谱 {graph_name} 处理完成")
                 self.graph_storage.disconnect()
+            logging.info("所有图谱处理完成")
         except Exception as e:
             logging.error(f"图谱合并时出现问题，请检查！" + str(e))
             raise Exception(f"图谱合并时出现问题，请检查！" + str(e))
@@ -2061,7 +2064,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"{source_name}_{generate_snowflake_string_id()}"
+    return f"a1_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()
