@@ -2045,6 +2045,7 @@ class KGService:
             raise Exception(f"图谱合并时出现问题，请检查！" + str(e))
         for file, error in error_files:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
+        await self.clause_extractor.logging_result_stats()
         return True
         # # 每五个文件为一批进行处理
         # max_file_count = 5

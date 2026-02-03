@@ -5,6 +5,7 @@ import os
 import re
 
 from app.infrastructure.information_extraction.base import Entity, Relationship
+from app.infrastructure.information_extraction.case_extract.llm_tool.text_AI_chunking import LegalDocumentAIChunker
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.law_extract.prompt.example import example_for_clause, \
     example_for_file_info
@@ -15,9 +16,9 @@ from app.infrastructure.string_utils.id_tool import generate_hex_uuid
 from app.infrastructure.string_utils.str_clean import clean_string_with_only_words, clean_string_for_neo4j_extended, \
     replace_full_corner_space, replace_zero_width_chars
 
-CLAUSE_MADEL = "qwen3-30b-a3b-instruct-2507"
-CLAUSE_MADEL_API = "gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847"
-CLAUSE_MADEL_KEY = "http://222.171.219.26:20001/v1/chat/completions"
+CASE_MADEL = "qwen3-30b-a3b-instruct-2507"
+CASE_MADEL_API = "gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847"
+CASE_MADEL_KEY = "http://222.171.219.26:20001/v1/chat/completions"
 
 # MAX_CHUNK_SIZE = int(os.getenv("MAX_CHUNK_SIZE", "5000"))
 # BATCH_LENGTH = int(os.getenv("BATCH_LENGTH", "5"))
@@ -30,28 +31,17 @@ MAX_WORKERS = 3
 TIMEOUT = 3000
 
 
-class ResultStats:
+class ChunksCache:
     def __init__(self):
-        self.error = 0
-        self.error_msg = ""
-        self.week_warning = 0
-        self.week_warning_msg = ""
-        self.strong_warning = 0
-        self.strong_warning_msg = ""
+        self.chunks = {}
 
 
-class ClauseCache:
-    def __init__(self):
-        self.file_info = {}
-        self.clause_cache = {}
-
-
-class ClauseExtractor:
-    def __init__(self, max_concurrent: int = 50):
+class CaseExtractor:
+    def __init__(self, max_concurrent: int = 20):
         self.extractor_config = LangextractConfig(
-            model_name=CLAUSE_MADEL,
-            api_key=CLAUSE_MADEL_API,
-            api_url=CLAUSE_MADEL_KEY,
+            model_name=CASE_MADEL,
+            api_key=CASE_MADEL_API,
+            api_url=CASE_MADEL_KEY,
             config={
                 "timeout": TIMEOUT
             },
@@ -66,27 +56,29 @@ class ClauseExtractor:
             config=self.extractor_config
         )
         self.semaphore = asyncio.Semaphore(max_concurrent)  # 添加信号量
-        self.result_stats = ResultStats()
 
         # 宽松模式标志（True则将处理失败的条款直接作为法条实体添加到图谱中（不考虑法条信息、））
         self.lenient_mode = False
+        self.chunking_splitter = LegalDocumentAIChunker()
 
-    async def extract_clauses(
+    async def extract_cases(
             self,
             filename: str,
+            case_type: str,
             text: str
     ) -> dict:
         """
-        实现功能：从法规文件中抽取条款知识图谱数据
+        实现功能：从诉讼文书中抽取条款知识图谱数据
         :param filename:
+        :param case_type:
         :param text:
         :return:
         """
         try:
-            logging.info("📄⏳:开始条款知识图谱抽取")
-            # 分割条款数据
-            logging.info("📄:开始分割条款")
-            clauses_data = await self.split_clause(
+            logging.info("📄⏳:开始诉讼文书知识图谱抽取")
+            # 分割诉讼文本
+            logging.info("📄:开始分割诉讼文本")
+            cases_data = await self.split_cases(
                 text
             )
             logging.info("📄:结束分割条款")
@@ -105,8 +97,6 @@ class ClauseExtractor:
             file_info = clauses_data.get("file_info")
             if not file_info:
                 logging.error("📄❌：文件信息为空")
-                self.result_stats.error += 1
-                self.result_stats.error_msg += "文件信息为空\n"
                 raise ValueError("文件信息为空")
             file_info_result = await self.kg_extract_from_file_info(
                 filename=filename,
@@ -120,8 +110,6 @@ class ClauseExtractor:
             clauses = clauses_data.get("clauses")
             if not clauses:
                 logging.error("📄❌：条款数据为空")
-                self.result_stats.error += 1
-                self.result_stats.error_msg += "条款数据为空\n"
                 raise ValueError("条款数据为空")
             # 批量处理条款数据
             tasks = [
@@ -144,8 +132,6 @@ class ClauseExtractor:
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
                     logging.error(f"条款 {i + 1} 处理失败: {result}")
-                    self.result_stats.error += 1
-                    self.result_stats.error_msg += f"条款 {i + 1} 处理失败: {result}\n"
                     failed_results.append((i + 1, result))
                     # 将对应的clause保存至failed_clauses
                     failed_clauses.append(clauses[i])
@@ -157,9 +143,15 @@ class ClauseExtractor:
                 for i, result in failed_results:
                     logging.error(f"条款 {i} 处理失败: {result}")
                 logging.info("==============================================================")
+            # TODO:DELETE以格式化json输出每个条款处理结果
+            print(json.dumps(file_info_result, ensure_ascii=False, indent=4))
+            logging.info("==============================================================")
+            for i, result in enumerate(successful_results):
+                logging.info(f"条款 {i + 1} 处理结果: ")
+                logging.info(json.dumps(result, ensure_ascii=False, indent=4))
+            logging.info("==============================================================")
 
             if not self.lenient_mode and failed_results:
-                # TODO
                 logging.error("📄🔴🔴🔴：严谨模式：存在处理失败的法条，请检查问题！！！")
                 raise ValueError("存在处理失败的法条，请检查问题！！！")
             final_kg = await self.process_extracted_data(
@@ -172,12 +164,13 @@ class ClauseExtractor:
 
             return final_kg
         except Exception as e:
-            # TODO: 如果缓存中存在结果，将缓存保存起来
+            # 如果缓存中存在结果，将缓存保存起来
             logging.error("📄❌：条款知识图谱抽取报错: %s", e)
             raise e
 
     async def split_clause(
             self,
+            case_type: str,
             text: str
     ) -> dict:
         """
@@ -203,6 +196,16 @@ class ClauseExtractor:
         :param text:
         :return:
         """
+        # 判断诉讼文书类型
+        if case_type == "TODO":
+            logging.info("📄:开始处理TODO")
+        elif case_type == "TODO":
+            logging.info("📄:开始处理TODO")
+        elif case_type == "TODO":
+            logging.info("📄:开始处理TODO")
+        else:
+            logging.error("📄❌：无效的诉讼文书类型")
+            raise ValueError("无效的诉讼文书类型")
         # 定义正则表达式模式 - 匹配行首的"第X章/节/条 "格式（中间可能有空格，但后面必须有空格）
         chapter_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*章\s+.*', re.MULTILINE)
         section_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*节\s+.*', re.MULTILINE)
@@ -243,8 +246,6 @@ class ClauseExtractor:
 
         if not clause_start_idx:
             logging.error("📄❌：文本中匹配条款失败")
-            self.result_stats.error += 1
-            self.result_stats.error_msg += f"文本中匹配条款失败:\n{text[:500]}\n"
             raise ValueError("文本中匹配条款失败")
 
         try:
@@ -351,8 +352,6 @@ class ClauseExtractor:
 
             if not clauses:
                 logging.error("📄❌：未找到条款内容")
-                self.result_stats.error += 1
-                self.result_stats.error_msg += "未找到条款内容\n" + text[:500] + "\n"
                 raise ValueError("未找到条款内容")
             # 将第一条的条款内容拼接至file_info中
             file_info += '\n' + clauses[0]['条款内容']
@@ -362,8 +361,6 @@ class ClauseExtractor:
             }
         except Exception as e:
             logging.error(f"📄❌：提取文件信息时出错 - {e}")
-            self.result_stats.error += 1
-            self.result_stats.error_msg += f"提取文件信息时出错 - {e}\n" + text[:500] + "\n"
             raise ValueError(f"提取文件信息时出错 - {e}")
 
     async def kg_extract_from_file_info(
@@ -413,22 +410,16 @@ class ClauseExtractor:
             for entity in entities:
                 if not isinstance(entity, Entity):
                     logging.error(f"📄❌：实体类型错误 - {entity}")
-                    self.result_stats.error += 1
-                    self.result_stats.error_msg += f"实体类型错误 - {entity}\n"
 
                 # 保存文件信息
                 entity_type = clean_string_with_only_words(entity.entity_type)
                 if entity_type == "法规文件":
                     if file_info_processed:
                         logging.warning("📄警告：一个法规文件信息中只能有一个法规文件，请检查问题")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"一个法规文件信息中只能有一个法规文件，请检查问题:\n{entity}\n"
                         continue
                     node_name = entity.name
                     if not node_name:
                         logging.warning("📄警告：法规文件名称为空")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"法规文件名称为空:\n{entity}\n"
                         continue
                     node_id = clean_string_for_neo4j_extended(f"{entity_type}_{generate_hex_uuid()}")
                     file_info_result["node_id"] = node_id
@@ -440,8 +431,6 @@ class ClauseExtractor:
                     node_name = entity.name
                     if not node_name:
                         logging.warning("📄警告：法规依据名称为空")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"法规依据名称为空:\n{entity}\n"
                         continue
                     node_id = clean_string_for_neo4j_extended(f"{entity_type}_{generate_hex_uuid()}")
                     file_info_result["法规依据"].append({
@@ -452,14 +441,10 @@ class ClauseExtractor:
                     })
                 else:
                     logging.warning(f"📄警告：未知实体类型 - {entity}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"未知实体类型 - {entity}\n"
             clause_cache.file_info = file_info_result
             return file_info_result
         except Exception as e:
             logging.error(f"📄❌：抽取文件信息时出错 - {e}")
-            self.result_stats.error += 1
-            self.result_stats.error_msg += f"抽取文件信息时出错 - {e}\n" + file_info[:500] + "\n"
             raise ValueError(f"抽取文件信息时出错 - {e}")
 
     async def kg_extract_from_clause(
@@ -516,8 +501,6 @@ class ClauseExtractor:
                 clause_content = one_clause.get("条款内容", "")
                 if not clause_number:
                     logging.error(f"📄❌：条款编号为空:{one_clause}")
-                    self.result_stats.error += 1
-                    self.result_stats.error_msg += f"条款编号为空:{one_clause}\n"
                     raise ValueError("条款编号为空")
                 # 抽取参数
                 extract_prompt = prompt_for_clause
@@ -555,21 +538,15 @@ class ClauseExtractor:
                 for entity in entities:
                     if not isinstance(entity, Entity):
                         logging.error(f"📄❌：实体类型错误 - {entity}")
-                        self.result_stats.error += 1
-                        self.result_stats.error_msg += f"实体类型错误 - {entity}\n"
                         continue
                     entity_type = clean_string_with_only_words(entity.entity_type)
                     if entity_type == "法条":
                         if clause_processed:
                             logging.warning("📄警告：一个法条中只能有一个法条，请检查问题")
-                            self.result_stats.strong_warning += 1
-                            self.result_stats.strong_warning_msg += f"一个法条中只能有一个法条，请检查问题:\n{entity}\n"
                             continue
                         node_name = entity.name
                         if not node_name:
                             logging.warning("📄警告：法条名称为空")
-                            self.result_stats.strong_warning += 1
-                            self.result_stats.strong_warning_msg += f"法条名称为空:\n{entity}\n"
                             continue
                         node_id = clean_string_for_neo4j_extended(f"{entity_type}_{generate_hex_uuid()}")
                         clause_result["node_id"] = node_id
@@ -585,8 +562,6 @@ class ClauseExtractor:
                         node_name = entity.name
                         if not node_name:
                             logging.warning("📄警告：条款单元名称为空")
-                            self.result_stats.strong_warning += 1
-                            self.result_stats.strong_warning_msg += f"条款单元名称为空:\n{entity}\n"
                             continue
                         node_id = clean_string_for_neo4j_extended(f"{entity_type}_{generate_hex_uuid()}")
                         clause_key = f"{entity_type}_{node_name}"
@@ -602,8 +577,6 @@ class ClauseExtractor:
                         node_name = entity.name
                         if not node_name:
                             logging.warning("📄警告：引用依据名称为空")
-                            self.result_stats.strong_warning += 1
-                            self.result_stats.strong_warning_msg += f"引用依据名称为空:\n{entity}\n"
                             continue
                         node_id = clean_string_for_neo4j_extended(f"{entity_type}_{generate_hex_uuid()}")
                         reference_key = f"{entity_type}_{node_name}"
@@ -615,39 +588,29 @@ class ClauseExtractor:
                         }
                     else:
                         logging.error(f"📄❌：未知实体类型 - {entity}")
-                        self.result_stats.error += 1
-                        self.result_stats.error_msg += f"未知实体类型 - {entity}\n"
                 # 处理关系
                 for relation in relations:
                     try:
                         if not isinstance(relation, Relationship):
                             logging.error(f"📄❌：关系类型错误 - {relation}")
-                            self.result_stats.error += 1
-                            self.result_stats.error_msg += f"关系类型错误 - {relation}\n"
                             continue
                         source_key = relation.source
                         target_key = relation.target
                         relation_type = clean_string_with_only_words(relation.type)
                         if not source_key or not target_key or not relation_type:
                             logging.warning("📄警告：关系的源节点或目标节点为空")
-                            self.result_stats.strong_warning += 1
-                            self.result_stats.strong_warning_msg += f"关系的源节点或目标节点为空:\n{relation}\n"
                             continue
                         if relation_type == "引用":
                             # 获取条款单元
                             source_entity = clause_units.get(source_key)
                             if not source_entity:
                                 logging.warning(f"📄警告：引用关系的源节点不存在{relation}")
-                                self.result_stats.strong_warning += 1
-                                self.result_stats.strong_warning_msg += f"引用关系的源节点不存在:\n{relation}\n"
                                 # TODO 启动模糊匹配
                                 continue
                             # 获取引用依据
                             target_entity = references.get(target_key)
                             if not target_entity:
                                 logging.warning(f"📄警告：引用关系的目标节点不存在{relation}")
-                                self.result_stats.strong_warning += 1
-                                self.result_stats.strong_warning_msg += f"引用关系的目标节点不存在:\n{relation}\n"
                                 # TODO 启动模糊匹配
                                 continue
                             # 获取引用依据是否是内部条款
@@ -660,15 +623,11 @@ class ClauseExtractor:
                             processed_keys.append(target_key)
                     except Exception as e:
                         logging.error(f"📄❌：处理关系{relation}时出错 - {e}")
-                        self.result_stats.error += 1
-                        self.result_stats.error_msg += f"处理关系{relation}时出错 - {e}\n"
                         continue
                 # 检验未被使用的引用依据
                 for key, _ in references.items():
                     if key not in processed_keys:
                         logging.warning(f"📄警告：引用依据{key}未被使用！")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"引用依据{key}未被使用！\n"
                 # 将条款单元添加到结果中
                 for entity in clause_units.values():
                     clause_result["条款单元"].append(entity)
@@ -676,11 +635,9 @@ class ClauseExtractor:
                 return clause_result
             except Exception as e:
                 logging.error(f"📄❌：处理文件{filename}时出错 - {e}")
-                self.result_stats.error += 1
-                self.result_stats.error_msg += f"处理文件{filename}时出错 - {e}\n"
 
+    @staticmethod
     async def process_extracted_data(
-            self,
             filename: str,
             extracted_file_info: dict,
             extracted_success_clauses: list[dict],
@@ -706,8 +663,6 @@ class ClauseExtractor:
             file_node_type = extracted_file_info.get("node_type")
             if not file_node_id or not file_node_name or not file_node_type:
                 logging.error(f"📄🔥：法规文件信息不完整{extracted_file_info}")
-                self.result_stats.error += 1
-                self.result_stats.error_msg += f"法规文件信息不完整{extracted_file_info}\n"
                 raise ValueError("法规文件信息不完整")
             final_kg["nodes"].append(
                 {
@@ -726,8 +681,6 @@ class ClauseExtractor:
                 basis_node_type = basis.get("node_type")
                 if not basis_node_id or not basis_node_name or not basis_node_type:
                     logging.warning(f"📄🔧：法规依据信息不完整{basis}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"法规依据信息不完整{basis}\n"
                     continue
                 final_kg["nodes"].append(
                     {
@@ -755,8 +708,6 @@ class ClauseExtractor:
                 clause_text = clause.get("条款内容")
                 if not clause_number or not clause_text:
                     logging.warning(f"📄🔧：法条信息不完整{clause}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"法条信息不完整{clause}\n"
                     continue
                 clause_node_id = clean_string_for_neo4j_extended(f"法条_{generate_hex_uuid()}")
                 clause_node_name = clause_number
@@ -801,8 +752,6 @@ class ClauseExtractor:
                 clause_node_type = clause.get("node_type")
                 if not clause_node_id or not clause_node_name or not clause_node_type:
                     logging.warning(f"📄🔧：法条信息不完整{clause}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"法条信息不完整{clause}\n"
                     continue
                 # 添加法条节点和关系
                 final_kg["nodes"].append(
@@ -841,8 +790,6 @@ class ClauseExtractor:
                     unit_node_type = unit.get("node_type")
                     if not unit_node_id or not unit_node_name or not unit_node_type:
                         logging.warning(f"📄🔧：条款单元信息不完整{unit}")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"条款单元信息不完整{unit}\n"
                         continue
                     final_kg["nodes"].append(
                         {
@@ -872,8 +819,6 @@ class ClauseExtractor:
                         unit_article = ""
                     if not unit_article:
                         logging.warning(f"📄🔧：条款单元信息缺少单元编号{unit}")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"条款单元信息缺少单元编号{unit}\n"
                     else:
                         inner_reference_id_mapping[unit_article] = unit_node_id
                     # 添加内部引用依据和外部引用依据
@@ -891,8 +836,6 @@ class ClauseExtractor:
                 ref_node_type = inner_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
                     logging.warning(f"📄🔧：引用依据信息不完整{inner_ref}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"引用依据信息不完整{inner_ref}\n"
                     continue
                 # 匹配内部条款单元
                 try:
@@ -901,14 +844,10 @@ class ClauseExtractor:
                     inner_ref_article = ""
                 if not inner_ref_article:
                     logging.warning(f"📄🔧：引用依据信息缺少款项编号{inner_ref}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"引用依据信息缺少款项编号{inner_ref}\n"
                 else:
                     ref_unit_node_id = inner_reference_id_mapping.get(inner_ref_article)
                     if not ref_unit_node_id:
                         logging.warning(f"📄🔧：引用依据款项编号未找到对应本文件条款单元{inner_ref}")
-                        self.result_stats.week_warning += 1
-                        self.result_stats.week_warning_msg += f"引用依据款项编号未找到对应本文件条款单元{inner_ref}\n"
                         # TODO：加入模糊匹配
                         # 如果是“第X条第X项”，则尝试匹配“第X条第一款第X项”
                         match = re.match(
@@ -919,8 +858,6 @@ class ClauseExtractor:
                             # 尝试"第X条第一款第X项"格式
                             alternative_article = f"{article_part}第一款{item_part}"
                             logging.warning(f"📄🔧：尝试匹配{alternative_article}")
-                            self.result_stats.week_warning += 1
-                            self.result_stats.week_warning_msg += f"尝试匹配{alternative_article}未找到对应本文件条款单元{inner_ref}\n"
                             ref_unit_node_id = inner_reference_id_mapping.get(alternative_article)
                         if not ref_unit_node_id:
                             # 尝试匹配“第X条第X款”
@@ -931,8 +868,6 @@ class ClauseExtractor:
                                 article_part, clause_part = match.groups()
                                 alternative_article = f"{article_part}{clause_part}"
                                 logging.warning(f"📄🔧：尝试匹配{alternative_article}")
-                                self.result_stats.week_warning += 1
-                                self.result_stats.week_warning_msg += f"尝试匹配{alternative_article}未找到对应本文件条款单元{inner_ref}\n"
                                 ref_unit_node_id = inner_reference_id_mapping.get(alternative_article)
                             if not ref_unit_node_id:
                                 # 如果含“第X条”，则尝试匹配“第X条”
@@ -943,16 +878,10 @@ class ClauseExtractor:
                                     ref_unit_node_id = inner_reference_id_mapping.get(basic_article)
                     if not ref_unit_node_id:
                         logging.warning(f"📄🔧：模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}\n"
                     if ref_unit_node_id == unit_node_id:
                         logging.warning(f"📄🔧：引用依据款项编号与当前条款单元编号一致{inner_ref}")
-                        self.result_stats.week_warning += 1
-                        self.result_stats.week_warning_msg += f"引用依据款项编号与当前条款单元编号一致{inner_ref}\n"
                     elif ref_unit_node_id == unit_to_clause_mapping.get(unit_node_id):
                         logging.warning(f"📄🔧：引用依据款项编号与当前条款单元对应的法条编号一致{inner_ref}")
-                        self.result_stats.week_warning += 1
-                        self.result_stats.week_warning_msg += f"引用依据款项编号与当前条款单元对应的法条编号一致{inner_ref}\n"
                     else:
                         final_kg["edges"].append(
                             {
@@ -972,8 +901,6 @@ class ClauseExtractor:
                 ref_node_type = outer_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
                     logging.warning(f"📄🔧：引用依据信息不完整{outer_ref}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"引用依据信息不完整{outer_ref}\n"
                     continue
                 # 如果外部引用依据节点id映射不存在，则创建节点并建立关系
                 ref_unit_node_id = outer_reference_id_mapping.get(clean_string_with_only_words(ref_node_name))
@@ -1001,8 +928,6 @@ class ClauseExtractor:
                     outer_reference_id_mapping[clean_string_with_only_words(ref_node_name)] = ref_unit_node_id
                 elif ref_unit_node_id == unit_node_id:
                     logging.warning(f"📄🔧：引用依据款项编号与当前条款单元编号一致{outer_ref}")
-                    self.result_stats.week_warning += 1
-                    self.result_stats.week_warning_msg += f"引用依据款项编号与当前条款单元编号一致{outer_ref}\n"
                 # 如果外部引用依据节点id映射存在，则直接创建关系
                 else:
                     final_kg["edges"].append(
@@ -1018,8 +943,6 @@ class ClauseExtractor:
             return final_kg
         except Exception as e:
             logging.error(f"📄🔧：处理抽取数据时出错{e}")
-            self.result_stats.error += 1
-            self.result_stats.error_msg += f"处理抽取数据时出错{e}\n"
             raise e
 
     @staticmethod
@@ -1048,20 +971,6 @@ class ClauseExtractor:
         """
         # TODO
         pass
-
-    async def logging_result_stats(self):
-        logging.info("📄✅：错误与警告统计结果如下")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：错误信息: {self.result_stats.error_msg}")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：弱警告信息: {self.result_stats.week_warning_msg}")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：强警告信息: {self.result_stats.strong_warning_msg}")
-        logging.info("======================================================================")
-        logging.info("📄✅：数据统计")
-        logging.info(f"📄✅：错误数: {self.result_stats.error}")
-        logging.info(f"📄✅：弱警告数: {self.result_stats.week_warning}")
-        logging.info(f"📄✅：强警告数: {self.result_stats.strong_warning}")
 
 
 def clean_string(text: str) -> str:

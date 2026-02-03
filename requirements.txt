@@ -87,3 +87,6 @@ ms-swift
 absl-py
 
 colorama
+
+# JSON修复工具
+json-repair
