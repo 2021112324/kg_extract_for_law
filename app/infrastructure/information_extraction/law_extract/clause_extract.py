@@ -420,13 +420,13 @@ class ClauseExtractor:
                 entity_type = clean_string_with_only_words(entity.entity_type)
                 if entity_type == "法规文件":
                     if file_info_processed:
-                        logging.warning("📄警告：一个法规文件信息中只能有一个法规文件，请检查问题")
+                        logging.warning("📄强警告：一个法规文件信息中只能有一个法规文件，请检查问题")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"一个法规文件信息中只能有一个法规文件，请检查问题:\n{entity}\n"
                         continue
                     node_name = entity.name
                     if not node_name:
-                        logging.warning("📄警告：法规文件名称为空")
+                        logging.warning("📄强警告：法规文件名称为空")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"法规文件名称为空:\n{entity}\n"
                         continue
@@ -439,7 +439,7 @@ class ClauseExtractor:
                 elif entity_type == "法规依据":
                     node_name = entity.name
                     if not node_name:
-                        logging.warning("📄警告：法规依据名称为空")
+                        logging.warning("📄强警告：法规依据名称为空")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"法规依据名称为空:\n{entity}\n"
                         continue
@@ -451,7 +451,7 @@ class ClauseExtractor:
                         "properties": entity.properties
                     })
                 else:
-                    logging.warning(f"📄警告：未知实体类型 - {entity}")
+                    logging.warning(f"📄强警告：未知实体类型 - {entity}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"未知实体类型 - {entity}\n"
             clause_cache.file_info = file_info_result
@@ -561,13 +561,13 @@ class ClauseExtractor:
                     entity_type = clean_string_with_only_words(entity.entity_type)
                     if entity_type == "法条":
                         if clause_processed:
-                            logging.warning("📄警告：一个法条中只能有一个法条，请检查问题")
+                            logging.warning("📄强警告：一个法条中只能有一个法条，请检查问题")
                             self.result_stats.strong_warning += 1
                             self.result_stats.strong_warning_msg += f"一个法条中只能有一个法条，请检查问题:\n{entity}\n"
                             continue
                         node_name = entity.name
                         if not node_name:
-                            logging.warning("📄警告：法条名称为空")
+                            logging.warning("📄强警告：法条名称为空")
                             self.result_stats.strong_warning += 1
                             self.result_stats.strong_warning_msg += f"法条名称为空:\n{entity}\n"
                             continue
@@ -584,7 +584,7 @@ class ClauseExtractor:
                     elif entity_type == "条款单元":
                         node_name = entity.name
                         if not node_name:
-                            logging.warning("📄警告：条款单元名称为空")
+                            logging.warning("📄强警告：条款单元名称为空")
                             self.result_stats.strong_warning += 1
                             self.result_stats.strong_warning_msg += f"条款单元名称为空:\n{entity}\n"
                             continue
@@ -601,7 +601,7 @@ class ClauseExtractor:
                     elif entity_type == "引用依据":
                         node_name = entity.name
                         if not node_name:
-                            logging.warning("📄警告：引用依据名称为空")
+                            logging.warning("📄强警告：引用依据名称为空")
                             self.result_stats.strong_warning += 1
                             self.result_stats.strong_warning_msg += f"引用依据名称为空:\n{entity}\n"
                             continue
@@ -629,7 +629,7 @@ class ClauseExtractor:
                         target_key = relation.target
                         relation_type = clean_string_with_only_words(relation.type)
                         if not source_key or not target_key or not relation_type:
-                            logging.warning("📄警告：关系的源节点或目标节点为空")
+                            logging.warning("📄强警告：关系的源节点或目标节点为空")
                             self.result_stats.strong_warning += 1
                             self.result_stats.strong_warning_msg += f"关系的源节点或目标节点为空:\n{relation}\n"
                             continue
@@ -637,7 +637,7 @@ class ClauseExtractor:
                             # 获取条款单元
                             source_entity = clause_units.get(source_key)
                             if not source_entity:
-                                logging.warning(f"📄警告：引用关系的源节点不存在{relation}")
+                                logging.warning(f"📄强警告：引用关系的源节点不存在{relation}")
                                 self.result_stats.strong_warning += 1
                                 self.result_stats.strong_warning_msg += f"引用关系的源节点不存在:\n{relation}\n"
                                 # TODO 启动模糊匹配
@@ -645,7 +645,7 @@ class ClauseExtractor:
                             # 获取引用依据
                             target_entity = references.get(target_key)
                             if not target_entity:
-                                logging.warning(f"📄警告：引用关系的目标节点不存在{relation}")
+                                logging.warning(f"📄强警告：引用关系的目标节点不存在{relation}")
                                 self.result_stats.strong_warning += 1
                                 self.result_stats.strong_warning_msg += f"引用关系的目标节点不存在:\n{relation}\n"
                                 # TODO 启动模糊匹配
@@ -666,7 +666,7 @@ class ClauseExtractor:
                 # 检验未被使用的引用依据
                 for key, _ in references.items():
                     if key not in processed_keys:
-                        logging.warning(f"📄警告：引用依据{key}未被使用！")
+                        logging.warning(f"📄强警告：引用依据{key}未被使用！")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"引用依据{key}未被使用！\n"
                 # 将条款单元添加到结果中
@@ -725,7 +725,7 @@ class ClauseExtractor:
                 basis_node_name = basis.get("node_name")
                 basis_node_type = basis.get("node_type")
                 if not basis_node_id or not basis_node_name or not basis_node_type:
-                    logging.warning(f"📄🔧：法规依据信息不完整{basis}")
+                    logging.warning(f"📄🔧强警告：法规依据信息不完整{basis}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"法规依据信息不完整{basis}\n"
                     continue
@@ -754,7 +754,7 @@ class ClauseExtractor:
                 clause_number = clause.get("条款编号")
                 clause_text = clause.get("条款内容")
                 if not clause_number or not clause_text:
-                    logging.warning(f"📄🔧：法条信息不完整{clause}")
+                    logging.warning(f"📄🔧强警告：法条信息不完整{clause}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"法条信息不完整{clause}\n"
                     continue
@@ -800,7 +800,7 @@ class ClauseExtractor:
                 clause_node_name = clause.get("node_name")
                 clause_node_type = clause.get("node_type")
                 if not clause_node_id or not clause_node_name or not clause_node_type:
-                    logging.warning(f"📄🔧：法条信息不完整{clause}")
+                    logging.warning(f"📄🔧强警告：法条信息不完整{clause}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"法条信息不完整{clause}\n"
                     continue
@@ -830,7 +830,9 @@ class ClauseExtractor:
                 except Exception:
                     clause_article = ""
                 if not clause_article:
-                    logging.warning(f"📄🔧：法条信息缺少条编号{clause}")
+                    logging.warning(f"📄🔧法条信息缺少条编号{clause}")
+                    self.result_stats.week_warning += 1
+                    self.result_stats.week_warning_msg += f"法条信息缺少条编号{clause}\n"
                 else:
                     inner_reference_id_mapping[clause_article] = clause_node_id
                 # 处理条款单元节点和关系
@@ -840,7 +842,7 @@ class ClauseExtractor:
                     unit_node_name = unit.get("node_name")
                     unit_node_type = unit.get("node_type")
                     if not unit_node_id or not unit_node_name or not unit_node_type:
-                        logging.warning(f"📄🔧：条款单元信息不完整{unit}")
+                        logging.warning(f"📄🔧强警告：条款单元信息不完整{unit}")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"条款单元信息不完整{unit}\n"
                         continue
@@ -872,8 +874,8 @@ class ClauseExtractor:
                         unit_article = ""
                     if not unit_article:
                         logging.warning(f"📄🔧：条款单元信息缺少单元编号{unit}")
-                        self.result_stats.strong_warning += 1
-                        self.result_stats.strong_warning_msg += f"条款单元信息缺少单元编号{unit}\n"
+                        self.result_stats.week_warning += 1
+                        self.result_stats.week_warning_msg += f"条款单元信息缺少单元编号{unit}\n"
                     else:
                         inner_reference_id_mapping[unit_article] = unit_node_id
                     # 添加内部引用依据和外部引用依据
@@ -890,7 +892,7 @@ class ClauseExtractor:
                 ref_node_name = inner_ref.get("node_name")
                 ref_node_type = inner_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
-                    logging.warning(f"📄🔧：引用依据信息不完整{inner_ref}")
+                    logging.warning(f"📄🔧强警告：引用依据信息不完整{inner_ref}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"引用依据信息不完整{inner_ref}\n"
                     continue
@@ -901,8 +903,8 @@ class ClauseExtractor:
                     inner_ref_article = ""
                 if not inner_ref_article:
                     logging.warning(f"📄🔧：引用依据信息缺少款项编号{inner_ref}")
-                    self.result_stats.strong_warning += 1
-                    self.result_stats.strong_warning_msg += f"引用依据信息缺少款项编号{inner_ref}\n"
+                    self.result_stats.week_warning += 1
+                    self.result_stats.week_warning_msg += f"引用依据信息缺少款项编号{inner_ref}\n"
                 else:
                     ref_unit_node_id = inner_reference_id_mapping.get(inner_ref_article)
                     if not ref_unit_node_id:
@@ -942,7 +944,7 @@ class ClauseExtractor:
                                     logging.warning(f"📄🔧：尝试匹配{basic_article}")
                                     ref_unit_node_id = inner_reference_id_mapping.get(basic_article)
                     if not ref_unit_node_id:
-                        logging.warning(f"📄🔧：模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}")
+                        logging.warning(f"📄🔧强警告：模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}")
                         self.result_stats.strong_warning += 1
                         self.result_stats.strong_warning_msg += f"模糊匹配后引用依据款项编号未找到对应本文件条款单元{inner_ref}\n"
                     if ref_unit_node_id == unit_node_id:
@@ -971,7 +973,7 @@ class ClauseExtractor:
                 ref_node_name = outer_ref.get("node_name")
                 ref_node_type = outer_ref.get("node_type")
                 if not ref_node_id or not ref_node_name or not ref_node_type:
-                    logging.warning(f"📄🔧：引用依据信息不完整{outer_ref}")
+                    logging.warning(f"📄🔧强警告：引用依据信息不完整{outer_ref}")
                     self.result_stats.strong_warning += 1
                     self.result_stats.strong_warning_msg += f"引用依据信息不完整{outer_ref}\n"
                     continue
@@ -1050,14 +1052,14 @@ class ClauseExtractor:
         pass
 
     async def logging_result_stats(self):
-        logging.info("📄✅：错误与警告统计结果如下")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：错误信息: {self.result_stats.error_msg}")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：弱警告信息: {self.result_stats.week_warning_msg}")
-        logging.info("======================================================================")
-        logging.info(f"📄✅：强警告信息: {self.result_stats.strong_warning_msg}")
-        logging.info("======================================================================")
+        # logging.info("📄✅：错误与警告统计结果如下")
+        # logging.info("======================================================================")
+        # logging.info(f"📄✅：错误信息: {self.result_stats.error_msg}")
+        # logging.info("======================================================================")
+        # logging.info(f"📄✅：弱警告信息: {self.result_stats.week_warning_msg}")
+        # logging.info("======================================================================")
+        # logging.info(f"📄✅：强警告信息: {self.result_stats.strong_warning_msg}")
+        # logging.info("======================================================================")
         logging.info("📄✅：数据统计")
         logging.info(f"📄✅：错误数: {self.result_stats.error}")
         logging.info(f"📄✅：弱警告数: {self.result_stats.week_warning}")

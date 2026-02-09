@@ -651,7 +651,7 @@ class LangextractAdapter(IInformationExtraction):
 
         for attempt in range(self.max_retries):
             try:
-                print(f"尝试第 {attempt + 1}/{self.max_retries} 次提取...")
+                logging.info(f"尝试第 {attempt + 1}/{self.max_retries} 次提取...")
 
                 # 打印配置信息用于调试
                 # print(f"配置信息: model_id={config.model_name}, format_type={config.format_type}")
@@ -698,38 +698,38 @@ class LangextractAdapter(IInformationExtraction):
                     timeout=3600  # 30分钟超时
                 )
 
-                print(f"第 {attempt + 1} 次尝试成功!")
+                logging.info(f"第 {attempt + 1} 次尝试成功!")
                 # 转化为统一的list格式
                 if isinstance(result, data.AnnotatedDocument):
                     result_list = [result]
                 else:
                     result_list = list(result)
                 document_dict_list = self.convert_document_to_dict_with_text(result_list)
-                # try:
-                #     formatted_json = json.dumps(
-                #         document_dict_list,
-                #         indent=2,
-                #         ensure_ascii=False,
-                #         default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
-                #     )
-                #     # print("提取结果的格式化JSON输出:")
-                #     # print(formatted_json)
-                #     logger.info("提取结果的JSON输出:")
-                #     logger.info(formatted_json)
-                # except Exception as json_error:
-                #     logger.warning("格式化JSON输出失败:")
+                try:
+                    formatted_json = json.dumps(
+                        document_dict_list,
+                        indent=2,
+                        ensure_ascii=False,
+                        default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
+                    )
+                    # print("提取结果的格式化JSON输出:")
+                    # print(formatted_json)
+                    logger.info("提取结果的JSON输出:")
+                    logger.info(formatted_json)
+                except Exception as json_error:
+                    logger.warning("格式化JSON输出失败:")
                     # print(f"格式化JSON输出失败: {json_error}")
                 return document_dict_list
                 # return self.convert_annotated_document_to_dict(result)
 
             except TimeoutException as e:
-                print(f"第 {attempt + 1} 次尝试超时: {e}")
+                logging.warning(f"第 {attempt + 1} 次尝试超时: {e}")
                 last_exception = e
                 # 如果不是最后一次尝试，等待一段时间再重试
                 if attempt < self.max_retries - 1:
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
-                    print(f"等待 {wait_time} 秒后进行下一次尝试...")
+                    logging.info(f"等待 {wait_time} 秒后进行下一次尝试...")
                     # 变化提示词以避免模型记忆
                     if not timeout_flag:
                         prompt = self._generate_failed_prompt(prompt, "timeout", e)
@@ -737,14 +737,14 @@ class LangextractAdapter(IInformationExtraction):
                     time.sleep(wait_time)
             except Exception as e:
                 last_exception = e
-                print(f"第 {attempt + 1} 次尝试失败: {e}")
+                logging.warning(f"第 {attempt + 1} 次尝试失败: {e}")
                 # 打印完整的错误追踪信息
                 # traceback.print_exc()
                 # 如果不是最后一次尝试，等待一段时间再重试
                 if attempt < self.max_retries - 1:
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
-                    print(f"等待 {wait_time} 秒后进行下一次尝试...")
+                    logging.info(f"等待 {wait_time} 秒后进行下一次尝试...")
                     # 变化提示词以避免模型记忆
                     if not failed_flag:
                         prompt = self._generate_failed_prompt(prompt, "failed", e)
@@ -755,11 +755,11 @@ class LangextractAdapter(IInformationExtraction):
                 if "429" in str(e) or "rate limit" in str(e).lower():
                     # 对于限流错误，等待更长时间
                     additional_wait = 5 * (attempt + 1)
-                    print(f"检测到限流错误，额外等待 {additional_wait} 秒...")
+                    logging.info(f"检测到限流错误，额外等待 {additional_wait} 秒...")
                     time.sleep(additional_wait)
 
         # 所有重试都失败
-        print(f"所有 {self.max_retries} 次尝试都失败了。")
+        logging.error(f"所有 {self.max_retries} 次尝试都失败了。")
         # 打印完整的错误追踪信息
         if last_exception:
             traceback.print_exc()

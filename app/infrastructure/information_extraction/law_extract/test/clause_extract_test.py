@@ -174,38 +174,38 @@ async def extract_kg_test():
         filename="生产安全事故应急预案管理办法",
         text=content
     )
-    neo4j_adapter = Neo4jAdapter()
-    neo4j_adapter.connect()
-    neo4j_adapter.add_subgraph_with_merge(result, "啊啊啊test", "DomainLevel")
-    neo4j_adapter.disconnect()
+    # neo4j_adapter = Neo4jAdapter()
+    # neo4j_adapter.connect()
+    # neo4j_adapter.add_subgraph_with_merge(result, "啊啊啊test", "DomainLevel")
+    # neo4j_adapter.disconnect()
     # 以格式化json形式打印结果
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 async def kg_extract_from_clause_test():
-#     one_clause = {
-#         "章": "第五章 商标代理违法行为的处理",
-#         "节": "",
-#         "条款编号": "第二十七条",
-#         "条款内容": """
-# 有下列情形之一的，属于商标法第六十八条第一款第一项规定的办理商标事宜过程中，伪造、变造或者使用伪造、变造的法律文件、印章、签名的行为：
-# （一）伪造、变造国家机关公文、印章的；
-# （二）伪造、变造国家机关之外其他单位的法律文件、印章的；
-# （三）伪造、变造签名的；
-# （四）知道或者应当知道属于伪造、变造的公文、法律文件、印章、签名，仍然使用的；
-# （五）其他伪造、变造或者使用伪造、变造的法律文件、印章、签名的情形。
-# """
-#     }
     one_clause = {
-        "章": "",
+        "章": "第五章 商标代理违法行为的处理",
         "节": "",
-        "条款编号": "第十二条",
+        "条款编号": "第二十七条",
         "条款内容": """
-国家积极参与个人信息保护国际
-
-规则的制定，促进个人信息保护方面的国际交流与合作，推动与其他国家、地区、国际组织之间的个人信息保护规则、标准等互认。
-    """
+有下列情形之一的，属于商标法第六十八条第一款第一项规定的办理商标事宜过程中，伪造、变造或者使用伪造、变造的法律文件、印章、签名的行为：
+（一）伪造、变造国家机关公文、印章的；
+（二）伪造、变造国家机关之外其他单位的法律文件、印章的；
+（三）伪造、变造签名的；
+（四）知道或者应当知道属于伪造、变造的公文、法律文件、印章、签名，仍然使用的；
+（五）其他伪造、变造或者使用伪造、变造的法律文件、印章、签名的情形。
+"""
     }
+#     one_clause = {
+#         "章": "",
+#         "节": "",
+#         "条款编号": "第十二条",
+#         "条款内容": """
+# 国家积极参与个人信息保护国际
+#
+# 规则的制定，促进个人信息保护方面的国际交流与合作，推动与其他国家、地区、国际组织之间的个人信息保护规则、标准等互认。
+#     """
+#     }
     clause_cache = ClauseCache()
     print("开始提取知识图谱")
     result = await extractor.kg_extract_from_clause(
@@ -221,7 +221,7 @@ async def kg_extract_from_clause_test():
 if __name__ == "__main__":
     logger.info("开始执行测试脚本")
     result = asyncio.run(
-        split_clause_test()
+        kg_extract_from_clause_test()
     )
     logger.info("测试脚本执行完成")
 

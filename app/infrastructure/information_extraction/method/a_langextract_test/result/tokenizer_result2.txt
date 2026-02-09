@@ -1,0 +1,337 @@
+E:\Anaconda3\envs\cogmait312\python.exe F:\企业大脑知识库系统\8.1项目\抽取代码\kg_extract_for_law\app\infrastructure\information_extraction\method\a_langextract_test\tokenizer_case.py
+开始演示 tokenize 函数的各种使用示例
+
+=== 示例1: 简单英文文本 ===
+原始文本: Hello world! This is a simple sentence.
+总共有 9 个token:
+  Token 0: 'Hello' [0:5] 类型: WORD, 换行后首token: False
+  Token 1: 'world' [6:11] 类型: WORD, 换行后首token: False
+  Token 2: '!' [11:12] 类型: PUNCTUATION, 换行后首token: False
+  Token 3: 'This' [13:17] 类型: WORD, 换行后首token: False
+  Token 4: 'is' [18:20] 类型: WORD, 换行后首token: False
+  Token 5: 'a' [21:22] 类型: WORD, 换行后首token: False
+  Token 6: 'simple' [23:29] 类型: WORD, 换行后首token: False
+  Token 7: 'sentence' [30:38] 类型: WORD, 换行后首token: False
+  Token 8: '.' [38:39] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例2: 简单中文文本 ===
+原始文本: 你好世界！这是一个简单的句子。
+总共有 9 个token:
+  Token 0: '你好' [0:2] 类型: WORD, 换行后首token: False
+  Token 1: '世界' [2:4] 类型: WORD, 换行后首token: False
+  Token 2: '！' [4:5] 类型: PUNCTUATION, 换行后首token: False
+  Token 3: '这是' [5:7] 类型: WORD, 换行后首token: False
+  Token 4: '一个' [7:9] 类型: WORD, 换行后首token: False
+  Token 5: '简单' [9:11] 类型: WORD, 换行后首token: False
+  Token 6: '的' [11:12] 类型: WORD, 换行后首token: False
+  Token 7: '句子' [12:14] 类型: WORD, 换行后首token: False
+  Token 8: '。' [14:15] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例3: 中英文混合文本 ===
+原始文本: Hello 你好 world 世界 123!
+总共有 10 个token:
+  Token 0: 'Hello' [0:5] 类型: WORD, 换行后首token: False
+  Token 1: ' ' [5:6] 类型: PUNCTUATION, 换行后首token: False
+  Token 2: '你好' [6:8] 类型: WORD, 换行后首token: False
+  Token 3: ' ' [8:9] 类型: PUNCTUATION, 换行后首token: False
+  Token 4: 'world' [9:14] 类型: WORD, 换行后首token: False
+  Token 5: ' ' [14:15] 类型: PUNCTUATION, 换行后首token: False
+  Token 6: '世界' [15:17] 类型: WORD, 换行后首token: False
+  Token 7: ' ' [17:18] 类型: PUNCTUATION, 换行后首token: False
+  Token 8: '123' [18:21] 类型: NUMBER, 换行后首token: False
+  Token 9: '!' [21:22] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例4: 包含数字和符号的文本 ===
+原始文本: The price is $19.99, VAT 13%, discount 10%. Contact: email@example.com
+总共有 21 个token:
+  Token 0: 'The' [0:3] 类型: WORD, 换行后首token: False
+  Token 1: 'price' [4:9] 类型: WORD, 换行后首token: False
+  Token 2: 'is' [10:12] 类型: WORD, 换行后首token: False
+  Token 3: '$' [13:14] 类型: PUNCTUATION, 换行后首token: False
+  Token 4: '19' [14:16] 类型: NUMBER, 换行后首token: False
+  Token 5: '.' [16:17] 类型: PUNCTUATION, 换行后首token: False
+  Token 6: '99' [17:19] 类型: NUMBER, 换行后首token: False
+  Token 7: ',' [19:20] 类型: PUNCTUATION, 换行后首token: False
+  Token 8: 'VAT' [21:24] 类型: WORD, 换行后首token: False
+  Token 9: '13' [25:27] 类型: NUMBER, 换行后首token: False
+  Token 10: '%,' [27:29] 类型: PUNCTUATION, 换行后首token: False
+  Token 11: 'discount' [30:38] 类型: WORD, 换行后首token: False
+  Token 12: '10' [39:41] 类型: NUMBER, 换行后首token: False
+  Token 13: '%.' [41:43] 类型: PUNCTUATION, 换行后首token: False
+  Token 14: 'Contact' [44:51] 类型: WORD, 换行后首token: False
+  Token 15: ':' [51:52] 类型: PUNCTUATION, 换行后首token: False
+  Token 16: 'email' [53:58] 类型: WORD, 换行后首token: False
+  Token 17: '@' [58:59] 类型: PUNCTUATION, 换行后首token: False
+  Token 18: 'example' [59:66] 类型: WORD, 换行后首token: False
+  Token 19: '.' [66:67] 类型: PUNCTUATION, 换行后首token: False
+  Token 20: 'com' [67:70] 类型: WORD, 换行后首token: False
+
+=== 示例5: 包含缩写的文本 ===
+原始文本: The U.S.A. and UK have agreements. Dr. Smith works at MIT.
+总共有 19 个token:
+  Token 0: 'The' [0:3] 类型: WORD, 换行后首token: False
+  Token 1: 'U' [4:5] 类型: WORD, 换行后首token: False
+  Token 2: '.' [5:6] 类型: PUNCTUATION, 换行后首token: False
+  Token 3: 'S' [6:7] 类型: WORD, 换行后首token: False
+  Token 4: '.' [7:8] 类型: PUNCTUATION, 换行后首token: False
+  Token 5: 'A' [8:9] 类型: WORD, 换行后首token: False
+  Token 6: '.' [9:10] 类型: PUNCTUATION, 换行后首token: False
+  Token 7: 'and' [11:14] 类型: WORD, 换行后首token: False
+  Token 8: 'UK' [15:17] 类型: WORD, 换行后首token: False
+  Token 9: 'have' [18:22] 类型: WORD, 换行后首token: False
+  Token 10: 'agreements' [23:33] 类型: WORD, 换行后首token: False
+  Token 11: '.' [33:34] 类型: PUNCTUATION, 换行后首token: False
+  Token 12: 'Dr' [35:37] 类型: WORD, 换行后首token: False
+  Token 13: '.' [37:38] 类型: PUNCTUATION, 换行后首token: False
+  Token 14: 'Smith' [39:44] 类型: WORD, 换行后首token: False
+  Token 15: 'works' [45:50] 类型: WORD, 换行后首token: False
+  Token 16: 'at' [51:53] 类型: WORD, 换行后首token: False
+  Token 17: 'MIT' [54:57] 类型: WORD, 换行后首token: False
+  Token 18: '.' [57:58] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例6: 包含换行符的文本 ===
+原始文本: First line.
+Second line starts with capital.
+Third line here.
+总共有 13 个token:
+  Token 0: 'First' [0:5] 类型: WORD, 换行后首token: False
+  Token 1: 'line' [6:10] 类型: WORD, 换行后首token: False
+  Token 2: '.' [10:11] 类型: PUNCTUATION, 换行后首token: False
+  Token 3: 'Second' [12:18] 类型: WORD, 换行后首token: True
+  Token 4: 'line' [19:23] 类型: WORD, 换行后首token: False
+  Token 5: 'starts' [24:30] 类型: WORD, 换行后首token: False
+  Token 6: 'with' [31:35] 类型: WORD, 换行后首token: False
+  Token 7: 'capital' [36:43] 类型: WORD, 换行后首token: False
+  Token 8: '.' [43:44] 类型: PUNCTUATION, 换行后首token: False
+  Token 9: 'Third' [45:50] 类型: WORD, 换行后首token: True
+  Token 10: 'line' [51:55] 类型: WORD, 换行后首token: False
+  Token 11: 'here' [56:60] 类型: WORD, 换行后首token: False
+  Token 12: '.' [60:61] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例7: 中文带标点符号 ===
+原始文本: 法律第12条规定：「禁止」任何单位和个人从事违法行为！
+总共有 16 个token:
+  Token 0: '法律' [0:2] 类型: WORD, 换行后首token: False
+  Token 1: '第' [2:3] 类型: WORD, 换行后首token: False
+  Token 2: '12' [3:5] 类型: NUMBER, 换行后首token: False
+  Token 3: '条' [5:6] 类型: WORD, 换行后首token: False
+  Token 4: '规定' [6:8] 类型: WORD, 换行后首token: False
+  Token 5: '：' [8:9] 类型: PUNCTUATION, 换行后首token: False
+  Token 6: '「' [9:10] 类型: PUNCTUATION, 换行后首token: False
+  Token 7: '禁止' [10:12] 类型: WORD, 换行后首token: False
+  Token 8: '」' [12:13] 类型: PUNCTUATION, 换行后首token: False
+  Token 9: '任何' [13:15] 类型: WORD, 换行后首token: False
+  Token 10: '单位' [15:17] 类型: WORD, 换行后首token: False
+  Token 11: '和' [17:18] 类型: WORD, 换行后首token: False
+  Token 12: '个人' [18:20] 类型: WORD, 换行后首token: False
+  Token 13: '从事' [20:22] 类型: WORD, 换行后首token: False
+  Token 14: '违法行为' [22:26] 类型: WORD, 换行后首token: False
+  Token 15: '！' [26:27] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例8: 复杂的法律文本 ===
+原始文本:
+    Article 3: The parties agree that "confidential information" means any and all
+    non-public information, whether written or oral, including but not limited to
+    trade secrets, business plans, financial information, etc.
+
+    第三条规定：当事人同意"保密信息"是指任何非公开信息，
+    无论是书面还是口头形式，包括但不限于商业秘密、商业计划、财务信息等。
+
+总共有 136 个token:
+  Token 0: '
+' [0:1] 类型: PUNCTUATION, 换行后首token: False
+  Token 1: ' ' [1:2] 类型: PUNCTUATION, 换行后首token: False
+  Token 2: ' ' [2:3] 类型: PUNCTUATION, 换行后首token: False
+  Token 3: ' ' [3:4] 类型: PUNCTUATION, 换行后首token: False
+  Token 4: ' ' [4:5] 类型: PUNCTUATION, 换行后首token: False
+  Token 5: 'Article' [5:12] 类型: WORD, 换行后首token: False
+  Token 6: ' ' [12:13] 类型: PUNCTUATION, 换行后首token: False
+  Token 7: '3' [13:14] 类型: NUMBER, 换行后首token: False
+  Token 8: ':' [14:15] 类型: PUNCTUATION, 换行后首token: False
+  Token 9: ' ' [15:16] 类型: PUNCTUATION, 换行后首token: False
+  Token 10: 'The' [16:19] 类型: WORD, 换行后首token: False
+  Token 11: ' ' [19:20] 类型: PUNCTUATION, 换行后首token: False
+  Token 12: 'parties' [20:27] 类型: WORD, 换行后首token: False
+  Token 13: ' ' [27:28] 类型: PUNCTUATION, 换行后首token: False
+  Token 14: 'agree' [28:33] 类型: WORD, 换行后首token: False
+  Token 15: ' ' [33:34] 类型: PUNCTUATION, 换行后首token: False
+  Token 16: 'that' [34:38] 类型: WORD, 换行后首token: False
+  Token 17: ' ' [38:39] 类型: PUNCTUATION, 换行后首token: False
+  Token 18: '"' [39:40] 类型: PUNCTUATION, 换行后首token: False
+  Token 19: 'confidential' [40:52] 类型: WORD, 换行后首token: False
+  Token 20: ' ' [52:53] 类型: PUNCTUATION, 换行后首token: False
+  Token 21: 'information' [53:64] 类型: WORD, 换行后首token: False
+  Token 22: '"' [64:65] 类型: PUNCTUATION, 换行后首token: False
+  Token 23: ' ' [65:66] 类型: PUNCTUATION, 换行后首token: False
+  Token 24: 'means' [66:71] 类型: WORD, 换行后首token: False
+  Token 25: ' ' [71:72] 类型: PUNCTUATION, 换行后首token: False
+  Token 26: 'any' [72:75] 类型: WORD, 换行后首token: False
+  Token 27: ' ' [75:76] 类型: PUNCTUATION, 换行后首token: False
+  Token 28: 'and' [76:79] 类型: WORD, 换行后首token: False
+  Token 29: ' ' [79:80] 类型: PUNCTUATION, 换行后首token: False
+  Token 30: 'all' [80:83] 类型: WORD, 换行后首token: False
+  Token 31: ' ' [83:84] 类型: PUNCTUATION, 换行后首token: False
+  Token 32: '
+' [84:85] 类型: PUNCTUATION, 换行后首token: False
+  Token 33: ' ' [85:86] 类型: PUNCTUATION, 换行后首token: False
+  Token 34: ' ' [86:87] 类型: PUNCTUATION, 换行后首token: False
+  Token 35: ' ' [87:88] 类型: PUNCTUATION, 换行后首token: False
+  Token 36: ' ' [88:89] 类型: PUNCTUATION, 换行后首token: False
+  Token 37: 'non' [89:92] 类型: WORD, 换行后首token: False
+  Token 38: '-' [92:93] 类型: PUNCTUATION, 换行后首token: False
+  Token 39: 'public' [93:99] 类型: WORD, 换行后首token: False
+  Token 40: ' ' [99:100] 类型: PUNCTUATION, 换行后首token: False
+  Token 41: 'information' [100:111] 类型: WORD, 换行后首token: False
+  Token 42: ',' [111:112] 类型: PUNCTUATION, 换行后首token: False
+  Token 43: ' ' [112:113] 类型: PUNCTUATION, 换行后首token: False
+  Token 44: 'whether' [113:120] 类型: WORD, 换行后首token: False
+  Token 45: ' ' [120:121] 类型: PUNCTUATION, 换行后首token: False
+  Token 46: 'written' [121:128] 类型: WORD, 换行后首token: False
+  Token 47: ' ' [128:129] 类型: PUNCTUATION, 换行后首token: False
+  Token 48: 'or' [129:131] 类型: WORD, 换行后首token: False
+  Token 49: ' ' [131:132] 类型: PUNCTUATION, 换行后首token: False
+  Token 50: 'oral' [132:136] 类型: WORD, 换行后首token: False
+  Token 51: ',' [136:137] 类型: PUNCTUATION, 换行后首token: False
+  Token 52: ' ' [137:138] 类型: PUNCTUATION, 换行后首token: False
+  Token 53: 'including' [138:147] 类型: WORD, 换行后首token: False
+  Token 54: ' ' [147:148] 类型: PUNCTUATION, 换行后首token: False
+  Token 55: 'but' [148:151] 类型: WORD, 换行后首token: False
+  Token 56: ' ' [151:152] 类型: PUNCTUATION, 换行后首token: False
+  Token 57: 'not' [152:155] 类型: WORD, 换行后首token: False
+  Token 58: ' ' [155:156] 类型: PUNCTUATION, 换行后首token: False
+  Token 59: 'limited' [156:163] 类型: WORD, 换行后首token: False
+  Token 60: ' ' [163:164] 类型: PUNCTUATION, 换行后首token: False
+  Token 61: 'to' [164:166] 类型: WORD, 换行后首token: False
+  Token 62: ' ' [166:167] 类型: PUNCTUATION, 换行后首token: False
+  Token 63: '
+' [167:168] 类型: PUNCTUATION, 换行后首token: False
+  Token 64: ' ' [168:169] 类型: PUNCTUATION, 换行后首token: False
+  Token 65: ' ' [169:170] 类型: PUNCTUATION, 换行后首token: False
+  Token 66: ' ' [170:171] 类型: PUNCTUATION, 换行后首token: False
+  Token 67: ' ' [171:172] 类型: PUNCTUATION, 换行后首token: False
+  Token 68: 'trade' [172:177] 类型: WORD, 换行后首token: False
+  Token 69: ' ' [177:178] 类型: PUNCTUATION, 换行后首token: False
+  Token 70: 'secrets' [178:185] 类型: WORD, 换行后首token: False
+  Token 71: ',' [185:186] 类型: PUNCTUATION, 换行后首token: False
+  Token 72: ' ' [186:187] 类型: PUNCTUATION, 换行后首token: False
+  Token 73: 'business' [187:195] 类型: WORD, 换行后首token: False
+  Token 74: ' ' [195:196] 类型: PUNCTUATION, 换行后首token: False
+  Token 75: 'plans' [196:201] 类型: WORD, 换行后首token: False
+  Token 76: ',' [201:202] 类型: PUNCTUATION, 换行后首token: False
+  Token 77: ' ' [202:203] 类型: PUNCTUATION, 换行后首token: False
+  Token 78: 'financial' [203:212] 类型: WORD, 换行后首token: False
+  Token 79: ' ' [212:213] 类型: PUNCTUATION, 换行后首token: False
+  Token 80: 'information' [213:224] 类型: WORD, 换行后首token: False
+  Token 81: ',' [224:225] 类型: PUNCTUATION, 换行后首token: False
+  Token 82: ' ' [225:226] 类型: PUNCTUATION, 换行后首token: False
+  Token 83: 'etc' [226:229] 类型: WORD, 换行后首token: False
+  Token 84: '.' [229:230] 类型: PUNCTUATION, 换行后首token: False
+  Token 85: '
+' [230:231] 类型: PUNCTUATION, 换行后首token: False
+  Token 86: '
+' [231:232] 类型: PUNCTUATION, 换行后首token: False
+  Token 87: ' ' [232:233] 类型: PUNCTUATION, 换行后首token: False
+  Token 88: ' ' [233:234] 类型: PUNCTUATION, 换行后首token: False
+  Token 89: ' ' [234:235] 类型: PUNCTUATION, 换行后首token: False
+  Token 90: ' ' [235:236] 类型: PUNCTUATION, 换行后首token: False
+  Token 91: '第三条' [236:239] 类型: WORD, 换行后首token: False
+  Token 92: '规定' [239:241] 类型: WORD, 换行后首token: False
+  Token 93: '：' [241:242] 类型: PUNCTUATION, 换行后首token: False
+  Token 94: '当事人' [242:245] 类型: WORD, 换行后首token: False
+  Token 95: '同意' [245:247] 类型: WORD, 换行后首token: False
+  Token 96: '"' [247:248] 类型: PUNCTUATION, 换行后首token: False
+  Token 97: '保密' [248:250] 类型: WORD, 换行后首token: False
+  Token 98: '信息' [250:252] 类型: WORD, 换行后首token: False
+  Token 99: '"' [252:253] 类型: PUNCTUATION, 换行后首token: False
+  Token 100: '是' [253:254] 类型: WORD, 换行后首token: False
+  Token 101: '指' [254:255] 类型: WORD, 换行后首token: False
+  Token 102: '任何' [255:257] 类型: WORD, 换行后首token: False
+  Token 103: '非' [257:258] 类型: WORD, 换行后首token: False
+  Token 104: '公开' [258:260] 类型: WORD, 换行后首token: False
+  Token 105: '信息' [260:262] 类型: WORD, 换行后首token: False
+  Token 106: '，' [262:263] 类型: PUNCTUATION, 换行后首token: False
+  Token 107: '
+' [263:264] 类型: PUNCTUATION, 换行后首token: False
+  Token 108: ' ' [264:265] 类型: PUNCTUATION, 换行后首token: False
+  Token 109: ' ' [265:266] 类型: PUNCTUATION, 换行后首token: False
+  Token 110: ' ' [266:267] 类型: PUNCTUATION, 换行后首token: False
+  Token 111: ' ' [267:268] 类型: PUNCTUATION, 换行后首token: False
+  Token 112: '无论是' [268:271] 类型: WORD, 换行后首token: False
+  Token 113: '书面' [271:273] 类型: WORD, 换行后首token: False
+  Token 114: '还是' [273:275] 类型: WORD, 换行后首token: False
+  Token 115: '口头' [275:277] 类型: WORD, 换行后首token: False
+  Token 116: '形式' [277:279] 类型: WORD, 换行后首token: False
+  Token 117: '，' [279:280] 类型: PUNCTUATION, 换行后首token: False
+  Token 118: '包括' [280:282] 类型: WORD, 换行后首token: False
+  Token 119: '但' [282:283] 类型: WORD, 换行后首token: False
+  Token 120: '不' [283:284] 类型: WORD, 换行后首token: False
+  Token 121: '限于' [284:286] 类型: WORD, 换行后首token: False
+  Token 122: '商业秘密' [286:290] 类型: WORD, 换行后首token: False
+  Token 123: '、' [290:291] 类型: PUNCTUATION, 换行后首token: False
+  Token 124: '商业' [291:293] 类型: WORD, 换行后首token: False
+  Token 125: '计划' [293:295] 类型: WORD, 换行后首token: False
+  Token 126: '、' [295:296] 类型: PUNCTUATION, 换行后首token: False
+  Token 127: '财务' [296:298] 类型: WORD, 换行后首token: False
+  Token 128: '信息' [298:300] 类型: WORD, 换行后首token: False
+  Token 129: '等' [300:301] 类型: WORD, 换行后首token: False
+  Token 130: '。' [301:302] 类型: PUNCTUATION, 换行后首token: False
+  Token 131: '
+' [302:303] 类型: PUNCTUATION, 换行后首token: False
+  Token 132: ' ' [303:304] 类型: PUNCTUATION, 换行后首token: False
+  Token 133: ' ' [304:305] 类型: PUNCTUATION, 换行后首token: False
+  Token 134: ' ' [305:306] 类型: PUNCTUATION, 换行后首token: False
+  Token 135: ' ' [306:307] 类型: PUNCTUATION, 换行后首token: False
+
+=== 示例9: 特殊情况处理 ===
+原始文本: Email: user@domain.com, Phone: +1-234-567-8900, URL: https://example.com/path
+总共有 26 个token:
+  Token 0: 'Email' [0:5] 类型: WORD, 换行后首token: False
+  Token 1: ':' [5:6] 类型: PUNCTUATION, 换行后首token: False
+  Token 2: 'user' [7:11] 类型: WORD, 换行后首token: False
+  Token 3: '@' [11:12] 类型: PUNCTUATION, 换行后首token: False
+  Token 4: 'domain' [12:18] 类型: WORD, 换行后首token: False
+  Token 5: '.' [18:19] 类型: PUNCTUATION, 换行后首token: False
+  Token 6: 'com' [19:22] 类型: WORD, 换行后首token: False
+  Token 7: ',' [22:23] 类型: PUNCTUATION, 换行后首token: False
+  Token 8: 'Phone' [24:29] 类型: WORD, 换行后首token: False
+  Token 9: ':' [29:30] 类型: PUNCTUATION, 换行后首token: False
+  Token 10: '+' [31:32] 类型: PUNCTUATION, 换行后首token: False
+  Token 11: '1' [32:33] 类型: NUMBER, 换行后首token: False
+  Token 12: '-' [33:34] 类型: PUNCTUATION, 换行后首token: False
+  Token 13: '234' [34:37] 类型: NUMBER, 换行后首token: False
+  Token 14: '-' [37:38] 类型: PUNCTUATION, 换行后首token: False
+  Token 15: '567' [38:41] 类型: NUMBER, 换行后首token: False
+  Token 16: '-' [41:42] 类型: PUNCTUATION, 换行后首token: False
+  Token 17: '8900' [42:46] 类型: NUMBER, 换行后首token: False
+  Token 18: ',' [46:47] 类型: PUNCTUATION, 换行后首token: False
+  Token 19: 'URL' [48:51] 类型: WORD, 换行后首token: False
+  Token 20: ':' [51:52] 类型: PUNCTUATION, 换行后首token: False
+  Token 21: 'https' [53:58] 类型: WORD, 换行后首token: False
+  Token 22: '://' [58:61] 类型: PUNCTUATION, 换行后首token: False
+  Token 23: 'example' [61:68] 类型: WORD, 换行后首token: False
+  Token 24: '.' [68:69] 类型: PUNCTUATION, 换行后首token: False
+  Token 25: 'com/path' [69:77] 类型: ACRONYM, 换行后首token: False
+
+=== 示例10: 边界情况 ===
+空字符串:
+原始文本:
+总共有 0 个token:
+
+只有标点符号:
+原始文本: !@#$%^&*()
+总共有 1 个token:
+  Token 0: '!@#$%^&*()' [0:10] 类型: PUNCTUATION, 换行后首token: False
+
+只有数字:
+原始文本: 123456789
+总共有 1 个token:
+  Token 0: '123456789' [0:9] 类型: NUMBER, 换行后首token: False
+
+只有空格:
+原始文本:
+
+总共有 0 个token:
+
+所有示例演示完成！
+
+进程已结束,退出代码0

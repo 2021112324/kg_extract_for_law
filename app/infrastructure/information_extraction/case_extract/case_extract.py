@@ -6,6 +6,8 @@ import re
 
 from app.infrastructure.information_extraction.base import Entity, Relationship
 from app.infrastructure.information_extraction.case_extract.llm_tool.text_AI_chunking import LegalDocumentAIChunker
+from app.infrastructure.information_extraction.case_extract.prompt.prompt import default_chunking_prompt
+from app.infrastructure.information_extraction.case_extract.prompt.structure_for_chunk import default_legal_structure
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.law_extract.prompt.example import example_for_clause, \
     example_for_file_info
@@ -168,200 +170,64 @@ class CaseExtractor:
             logging.error("📄❌：条款知识图谱抽取报错: %s", e)
             raise e
 
-    async def split_clause(
+    async def split_cases(
             self,
             case_type: str,
             text: str
     ) -> dict:
         """
-实现功能：切分法规文件，将其整理成法规文件基础信息、条款的结构化数据，大致逻辑如下：
-1. file_info记录文件开头内容，current_chapter记录当前章，current_section记录当前节。
-2. 读取文件内容，若读取到章内容（即"第X章 XXX"），则current_chapter记录当前章内容（即"第X章 XXX"）；
-    若读取到节内容（即"第X节 XXX"），则current_section记录当前节内容（即"第X节 XXX"）；
-    若读取到条款内容（即"第X条 XXX"），则将current_chapter、current_section、条款内容记录到结果中；
-3. file_info从开头开始记录，如果读取到"第一节"，则将"第一节"前的内容记录到file_info中，并删除file_info文本末尾的章和节（如果有的话）
-4. 条款内容为上一个"第X条"到下一个"第X条"之间的内容，或者读到章或节的标志，或者读到文件末尾，或者读到"附录"、"附件"等条款部分结束标志。
+实现功能：切分法规文件，按照诉讼文书结构分割文本：
+1. 针对不同的诉讼文书类型，使用不同的prompt进行分割抽取；
+2. 调用LLM进行分割抽取；
+3. 检验切分结果，确保切分的准确性；
+4. 返回切分后的数据结构；
     切分后的数据结构：
     {
-        "file_info": "文件开头内容",
-        "clauses": [
-            {
-                "章": "章内容",
-                "节": "节内容",
-                "条款编号": "第几条"
-                "条款内容": "条款内容，不包含开头的"第几条""
-            }
-        ]
+        "文本结构": "文本结构内容"
     }
+        :param case_type:
         :param text:
         :return:
         """
-        # 判断诉讼文书类型
-        if case_type == "TODO":
-            logging.info("📄:开始处理TODO")
-        elif case_type == "TODO":
-            logging.info("📄:开始处理TODO")
-        elif case_type == "TODO":
-            logging.info("📄:开始处理TODO")
-        else:
-            logging.error("📄❌：无效的诉讼文书类型")
-            raise ValueError("无效的诉讼文书类型")
-        # 定义正则表达式模式 - 匹配行首的"第X章/节/条 "格式（中间可能有空格，但后面必须有空格）
-        chapter_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*章\s+.*', re.MULTILINE)
-        section_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*节\s+.*', re.MULTILINE)
-        clause_pattern = re.compile(r'^第([零一二三四五六七八九十百千万\d]+)\s*条\s*(.*)', re.MULTILINE)
-
-        # 定义结束标志
-        end_markers = ['附录', '附件', '附表', '后记', '参考文献', '索引']
-
-        lines = text.split('\n')
-
-        # 初始化变量
-        file_info = ""
-        current_chapter = ""
-        current_section = ""
-        clauses = []
-
-        # 记录file_info的结束位置（第一章或第一节）
-        file_info_end_idx = None
-        clause_start_idx = None
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
-            # 逐行进行匹配
-            if chapter_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                # 记录开头内容的结束位置（不包含该行）
-                file_info_end_idx = i
-                # 将章内容记录到current_chapter中
-                current_chapter = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-            if section_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                # 将节内容记录到current_section中
-                current_section = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-            if clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                # 记录条款内容的开始位置（包含该行）
-                clause_start_idx = i
-                if not file_info_end_idx:
-                    file_info_end_idx = i
-                break
-
-        if not clause_start_idx:
-            logging.error("📄❌：文本中匹配条款失败")
-            raise ValueError("文本中匹配条款失败")
-
         try:
-            # 提取file_info：从开头到第一节之前的内容
-            file_info = '\n'.join(lines[:file_info_end_idx]).rstrip()
-            # 提取第一条的条款内容，并将其拼接进file_info中
-
-            current_clause_content = ""
-            current_clause_number = ""
-
-            # 遍历条款内容
-            for i in range(clause_start_idx, len(lines)):
-                line = lines[i]
-                if not line.strip():
-                    continue
-                # 检查是否到达结束标志
-                is_end_marker = False
-                for marker in end_markers:
-                    if line.lstrip().startswith(marker):
-                        is_end_marker = True
-                        break
-                if is_end_marker:
-                    # 如果当前正在收集条款内容，则保存它
-                    if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
-                        current_clause_content = ""
-                        current_clause_number = ""
-                    break
-
-                # 检查是否是章（匹配行首）
-                if chapter_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                    # 如果当前正在收集条款内容，则先保存它
-                    if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
-                        current_clause_content = ""
-                        current_clause_number = ""
-
-                    # 更新当前章
-                    current_chapter = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-                    # 清空当前节
-                    current_section = ""
-                    continue
-
-                # 检查是否是节（匹配行首）
-                if section_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                    # 如果当前正在收集条款内容，则先保存它
-                    if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
-                        current_clause_content = ""
-                        current_clause_number = ""
-
-                    # 更新当前节
-                    current_section = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-                    continue
-
-                # 检查是否是条款（匹配行首）
-                if clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
-                    # 如果当前正在收集条款内容，则先保存之前的条款
-                    if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
-
-                    # 提取条款编号和内容
-                    clause_match = clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·'))
-                    # 从捕获组直接获取编号
-                    clause_num_part = clause_match.group(1)  # 编号部分
-                    current_clause_number = f"第{clause_num_part}条"  # 重构完整编号
-                    current_clause_content = clause_match.group(2).strip()  # 内容部分
-                    continue
-
-                # 如果当前正在收集条款内容，则添加到当前条款内容
-                if current_clause_content:
-                    if current_clause_content:  # 如果已有内容，在前面加上换行符
-                        current_clause_content += '\n' + line
-                    else:  # 如果还没有内容，直接赋值
-                        current_clause_content = line
-            # 处理最后一个条款（如果有）
-            if current_clause_content:
-                clauses.append({
-                    "章": clean_string(current_chapter),
-                    "节": clean_string(current_section),
-                    "条款编号": clean_string(current_clause_number),
-                    "条款内容": clean_string(current_clause_content)
-                })
-
-            if not clauses:
-                logging.error("📄❌：未找到条款内容")
-                raise ValueError("未找到条款内容")
-            # 将第一条的条款内容拼接至file_info中
-            file_info += '\n' + clauses[0]['条款内容']
-            return {
-                "file_info": clean_string(file_info),
-                "clauses": clauses
-            }
+            # 判断诉讼文书类型
+            user_prompt = None
+            structure_list = []
+            if case_type == "一审民事判决书":
+                logging.info("📄:开始处理一审民事判决书分块")
+                user_prompt = ""
+            elif case_type == "TODO1":
+                logging.info("📄:开始处理一审刑事判决书分块")
+            elif case_type == "TODO2":
+                logging.info("📄:开始处理TODO")
+            elif case_type == "test":
+                logging.info("📄:使用默认的prompt开始文件分块")
+                user_prompt = default_chunking_prompt()
+                _, structure_list = default_legal_structure()
+            else:
+                logging.error("📄❌：无效的诉讼文书类型")
+                raise ValueError("无效的诉讼文书类型")
+            # 抽取分块内容
+            logging.info("📄🎯:开始抽取分块内容")
+            chunks = self.chunking_splitter.chunk_legal_document(
+                text,
+                user_prompt
+            )
+            # 检验分块结果
+            if not isinstance(chunks, dict):
+                logging.error("📄❌：分块结果无效")
+                raise ValueError("分块结果无效")
+            final_chunks = {}
+            for structure in structure_list:
+                chunk = chunks.get(structure)
+                if not chunk:
+                    logging.warning(f"📄⚠️警告：分块结果中缺少结构{structure}\n分块结果包含：{chunks.keys()}")
+                final_chunks[structure] = chunk
+            logging.info("📄🎯:结束抽取分块内容")
+            return final_chunks
         except Exception as e:
-            logging.error(f"📄❌：提取文件信息时出错 - {e}")
-            raise ValueError(f"提取文件信息时出错 - {e}")
+            logging.error(f"📄❌：分块文件时出错 - {e}")
+            raise ValueError(f"分块文件时出错 - {e}")
 
     async def kg_extract_from_file_info(
             self,
