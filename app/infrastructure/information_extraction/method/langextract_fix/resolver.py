@@ -275,7 +275,7 @@ class Resolver(AbstractResolver):
       source_text: str,
       token_offset: int,
       char_offset: int | None = None,
-      enable_fuzzy_alignment: bool = False,
+      enable_fuzzy_alignment: bool = True,
       fuzzy_alignment_threshold: float = _FUZZY_ALIGNMENT_MIN_THRESHOLD,
       accept_match_lesser: bool = True,
   ) -> Iterator[data.Extraction]:

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.infrastructure.graph_storage.factory import GraphStorageFactory
+from app.infrastructure.information_extraction.case_extract.case_extract import CaseExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
@@ -70,6 +71,9 @@ class KGService:
         改进的针对法律知识图谱单门设计抽取流程的对象
         """
         self.clause_extractor = ClauseExtractor(
+            max_concurrent=50
+        )
+        self.litigation_extractor = CaseExtractor(
             max_concurrent=50
         )
 
@@ -2047,25 +2051,181 @@ class KGService:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
         await self.clause_extractor.logging_result_stats()
         return True
-        # # 每五个文件为一批进行处理
-        # max_file_count = 5
-        # file_contents = []
+
+    async def litigation_extract_by_local_dir(
+            self,
+            litigation_file_dir,
+            case_type,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        从本地目录提取条款知识图谱
+        :param litigation_file_dir: 文件夹路径
+        :param case_type: 案件类型
+        :param if_del_task: 是否删除任务
+        :param db: 数据库会话
+        :return:
+        """
+        # 检验参数
+        litigation_file_dir = litigation_file_dir.replace('\\', '/')
+        if not os.path.exists(litigation_file_dir):
+            raise Exception(f"文件目录不存在: {litigation_file_dir}")
+        if not os.path.isdir(litigation_file_dir):
+            raise Exception(f"文件目录不是目录: {litigation_file_dir}")
+        new_kg = KGCreate(
+            name=litigation_file_dir.split("/")[-1],
+            description="",
+        )
+        kg_result = await kg_service.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+        files = os.listdir(litigation_file_dir)
+        error_files = []
+        # 方案一：一个文件一个文件的处理
+        for file in files:
+            try:
+                file_path = os.path.join(litigation_file_dir, file)
+                # 只处理md或txt文件
+                filename = file.split(".")[0]
+                if file.endswith('.md') or file.endswith('.txt'):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        # 生成任务的子图名称
+                        graph_name = generate_unique_name(f"{kg_result.get('data').get('name')}_task")
+                        # 创建新的任务对象
+                        new_task = KGExtractionTask(
+                            kg_id=kg_id,
+                            name=filename,
+                            description="",
+                            prompt="",
+                            parameters={},
+                            graph_name=graph_name,
+                            status=1,
+                        )
+                        # 添加到数据库
+                        db.add(new_task)
+                        db.flush()  # 刷新以获取任务ID
+                        # 提交所有更改
+                        db.commit()
+                        db.refresh(new_task)
+                        # 提取条款知识图谱
+                        try:
+                            clause_kg = await self.litigation_extractor.extract_cases(
+                                filename=filename,
+                                case_type=case_type,
+                                text=content
+                            )
+                        except Exception as e:
+                            new_task.status = 4
+                            db.add(new_task)
+                            db.commit()
+                            logging.error(f"{file}文件图谱抽取时出现问题，请检查！" + str(e))
+                            raise Exception(f"{file}文件图谱抽取时出现问题，请检查！" + str(e))
+                        # 保存条款知识图谱
+                        try:
+                            self.graph_storage.connect()
+                            self.graph_storage.add_subgraph_with_merge(clause_kg, graph_name, "DomainLevel")
+                            self.graph_storage.disconnect()
+                        except Exception as e:
+                            new_task.status = 4
+                            db.add(new_task)
+                            db.commit()
+                            logging.error(f"{file}文件图谱保存时出现问题，请检查！" + str(e))
+                            raise Exception(f"{file}文件图谱保存时出现问题，请检查！" + str(e))
+                        new_task.status = 2
+                        db.add(new_task)
+                        # 提交所有更改
+                        db.commit()
+                        db.refresh(new_task)
+            except Exception as e:
+                logging.error(f"{file}文件处理出现问题，请检查！" + str(e))
+                error_files.append((file, str(e)))
+        # # 方案二：每五份文件一批，批量同步进行抽取
         # for file in files:
-        #     file_path = os.path.join(clause_file_dir, file)
-        #     # 只处理md或txt文件
-        #     if file.endswith('.md') or file.endswith('.txt'):
-        #         with open(file_path, 'r', encoding='utf-8') as f:
-        #             content = f.read()
-        #         file_contents.append({
-        #             'filename': file,
-        #             'content': content,
-        #             'content_type': 'text/markdown' if file.endswith('.md') else 'text/plain'
-        #         })
+        #     try:
+        #         file_path = os.path.join(litigation_file_dir, file)
+        #         # 只处理md或txt文件
+        #         filename = file.split(".")[0]
+        #         if file.endswith('.md') or file.endswith('.txt'):
+        #             with open(file_path, 'r', encoding='utf-8') as f:
+        #                 content = f.read()
+        #                 # 生成任务的子图名称
+        #                 graph_name = generate_unique_name(f"{kg_result.get('data').get('name')}_task")
+        #                 # 创建新的任务对象
+        #                 new_task = KGExtractionTask(
+        #                     kg_id=kg_id,
+        #                     name=filename,
+        #                     description="",
+        #                     prompt="",
+        #                     parameters={},
+        #                     graph_name=graph_name,
+        #                     status=1,
+        #                 )
+        #                 # 添加到数据库
+        #                 db.add(new_task)
+        #                 db.flush()  # 刷新以获取任务ID
+        #                 # 提交所有更改
+        #                 db.commit()
+        #                 db.refresh(new_task)
+        #                 # 提取条款知识图谱
+        #                 try:
+        #                     clause_kg = await self.litigation_extractor.extract_cases(
+        #                         filename=filename,
+        #                         case_type=case_type,
+        #                         text=content
+        #                     )
+        #                 except Exception as e:
+        #                     new_task.status = 4
+        #                     db.add(new_task)
+        #                     db.commit()
+        #                     logging.error(f"{file}文件图谱抽取时出现问题，请检查！" + str(e))
+        #                     raise Exception(f"{file}文件图谱抽取时出现问题，请检查！" + str(e))
+        #                 # 保存条款知识图谱
+        #                 try:
+        #                     self.graph_storage.connect()
+        #                     self.graph_storage.add_subgraph_with_merge(clause_kg, graph_name, "DomainLevel")
+        #                     self.graph_storage.disconnect()
+        #                 except Exception as e:
+        #                     new_task.status = 4
+        #                     db.add(new_task)
+        #                     db.commit()
+        #                     logging.error(f"{file}文件图谱保存时出现问题，请检查！" + str(e))
+        #                     raise Exception(f"{file}文件图谱保存时出现问题，请检查！" + str(e))
+        #                 new_task.status = 2
+        #                 db.add(new_task)
+        #                 # 提交所有更改
+        #                 db.commit()
+        #                 db.refresh(new_task)
+        #     except Exception as e:
+        #         logging.error(f"{file}文件处理出现问题，请检查！" + str(e))
+        #         error_files.append((file, str(e)))
+        # 获取kg_id下所有status为2的task的graph_name
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        # 合并图谱，生成最终的图谱
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在处理图谱 {graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"图谱 {graph_name} 处理完成")
+                self.graph_storage.disconnect()
+            logging.info("所有图谱处理完成")
+        except Exception as e:
+            logging.error(f"图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"图谱合并时出现问题，请检查！" + str(e))
+        for file, error in error_files:
+            logging.error(f"{file}文件处理出现问题，请检查！" + error)
+        await self.litigation_extractor.logging_result_stats()
+        return True
 
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"a1_{source_name}_{generate_snowflake_string_id()}"
+    return f"a2_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

@@ -137,9 +137,20 @@ def edge_cases_with_resolver_test():
 
 
 if __name__ == "__main__":
-    resolver_with_json_repair_test()
-    edge_cases_with_resolver_test()
+    # resolver_with_json_repair_test()
+    # edge_cases_with_resolver_test()
+    #
+    # print("\n" + "=" * 50)
+    # print("测试完成")
+    # 添加读取指定文件并输出内容长度的功能
+    file_path = r"F:\企业大脑知识库系统\8.1项目\法律法规\裁判文书网v4\电子信息业制造业\二审民事判决书-过大\某某公司1与某某公司2等侵害计算机软件著作权纠纷二审民事判决书.txt"
 
-    print("\n" + "=" * 50)
-    print("测试完成")
-
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            text = file.read()
+            print(f"文件内容长度: {len(text)}")
+            print(f"文件路径: {file_path}")
+    except FileNotFoundError:
+        print(f"文件未找到: {file_path}")
+    except Exception as e:
+        print(f"读取文件时发生错误: {e}")

@@ -46,6 +46,10 @@ class IInformationExtraction(ABC):
     def __init__(self):
         pass
 
+    def get_config(self):
+        """获取配置"""
+        pass
+
     @abstractmethod
     async def entity_and_relationship_extract(
             self,

@@ -113,6 +113,9 @@ class LangextractAdapter(IInformationExtraction):
             timeout=10,
         )
 
+    def get_config(self):
+        return self.default_config
+
     async def entity_and_relationship_extract(
             self,
             user_prompt: str,
@@ -669,6 +672,9 @@ class LangextractAdapter(IInformationExtraction):
                 # print("-----------------------------------------")
                 # print("分块大小: " + str(config.max_char_buffer))
                 # print("文本长度: " + str(len(input_text)))
+                # print("f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7")
+                # print(config.temperature)
+                # print(prompt)
 
                 # 使用带超时的函数执行lx.extract
                 result = await run_with_timeout_async(
@@ -705,20 +711,20 @@ class LangextractAdapter(IInformationExtraction):
                 else:
                     result_list = list(result)
                 document_dict_list = self.convert_document_to_dict_with_text(result_list)
-                try:
-                    formatted_json = json.dumps(
-                        document_dict_list,
-                        indent=2,
-                        ensure_ascii=False,
-                        default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
-                    )
-                    # print("提取结果的格式化JSON输出:")
-                    # print(formatted_json)
-                    logger.info("提取结果的JSON输出:")
-                    logger.info(formatted_json)
-                except Exception as json_error:
-                    logger.warning("格式化JSON输出失败:")
-                    # print(f"格式化JSON输出失败: {json_error}")
+                # try:
+                #     formatted_json = json.dumps(
+                #         document_dict_list,
+                #         indent=2,
+                #         ensure_ascii=False,
+                #         default=lambda obj: str(obj) if hasattr(obj, '__dict__') else obj
+                #     )
+                #     # print("提取结果的格式化JSON输出:")
+                #     # print(formatted_json)
+                #     logger.info("提取结果的JSON输出:")
+                #     logger.info(formatted_json)
+                # except Exception as json_error:
+                #     logger.warning("格式化JSON输出失败:")
+                #     # print(f"格式化JSON输出失败: {json_error}")
                 return document_dict_list
                 # return self.convert_annotated_document_to_dict(result)
 

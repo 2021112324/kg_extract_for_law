@@ -12,7 +12,8 @@ from typing import Dict, List, Optional, Any
 from openai import OpenAI
 from json_repair import repair_json
 
-from app.infrastructure.information_extraction.case_extract.prompt.default_prompt import default_chunking_prompt
+from app.infrastructure.information_extraction.case_extract.prompt.default_prompt import default_chunking_prompt, \
+    default_chunking_prompt_v2
 
 # 配置日志输出到控制台
 logging.basicConfig(level=logging.INFO)
@@ -25,24 +26,32 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
+QwenLongModelName = "qwen-long"
+QwenLongApiKey = "sk-742c7c766efd4426bd60a269259aafaf"
+QwenLongApiUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+Qwen3ModelName = "qwen3-30b-a3b-instruct-2507"
+Qwen3ApiKey = "gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847"
+Qwen3ApiUrl = "http://222.171.219.26:20001/v1"
+
 class LegalDocumentAIChunker:
     """法律文书结构化分块器"""
 
     def __init__(
             self,
-            model_name: str = "qwen-long",
-            api_key: str = "sk-742c7c766efd4426bd60a269259aafaf",
-            api_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            # model_name: str = "qwen3-30b-a3b-instruct-2507",
-            # api_key: str = "gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847",
-            # api_url: str = "http://222.171.219.26:20001/v1",
+            # model_name: str = "qwen-long",
+            # api_key: str = "sk-742c7c766efd4426bd60a269259aafaf",
+            # api_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            model_name: str = Qwen3ModelName,
+            api_key: str = Qwen3ApiKey,
+            api_url: str = Qwen3ApiUrl,
             max_retries: int = 5,
     ):
         """
         初始化法律文书分块器
 
         Args:
-            model_name: 使用的大模型名称，默认为QWEN_PLUS_MODEL
+            model_name: 使用的大模型名称，默认为Qwen3ModelName
             api_key: API密钥，默认从环境变量获取
         """
         self.model_name = model_name
@@ -73,20 +82,43 @@ class LegalDocumentAIChunker:
         """
         # 构建提示词
         if not user_prompt:
-            user_prompt = default_chunking_prompt()
+            user_prompt = default_chunking_prompt_v2()
             # print("使用默认的分块提示词", user_prompt)
         temp_prompt = user_prompt
+        # 将文档内容段落进行标号
+        paragraph_list, paragraph_list_map = self._add_paragraph_numbers(document_text)
+        # print("段落列表:", paragraph_list)
+        # print("段落列表映射:", paragraph_list_map)
+        process_text = str(paragraph_list)
+        if len(process_text) > 30000:
+            # raise Exception("文档内容过长，请使用模型")
+            self.model_name = QwenLongModelName
+            self.api_key = QwenLongApiKey
+            self.api_url = QwenLongApiUrl
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.api_url,
+            )
+        else:
+            self.model_name = Qwen3ModelName
+            self.api_key = Qwen3ApiKey
+            self.api_url = Qwen3ApiUrl
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.api_url,
+            )
         for attempt in range(self.max_retries):
             try:
                 logging.info(f"📝分块：尝试第 {attempt + 1} 次抽取")
                 # 调用大模型
                 logging.info("📝调用大模型进行分块")
-                response = self._call_qwen_model(temp_prompt, document_text)
+                response = self._call_qwen_model(temp_prompt, process_text)
 
                 # 解析模型响应
                 chunk_result = response.choices[0].message.content
                 # print("模型响应结果:", chunk_result)
-                final_chunk_result = self._parse_chunking_result(chunk_result, document_text, if_validate=False)
+                chunk_result = self._parse_chunking_result(chunk_result, document_text, if_validate=False)
+                final_chunk_result = self._process_chunk_result(chunk_result, paragraph_list_map)
                 return final_chunk_result
             except Exception as e:
                 logging.error(f"📝错误：第 {attempt + 1} 次尝试时，诉讼文书分块时发生错误: {str(e)}")
@@ -114,8 +146,8 @@ class LegalDocumentAIChunker:
             user_input: 用户输入的文本，即待处理的法律文书
         """
         try:
-            print("调用Qwen模型，系统提示词:", system_prompt)
-            print("调用Qwen模型，用户输入文本长度:", len(user_input))
+            # print("调用Qwen模型，系统提示词:", system_prompt)
+            # print("调用Qwen模型，用户输入文本长度:", len(user_input))
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[
@@ -128,14 +160,45 @@ class LegalDocumentAIChunker:
             )
             return response
         except Exception as e:
+            print(self.api_key)
+            print(self.api_url)
+            print(self.model_name)
             raise Exception(f"调用Qwen模型时发生错误: {str(e)}")
+
+    def _add_paragraph_numbers(
+            self,
+            text: str
+    ) -> (list[dict], dict):
+        """
+        将文本按换行符分割，为每个非空段落添加编号。
+
+        Args:
+            text: 原始文本字符串
+
+        Returns:
+            列表，每个元素为 {"index": 段落编号 (字符串), "content": 原始段落内容}
+        """
+        paragraphs = text.split('\n')  # 按换行符分割
+        paragraphs_list = []
+        paragraphs_list_map = {}
+        idx = 1
+        for para in paragraphs:
+            if para.strip():  # 只保留非空段落
+                paragraphs_list.append({
+                    "index": str(idx),
+                    "content": para  # 保留原始内容，不做 strip，以保持格式
+                })
+                paragraphs_list_map[str(idx)] = para
+                idx += 1
+        return paragraphs_list, paragraphs_list_map
+
 
     def _parse_chunking_result(
             self,
             chunk_result: str,
             original_text: str,
             if_validate: bool = False
-    ) -> Dict[str, str]:
+    ) -> dict:
         """
         解析模型返回的结果
 
@@ -212,6 +275,47 @@ class LegalDocumentAIChunker:
             except Exception as repair_error:
                 logging.error(f"📝❌错误：JSON修复失败: {repair_error}")
                 raise Exception(f"JSON修复失败: {repair_error}")
+
+    def _process_chunk_result(
+            self,
+            chunk_result: dict,
+            paragraph_map: dict
+    ) -> dict:
+        """
+        处理分块结果
+        :param chunk_result:
+        :return:
+        """
+        try:
+            final_chunk_result = {}
+            for section_name, section_content in chunk_result.items():
+                if not section_content:
+                    logging.warning(f"📝⚠️分块警告：分块内容为空，已跳过。{section_name}:{section_content}")
+                    continue
+                if not isinstance(section_content, list):
+                    try:
+                        section_content = json.loads(section_content)
+                    except json.JSONDecodeError:
+                        logging.warning(f"📝⚠️分块警告：分块内容不是列表类型，已跳过。{section_name}:{section_content}")
+                        continue
+                for item in section_content:
+                    item_num = str(item)
+                    if not item_num:
+                        logging.warning(f"📝⚠️分块警告：分块内容中的段落编号为空，已跳过。{section_name}:{item_num}")
+                        continue
+                    content = paragraph_map.get(item_num)
+                    content = content.replace('\u3000', ' ')
+                    if not content:
+                        logging.warning(f"📝⚠️分块警告：分块内容中的段落编号在原文中不存在，已跳过。{section_name}:{item_num}")
+                        continue
+                    if final_chunk_result.get(section_name):
+                        final_chunk_result[section_name] = final_chunk_result[section_name] + "\n" + content.strip()
+                    else:
+                        final_chunk_result[section_name] = content.strip()
+            return final_chunk_result
+        except Exception as e:
+            logging.error(f"📝289错误：分块结果处理时发生错误: {str(e)}")
+            raise Exception(f"📝289错误：分块结果处理时发生错误: {str(e)}")
 
     def _validate_content_in_original(self, chunk_content: str, original_text: str) -> bool:
         """
@@ -347,7 +451,7 @@ async def case_test():
 
 async def case_test2():
     # 指定测试文件路径
-    file_path = r"F:\企业大脑知识库系统\8.1项目\法律法规\裁判文书网v4\电子信息业制造业\一审民事判决书\广东泰某有限公司三某中山有限公司合同纠纷民事一审民事判决书.txt"
+    file_path = r"F:\企业大脑知识库系统\8.1项目\法律法规\裁判文书网v4\电子信息业制造业\一审刑事判决书\陈某等非法获取计算机信息系统数据罪一审刑事判决书.txt"
 
     # 读取文件内容
     try:
@@ -370,11 +474,52 @@ async def case_test2():
         print("分块结果:")
         for section_name, content in result.items():
             print(f"\n【{section_name}】:")
-            print(content[:200] + "..." if len(content) > 200 else content)  # 只显示前200字符
+            # print(content[:200] + "..." if len(content) > 200 else content)  # 只显示前200字符
+            print(content)
     except Exception as e:
         print(f"处理过程中出现错误: {e}")
 
 
 # 使用示例
+async def api_connection():
+    """直接测试大模型API连接"""
+    print("🔍 开始测试大模型API连接...")
+
+    # 直接使用配置的参数创建OpenAI客户端
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=QwenLongApiKey,
+        base_url=QwenLongApiUrl,
+    )
+
+    try:
+        print(f"📝 测试模型: {QwenLongModelName}")
+        print(f"🔗 API地址: {QwenLongApiUrl}")
+        print(f"🔑 API密钥: {QwenLongApiKey[:10]}...")  # 只显示前10位
+
+        # 发送简单的测试请求
+        response = client.chat.completions.create(
+            model=QwenLongModelName,
+            messages=[
+                {"role": "user", "content": "请回复'连接成功'"}
+            ],
+            temperature=0.1,
+            max_tokens=50
+        )
+
+        result = response.choices[0].message.content
+        print("✅ API连接测试成功!")
+        print(f"🤖 模型响应: {result}")
+        return True
+
+    except Exception as e:
+        print(f"❌ API连接测试失败!")
+        print(f"💥 错误详情: {str(e)}")
+        return False
+
+
 if __name__ == "__main__":
-    asyncio.run(case_test2())
+    # 运行API连接测试
+    asyncio.run(api_connection())
+    # asyncio.run(case_test2())
