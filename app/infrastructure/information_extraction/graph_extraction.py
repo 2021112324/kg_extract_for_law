@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.method.base import LangextractConfig, ModelConfig
 from app.infrastructure.information_extraction.sync_task import sync_task_manager
-from app.infrastructure.information_extraction.union.union_find import UnionFind
 from app.schemas.kg import GraphEdgeBase, GraphNodeBase, TextClass
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -91,6 +90,16 @@ class GraphExtraction:
     ) -> dict | None:
         # 定义长度阈值，可根据实际需求调整
         length_threshold = LENGTH_THRESHOLD  # 字符数阈值
+        #     length_threshold: int = 0
+        #     max_chunk_size: int = 30000
+        #     overlap_size: int = 500
+        #     max_workers: int = 10
+        #     use_chunked_oneshot: bool = True
+        print("Length_threshold:", length_threshold)
+        print("Max_chunk_size:", MAX_CHUNK_SIZE)
+        print("Overlap_size:", OVERLAP_SIZE)
+        print("Max_workers:", MAX_WORKERS)
+        print("Use_chunked_oneshot:", True)
 
         if len(input_text) > length_threshold:
             # 使用 one-shot 方法处理长文本

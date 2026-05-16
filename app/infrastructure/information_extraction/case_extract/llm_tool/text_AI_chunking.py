@@ -35,7 +35,7 @@ class LegalDocumentAIChunker:
             api_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
             # model_name: str = "qwen3-30b-a3b-instruct-2507",
             # api_key: str = "gpustack_342609ce423be29a_4371426b285a91dc44fb4e8d72454847",
-            # api_url: str = "http://222.171.219.26:20001/v1",
+            # api_url: str = "http://122.159.197.93:20001/v1",
             max_retries: int = 5,
     ):
         """

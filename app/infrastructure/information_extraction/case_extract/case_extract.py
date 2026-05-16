@@ -7,9 +7,17 @@ from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 from app.infrastructure.information_extraction.base import Entity, Relationship
 from app.infrastructure.information_extraction.case_extract.llm_tool.content_AI_chunking import LegalDocumentAIChunker
 from app.infrastructure.information_extraction.case_extract.prompt.administrative_judgment_of_second_instance import \
-    AJSI_chunking_prompt_v2, AJSI_legal_structure, AJSI_case_structure
-from app.infrastructure.information_extraction.case_extract.prompt.default_prompt import default_chunking_prompt, \
-    default_legal_structure, default_case_structure, default_chunking_prompt_v2
+    administrative_judgment_of_second_instance
+from app.infrastructure.information_extraction.case_extract.prompt.civil_judgment_of_first_instance import \
+    civil_judgment_of_first_instance
+from app.infrastructure.information_extraction.case_extract.prompt.civil_judgment_of_retrial import \
+    civil_judgment_of_retrial
+from app.infrastructure.information_extraction.case_extract.prompt.civil_judgment_of_second_instance import \
+    civil_judgment_of_second_instance
+from app.infrastructure.information_extraction.case_extract.prompt.administrative_judgment_of_first_instance import \
+    administrative_judgment_of_first_instance
+from app.infrastructure.information_extraction.case_extract.prompt.default_prompt import default_legal_structure, \
+    default_case_structure, default_chunking_prompt_v2
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
 from app.infrastructure.information_extraction.method.base import LangextractConfig
 from app.infrastructure.string_utils.id_tool import generate_hex_uuid
@@ -162,13 +170,24 @@ class CaseExtractor:
             structure_list = []
             if case_type == "一审民事判决书":
                 logging.info("📄:开始处理一审民事判决书分块")
-                user_prompt = ""
+                user_prompt = civil_judgment_of_first_instance.chunking_prompt_v2()
+                _, structure_list = civil_judgment_of_first_instance.legal_structure()
             elif case_type == "二审民事判决书":
                 logging.info("📄:开始处理二审民事判决书分块")
-                user_prompt = AJSI_chunking_prompt_v2()
-                _, structure_list = AJSI_legal_structure()
-            elif case_type == "TODO2":
-                logging.info("📄:开始处理TODO")
+                user_prompt = civil_judgment_of_second_instance.chunking_prompt_v2()
+                _, structure_list = civil_judgment_of_second_instance.legal_structure()
+            elif case_type == "再审民事判决书":
+                user_prompt = civil_judgment_of_retrial.chunking_prompt_v2()
+                _, structure_list = civil_judgment_of_retrial.legal_structure()
+                logging.info("📄:开始处理再审民事判决书分块")
+            elif case_type == "一审行政判决书":
+                user_prompt = administrative_judgment_of_first_instance.chunking_prompt_v2()
+                _, structure_list = administrative_judgment_of_first_instance.legal_structure()
+                logging.info("📄:开始处理一审行政判决书分块")
+            elif case_type == "二审行政判决书":
+                user_prompt = administrative_judgment_of_second_instance.chunking_prompt_v2()
+                _, structure_list = administrative_judgment_of_second_instance.legal_structure()
+                logging.info("📄:开始处理二审行政判决书分块")
             elif case_type == "test":
                 logging.info("📄:使用默认的prompt开始文件分块")
                 user_prompt = default_chunking_prompt_v2()
@@ -253,14 +272,18 @@ class CaseExtractor:
             # print(f"chunks_data: {chunks_data}")
             if case_type == "一审民事判决书":
                 logging.info("📄:开始处理一审民事判决书分块图谱抽取")
-                case_structure = {}
+                case_structure = civil_judgment_of_first_instance.case_structure
                 pass
             elif case_type == "二审民事判决书":
-                case_structure = AJSI_case_structure
+                case_structure = civil_judgment_of_second_instance.case_structure
                 pass
-            elif case_type == "TODO2":
-                case_structure = {}
+            elif case_type == "再审民事判决书":
+                case_structure = civil_judgment_of_retrial.case_structure
                 pass
+            elif case_type == "一审行政判决书":
+                case_structure = administrative_judgment_of_first_instance.case_structure
+            elif case_type == "二审行政判决书":
+                case_structure = administrative_judgment_of_second_instance.case_structure
             elif case_type == "test":
                 logging.info("📄：无效的诉讼文书类型,使用默认结构")
                 case_structure = default_case_structure
@@ -448,7 +471,7 @@ class CaseExtractor:
             tasks = []
             tasks_params = []
             for case_schema in litigation_schemas:
-                # 诉讼结构包含多个诉讼结构
+                # 诉讼schema可能包含多个诉讼结构
                 chunk_structures = case_schema.get("chunks")
                 if not chunk_structures:
                     logging.error("📄❌：诉讼结构无效,chunks可能为空")

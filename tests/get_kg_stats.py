@@ -3,17 +3,27 @@
 from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 
 if __name__ == "__main__":
-    neo4j_adapter = Neo4jAdapter()
+    neo4j_adapter = Neo4jAdapter(
+        uri="bolt://39.96.198.93:7687",
+        username="neo4j",
+        password="ug4GMLnArVaKz8z",
+        database="neo4j"
+    )
     # kg_name = "enterprise_regulations"
     kg_names = [
-        "合规案例库v8_kg_536094435075686400",
-        "国家规章库v5_054cb5b450f34d1a97bd7da805eb7964",
-        "法规v1_697ef070b1674c6ba1844c9f440a004f",
-        "国家法律法规数据库_5c0a56861f8e4efba71413c30e04377a",
-        "一审_v4_kg_538581906984271872",
-        "二审判决_kg_539068999565049856",
-        "a1_国家规章库V1_kg_540577387360813056",
-        "a1_国家法律数据库old_kg_540877574587285504"
+        "a4_合规指引v1_kg_564731610319028224",
+        "a4_合规指引v2_kg_565135353883656192",
+        # "合规案例库v8_kg_536094435075686400",
+        # "国家规章库v5_054cb5b450f34d1a97bd7da805eb7964",
+        # "法规v1_697ef070b1674c6ba1844c9f440a004f",
+        # "国家法律法规数据库_5c0a56861f8e4efba71413c30e04377a",
+        # "一审_v4_kg_538581906984271872",
+        # "二审判决_kg_539068999565049856",
+        # "a1_国家规章库V5_kg_544354721847050240",
+        # "a1_国家法律数据库newV2_kg_544067195521466368",
+        # "a1_法规V5_kg_544885123271622656",
+        # "a3_一审民事判决书_v1_kg_552088210411356160",
+        # "a2_二审民事判决书v1_kg_548341426803441664"
     ]
     sum_stats = {
         "nodes_count": 0,

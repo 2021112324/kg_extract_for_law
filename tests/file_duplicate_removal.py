@@ -54,7 +54,7 @@ def print_directory_structure(root_path, prefix="", max_depth=None, current_dept
 
 def main():
     # 设置源目录和输出目录
-    source_directory = r"F:\企业大脑知识库系统\8.1项目\数据处理\清洗的数据\国家规章库"
+    source_directory = r"D:\CogmAIT\8.1项目\8.1数据\数据源\合规指引20260108\合规指引"
     output_directory = r"F:\企业大脑知识库系统\8.1项目\抽取代码\kg_extract_for_law\tests\output"
     output_file = os.path.join(output_directory, "directory_structure.txt")
 

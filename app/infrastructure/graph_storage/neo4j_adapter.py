@@ -40,9 +40,9 @@ class Neo4jAdapter(IGraphStorage):
             password: 密码
             database: 数据库名称
         """
-        self.uri = uri if uri else "bolt://60.205.171.106:7687"
+        self.uri = uri if uri else "bolt://127.0.0.1:7687"
         self.username = username if username else "neo4j"
-        self.password = password if password else "hit-wE8sR9wQ3pG1"
+        self.password = password if password else "testForV2"
         self.database = database if database else "neo4j"
         self.driver: Optional[Driver] = None
 
@@ -177,6 +177,28 @@ class Neo4jAdapter(IGraphStorage):
         except Exception as e:
             logger.error(f"Neo4j连接测试失败: {str(e)}")
             return False
+
+    def run_query(self, query: str, params: dict = None) -> list:
+        """
+        执行任意 Cypher 查询，返回记录列表。
+
+        Args:
+            query: Cypher 查询语句
+            params: 查询参数字典
+
+        Returns:
+            list[dict]: 查询结果记录列表，每条记录转为 dict
+        """
+        if not self.driver:
+            logger.error(self.DRIVER_NOT_INITIALIZED_ERROR)
+            return []
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query, params or {})
+                return [dict(record) for record in result]
+        except Exception as e:
+            logger.error(f"Cypher 查询失败: {e}")
+            return []
 
     def add_subgraph_with_merge(
             self,

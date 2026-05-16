@@ -1,11 +1,20 @@
 from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 
 if __name__ == "__main__":
-    neo4j_adapter = Neo4jAdapter()
+    neo4j_adapter = Neo4jAdapter(
+        uri="bolt://39.96.198.93:7687",
+        username="neo4j",
+        password="ug4GMLnArVaKz8z",
+        database="neo4j"
+        # uri = "blot://39.96.198.93:7687",
+        # username = "neo4j",
+        # password = "ug4GMLnArVaKz8z",
+        # database = "neo4j"
+    )
     # 创建知识图谱
     neo4j_adapter.connect()
     print("开始导入数据...")
-    neo4j_adapter.merge_graphs("a2_二审民事判决书v2_kg_548412716440616960", "a2_二审民事判决书其2_kg_548412716440616960")
+    neo4j_adapter.merge_graphs("c1_法律法规条款_3_kg_578024843669143552", "c1_法律法规条款")
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")
