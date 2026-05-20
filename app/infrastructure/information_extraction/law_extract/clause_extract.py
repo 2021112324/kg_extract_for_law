@@ -355,7 +355,7 @@ class ClauseExtractor:
                 self.result_stats.error_msg += "未找到条款内容\n" + text[:500] + "\n"
                 raise ValueError("未找到条款内容")
             # 将第一条的条款内容拼接至file_info中
-            file_info += '\n' + clauses[0]['条款内容']
+            file_info += '\n' + clauses[0]['条款内容'] # TODO :补充后几条作为信息
             return {
                 "file_info": clean_string(file_info),
                 "clauses": clauses

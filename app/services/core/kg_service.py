@@ -18,6 +18,7 @@ from app.db.session import get_db
 from app.infrastructure.graph_storage.factory import GraphStorageFactory
 from app.infrastructure.information_extraction.case_extract.case_extract import CaseExtractor
 from app.infrastructure.information_extraction.guide_extract.clause_extract import GuideClauseExtractor
+from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
@@ -72,6 +73,9 @@ class KGService:
         改进的针对法律知识图谱单门设计抽取流程的对象
         """
         self.clause_extractor = ClauseExtractor(
+            max_concurrent=50
+        )
+        self.clause_en_extractor = ClauseEnExtractor(
             max_concurrent=50
         )
         self.litigation_extractor = CaseExtractor(
@@ -2054,6 +2058,114 @@ class KGService:
         for file, error in error_files:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
         await self.clause_extractor.logging_result_stats()
+        return True
+
+    async def clause_en_extract_by_local_dir(
+            self,
+            clause_file_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        从本地目录提取英文法条知识图谱。
+
+        该方法与 clause_extract_by_local_dir 的流程一致，区别是：
+        1. 使用 app.infrastructure.information_extraction.law_en_extract 下的 ClauseEnExtractor；
+        2. 输出的节点类型、关系类型和属性名均为英文；
+        3. 适用于英文法律、法规、法典、行政命令、条例等文本。
+
+        :param clause_file_dir: 英文法条文件夹路径
+        :param if_del_task: 合并子图后是否删除 task 子图
+        :param db: 数据库会话
+        :return:
+        """
+        # 检验参数
+        clause_file_dir = clause_file_dir.replace('\\', '/')
+        if not os.path.exists(clause_file_dir):
+            raise Exception(f"文件目录不存在: {clause_file_dir}")
+        if not os.path.isdir(clause_file_dir):
+            raise Exception(f"文件目录不是目录: {clause_file_dir}")
+        new_kg = KGCreate(
+            name=clause_file_dir.split("/")[-1],
+            description="英文法条知识图谱",
+        )
+        kg_result = await kg_service.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+        files = os.listdir(clause_file_dir)
+        error_files = []
+        # 方案一：一个文件一个文件地抽取英文法条图谱，方便每个文件对应一个 task 子图。
+        for file in files:
+            try:
+                file_path = os.path.join(clause_file_dir, file)
+                filename = file.split(".")[0]
+                # 目前只处理 Markdown 和纯文本文件。
+                if file.endswith('.md') or file.endswith('.txt'):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        graph_name = generate_unique_name(f"{kg_result.get('data').get('name')}_task")
+                        new_task = KGExtractionTask(
+                            kg_id=kg_id,
+                            name=filename,
+                            description="英文法条抽取任务",
+                            prompt="",
+                            parameters={},
+                            graph_name=graph_name,
+                            status=1,
+                        )
+                        db.add(new_task)
+                        db.flush()
+                        db.commit()
+                        db.refresh(new_task)
+                        # 提取英文法条知识图谱。
+                        try:
+                            clause_kg = await self.clause_en_extractor.extract_clauses(
+                                filename=filename,
+                                text=content
+                            )
+                        except Exception as e:
+                            new_task.status = 4
+                            db.add(new_task)
+                            db.commit()
+                            logging.error(f"{file}英文法条图谱抽取时出现问题，请检查！" + str(e))
+                            raise Exception(f"{file}英文法条图谱抽取时出现问题，请检查！" + str(e))
+                        # 保存英文法条知识图谱到当前 task 子图。
+                        try:
+                            self.graph_storage.connect()
+                            self.graph_storage.add_subgraph_with_merge(clause_kg, graph_name, "DomainLevel")
+                            self.graph_storage.disconnect()
+                        except Exception as e:
+                            new_task.status = 4
+                            db.add(new_task)
+                            db.commit()
+                            logging.error(f"{file}英文法条图谱保存时出现问题，请检查！" + str(e))
+                            raise Exception(f"{file}英文法条图谱保存时出现问题，请检查！" + str(e))
+                        new_task.status = 2
+                        db.add(new_task)
+                        db.commit()
+                        db.refresh(new_task)
+            except Exception as e:
+                logging.error(f"{file}英文法条文件处理出现问题，请检查！" + str(e))
+                error_files.append((file, str(e)))
+        # 获取 kg_id 下所有成功 task 的 graph_name，并合并到目录级总图谱。
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在处理英文法条图谱 {graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"英文法条图谱 {graph_name} 处理完成")
+                self.graph_storage.disconnect()
+            logging.info("所有英文法条图谱处理完成")
+        except Exception as e:
+            logging.error(f"英文法条图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"英文法条图谱合并时出现问题，请检查！" + str(e))
+        for file, error in error_files:
+            logging.error(f"{file}英文法条文件处理出现问题，请检查！" + error)
+        await self.clause_en_extractor.logging_result_stats()
         return True
 
     async def guide_clause_extract_by_local_dir(

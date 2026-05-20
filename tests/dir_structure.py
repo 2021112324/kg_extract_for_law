@@ -109,7 +109,7 @@ def count_files_and_dirs(root_path):
 
 if __name__ == "__main__":
     # 目标目录：国家规章库
-    target_dir = r"F:\企业大脑知识库系统\8.1项目\裁判文书网_续\裁判文书网_续"
+    target_dir = r"D:\CogmAIT\8.1项目\8.1数据\爬取的数据\海外法律文件\法律文件"
 
     print("=" * 60)
     print("生成国家规章库目录结构")
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         generate_directory_structure(target_dir, show_files=True)
 
         # 方案 2：保存到文件
-        output_path = Path(__file__).parent / "output" / "国家规章库目录结构.txt"
+        output_path = r"D:\CogmAIT\8.1项目\8.1数据\爬取的数据" + r"\国家规章库目录结构.txt"
         generate_directory_structure(target_dir, output_file=output_path, show_files=True)
 
         # 统计信息

@@ -1054,6 +1054,56 @@ Raises:
             data=None
         )
 
+@router.post("/kgs/{kg_id}/clause_en_extract_by_dir")
+async def clause_en_extract_by_dir(
+        background_tasks: BackgroundTasks,  # 后台任务管理器
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+基于单门英文法律法条文件的知识图谱抽取接口。
+
+功能：对指定目录下的英文法律、法规、法典、行政命令等文本进行英文知识图谱抽取。
+流程与 /clause_extract_by_dir 类似，但底层使用：
+app/infrastructure/information_extraction/law_en_extract/ClauseEnExtractor
+
+输出图谱要求：
+1. 节点类型为英文，例如 Legal Document、Legal Provision、Provision Unit、Citation。
+2. 关系类型为英文，例如 CONTAINS、CITES、BASED_ON。
+3. 属性名和属性值尽量保持英文，便于和英文法规原文对应。
+
+以此，json请求格式为：
+{
+    "data_dir": "英文法条文件目录"
+}
+
+Args:
+    background_tasks (BackgroundTasks): FastAPI后台任务管理器
+    data_dir (str): 本次抽取的英文法条文件目录位置
+    if_del_task (bool): 合并子图到总图谱时是否删除 task 子图，默认为False
+    db (Session): 数据库会话对象，通过依赖注入自动获取
+
+Returns:
+    dict: 任务创建结果的响应
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_en_extract_by_local_dir,
+            {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="英文法条抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行英文法条抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
 @router.post("/kgs/{kg_id}/guide_clause_extract_by_dir")
 async def guide_clause_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器

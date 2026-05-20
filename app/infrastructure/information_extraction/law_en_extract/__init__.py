@@ -1,11 +1,11 @@
 from app.infrastructure.information_extraction.law_en_extract.clause_extract import (
-    ClauseExtractor,
+    ClauseEnExtractor,
     split_clause,
     split_clause_file,
 )
 
 __all__ = [
-    "ClauseExtractor",
+    "ClauseEnExtractor",
     "split_clause",
     "split_clause_file",
 ]
