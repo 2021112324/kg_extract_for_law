@@ -904,8 +904,30 @@ class LangextractAdapter(IInformationExtraction):
             # 获取文本内容，默认为空字符串
             text = example.get("text", "")
 
-            # 获取extractions字段
-            extractions_data = example.get("extractions", [])
+            # 获取extractions字段；兼容项目内常用的 nodes/edges 示例格式
+            extractions_data = example.get("extractions")
+            if not isinstance(extractions_data, list):
+                extractions_data = []
+                for node in example.get("nodes", []) or []:
+                    if not isinstance(node, dict):
+                        continue
+                    extractions_data.append({
+                        "name": node.get("name", ""),
+                        "type": node.get("type", ""),
+                        "attributes": node.get("attributes", {}),
+                    })
+                for edge in example.get("edges", []) or []:
+                    if not isinstance(edge, dict):
+                        continue
+                    attrs = edge.get("attributes", {}) or {}
+                    name = edge.get("name") or (
+                        f"{attrs.get('主体', '')}-{attrs.get('谓词', edge.get('type', ''))}-{attrs.get('客体', '')}"
+                    )
+                    extractions_data.append({
+                        "name": name,
+                        "type": "关系",
+                        "attributes": attrs,
+                    })
             if not isinstance(extractions_data, list):
                 print(f"Warning: extractions at index {i} should be a list, got {type(extractions_data)}")
                 extractions_data = []
@@ -1318,4 +1340,3 @@ if __name__ == "__main__":
         sys.stdout = original_stdout
 
     print(f"测试结果已输出到文件: {output_file}")
-

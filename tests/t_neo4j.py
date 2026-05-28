@@ -13,8 +13,10 @@ if __name__ == "__main__":
     )
     # 创建知识图谱
     neo4j_adapter.connect()
+
+
     print("开始导入数据...")
-    neo4j_adapter.merge_graphs("c1_一审行政判决书_kg_579287097605619712", "c1_一审行政判决书")
+    neo4j_adapter.merge_graphs("c1_一审民事判决书", "c1_裁判文书")
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python -c \"from app.infrastructure.information_extraction.law_en_extract.prompt.schema import schema_for_file_info, schema_for_clause; print\\(''source_text in file_info:'', ''source_text'' in schema_for_file_info\\); print\\(''source_text in clause:'', ''source_text'' in schema_for_clause\\); print\\(''OK''\\)\")"
+    ]
+  }
+}

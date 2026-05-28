@@ -2449,7 +2449,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"c1_{source_name}_{generate_snowflake_string_id()}"
+    return f"d1_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

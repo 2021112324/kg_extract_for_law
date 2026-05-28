@@ -44,6 +44,21 @@ class GraphAssociator:
         # 子任务（2）：引用依据 → 法规文件 或 法条
         self._resolve_citation_basis(tag_a, tag_b, stats, _next_seq)
 
+        # task2 子任务（3）：具体法律规定 → 法规文件 / 法条
+        self._resolve_legal_reference_node(
+            tag_a, tag_b, stats, _next_seq,
+            node_type="具体法律规定",
+            task_prefix="具体法律规定",
+        )
+
+        # task2 子任务（4）：法规条款依据 → 法规文件 / 法条
+        self._resolve_legal_reference_node(
+            tag_a, tag_b, stats, _next_seq,
+            node_type="法规条款依据",
+            task_prefix="法规条款依据",
+            normalize_case_clause_number=True,
+        )
+
         logger.info(
             f"[{tag_a}->{tag_b}] matched={stats['matched']}, "
             f"unmatched={stats['unmatched']}, removed={stats['removed']}"
@@ -205,6 +220,128 @@ class GraphAssociator:
                     fail_reason=f"引用类型无效: '{cit_type}'",
                 )
 
+    # ---- task2：具体法律规定 / 法规条款依据 → 法规文件 / 法条 ----
+
+    def _resolve_legal_reference_node(
+        self,
+        tag_a,
+        tag_b,
+        stats,
+        _next_seq,
+        node_type: str,
+        task_prefix: str,
+        normalize_case_clause_number: bool = False,
+    ):
+        """按法规名称和条款编号，将新增中间节点替换为法规文件或法条。
+
+        _replace_node 会保留中间节点的全部入边/出边，因此与主语节点之间的
+        关系会自然迁移到匹配后的法规文件或法条上。
+        """
+        nodes = self.adapter.get_nodes_by_type(tag_a, node_type)
+        target_files = self.adapter.get_nodes_by_type(tag_b, "法规文件")
+
+        if not nodes:
+            return
+        if not target_files:
+            for node in nodes:
+                stats["unmatched"] += 1
+                self._add_record(
+                    _next_seq(), f"{task_prefix} → 目标", "失败",
+                    intermediate_node=node, source_tag=tag_a,
+                    fail_reason=f"目标图谱 {tag_b} 中没有法规文件节点",
+                )
+            return
+
+        total = len(nodes)
+        for idx, node in enumerate(nodes, 1):
+            if normalize_case_clause_number:
+                self._normalize_case_clause_number(tag_a, node)
+
+            clause_number = str(node.properties.get("条款编号", "") or "").strip()
+            task_type = f"{task_prefix} → {'法条' if clause_number else '法规文件'}"
+
+            parent_file, method = match_node_to_file_with_method(
+                node, target_files, source_name_keys=["法规名称"]
+            )
+            if parent_file is None:
+                stats["unmatched"] += 1
+                logger.info(f"  [{idx}/{total}] {task_type} '{node.name}' → ✗ 父文件未匹配")
+                self._add_record(
+                    _next_seq(), task_type, "失败",
+                    intermediate_node=node, source_tag=tag_a,
+                    fail_reason=_unmatch_reason(node, target_files, source_name_keys=["法规名称"]),
+                )
+                continue
+
+            if not clause_number:
+                old_rels = self._get_relations(tag_a, node.id)
+                self._replace_node(tag_a, tag_b, node.id, parent_file.id)
+                stats["matched"] += 1
+                stats["removed"] += 1
+                logger.info(f"  [{idx}/{total}] {task_type} '{node.name}' → '{parent_file.name}' ✓")
+
+                self._add_record(
+                    _next_seq(), task_type, "成功",
+                    intermediate_node=node, source_tag=tag_a,
+                    matched_node=parent_file, target_tag=tag_b,
+                    match_method=method,
+                    old_relations=old_rels,
+                    new_target_id=parent_file.id, new_target_tag=tag_b,
+                )
+                continue
+
+            matched_clause_id = match_clause_node_via_cypher(
+                clause_number, parent_file.id, self.adapter, tag_b
+            )
+            if matched_clause_id is None:
+                stats["unmatched"] += 1
+                logger.info(f"  [{idx}/{total}] {task_type} '{node.name}' → ✗ 法条未找到({clause_number})")
+                self._add_record(
+                    _next_seq(), task_type, "失败",
+                    intermediate_node=node, source_tag=tag_a,
+                    matched_node=parent_file, target_tag=tag_b,
+                    match_method=f"{method}(父文件)",
+                    fail_reason=f"在法规文件 '{parent_file.name}' 下未找到条款 '{clause_number}' 对应的法条",
+                )
+                continue
+
+            old_rels = self._get_relations(tag_a, node.id)
+            clause_info = self.adapter.run_query(
+                f"MATCH (n:`{tag_b}` {{id: $id}}) RETURN n.name AS name, n.条 AS tiao",
+                {"id": matched_clause_id},
+            )
+            clause_name = clause_info[0]["name"] if clause_info else matched_clause_id
+            clause_tiao = clause_info[0].get("tiao") if clause_info else clause_number
+
+            self._replace_node(tag_a, tag_b, node.id, matched_clause_id)
+            stats["matched"] += 1
+            stats["removed"] += 1
+            logger.info(f"  [{idx}/{total}] {task_type} '{node.name}' → '{clause_name}' ✓")
+
+            self._add_record(
+                _next_seq(), task_type, "成功",
+                intermediate_node=node, source_tag=tag_a,
+                matched_node=GraphNode(id=matched_clause_id, name=clause_name,
+                                       label="法条", properties={"条": clause_tiao or clause_number}),
+                target_tag=tag_b,
+                match_method=f"{method}(父文件) + 条款匹配",
+                old_relations=old_rels,
+                new_target_id=matched_clause_id, new_target_tag=tag_b,
+            )
+
+    def _normalize_case_clause_number(self, tag: str, node: GraphNode):
+        """将法规条款依据的 案例条款编号 归一为 条款编号。"""
+        if node.properties.get("条款编号") or not node.properties.get("案例条款编号"):
+            return
+        value = node.properties.get("案例条款编号")
+        self.adapter.run_query(
+            f"MATCH (n:`{tag}` {{id: $id}}) "
+            "SET n.条款编号 = $value REMOVE n.案例条款编号",
+            {"id": node.id, "value": value},
+        )
+        node.properties["条款编号"] = value
+        node.properties.pop("案例条款编号", None)
+
     # ---- 记录构建 ----
 
     def _add_record(self, seq, task_type, status, **kwargs):
@@ -352,7 +489,7 @@ def _node_info(node, tag: str) -> Dict:
         "节点类型": node.label or node.properties.get("label", ""),
     }
     # 附加关键属性
-    for key in ["文件全称", "文件别名", "引用类型", "条款编号", "条"]:
+    for key in ["文件全称", "文件别名", "法规名称", "引用类型", "条款编号", "案例条款编号", "条"]:
         val = node.properties.get(key)
         if val:
             info[key] = val
@@ -379,13 +516,13 @@ def _build_rel_changes(old_rels, old_node, new_target_id, target_tag):
     return changes
 
 
-def _unmatch_reason(node, target_files) -> str:
+def _unmatch_reason(node, target_files, source_name_keys=None) -> str:
     """生成未匹配原因的详细说明。"""
-    fullname = node.properties.get("文件全称", "无")
-    alias = node.properties.get("文件别名", "")
-    parts = [f"文件全称='{fullname}'"]
-    if alias:
-        parts.append(f"文件别名='{alias}'")
+    source_name_keys = source_name_keys or ["文件全称", "文件别名"]
+    parts = []
+    for key in source_name_keys:
+        val = node.properties.get(key)
+        parts.append(f"{key}='{val if val else '无'}'")
     parts.append(f"在 {len(target_files)} 个目标法规文件中未找到匹配")
     return "；".join(parts)
 
@@ -395,17 +532,17 @@ def _unmatch_reason(node, target_files) -> str:
 def match_node_to_file_with_method(
     node: GraphNode,
     target_files: List[GraphNode],
+    source_name_keys: List[str] = None,
 ):
     """同 match_node_to_file，同时返回匹配方式。"""
     from .matcher import _to_str_list
 
-    search_names: List[str] = []
-    fullname = node.properties.get("文件全称", "")
-    if fullname:
-        search_names.append(str(fullname))
-    alias = node.properties.get("文件别名", "")
-    if alias:
-        search_names.extend(_to_str_list(alias))
+    source_name_keys = source_name_keys or ["文件全称", "文件别名"]
+    search_names: List[Tuple[str, str]] = []
+    for key in source_name_keys:
+        for value in _to_str_list(node.properties.get(key, "")):
+            if value:
+                search_names.append((key, value))
 
     if not search_names or not target_files:
         return None, ""
@@ -420,24 +557,24 @@ def match_node_to_file_with_method(
             if a:
                 by_alias[a] = f
 
-    for name in search_names:
+    for source_key, name in search_names:
         if name in by_fullname:
-            return by_fullname[name], "文件全称=文件全称"
+            return by_fullname[name], f"{source_key}=文件全称"
         if name in by_alias:
-            return by_alias[name], "文件全称/别名交叉匹配"
+            return by_alias[name], f"{source_key}=文件别名"
 
-    for name in search_names:
+    for source_key, name in search_names:
         if not name.startswith("中华人民共和国"):
             prefixed = "中华人民共和国" + name
             if prefixed in by_fullname:
-                return by_fullname[prefixed], "加'中华人民共和国'前缀后匹配"
+                return by_fullname[prefixed], f"{source_key}加'中华人民共和国'前缀后匹配文件全称"
             if prefixed in by_alias:
-                return by_alias[prefixed], "加'中华人民共和国'前缀后匹配(别名)"
+                return by_alias[prefixed], f"{source_key}加'中华人民共和国'前缀后匹配文件别名"
         else:
             stripped = name[7:]
             if stripped and stripped in by_fullname:
-                return by_fullname[stripped], "去'中华人民共和国'前缀后匹配"
+                return by_fullname[stripped], f"{source_key}去'中华人民共和国'前缀后匹配文件全称"
             if stripped and stripped in by_alias:
-                return by_alias[stripped], "去'中华人民共和国'前缀后匹配(别名)"
+                return by_alias[stripped], f"{source_key}去'中华人民共和国'前缀后匹配文件别名"
 
     return None, ""
