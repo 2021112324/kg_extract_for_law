@@ -140,3 +140,6 @@ Thumbs.db
 
 # Project specific
 # 如果有特定的项目文件需要忽略，在此处添加
+task/
+report/
+result/

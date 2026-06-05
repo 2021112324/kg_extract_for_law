@@ -2,6 +2,7 @@
 import uvicorn
 import logging
 import os
+import time
 from datetime import datetime
 from app.core.config import settings
 
@@ -28,6 +29,27 @@ file_handler.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 file_handler.setFormatter(formatter)
+
+
+class WatchfilesChangeDetectedRateLimitFilter(logging.Filter):
+    """限制 watchfiles 的 change detected 日志输出频率。"""
+
+    def __init__(self, interval_seconds: int = 30):
+        super().__init__()
+        self.interval_seconds = interval_seconds
+        self.last_emit_at = 0.0
+
+    def filter(self, record):
+        if record.name.startswith("watchfiles") and "change detected" in record.getMessage():
+            now = time.monotonic()
+            if now - self.last_emit_at < self.interval_seconds:
+                return False
+            self.last_emit_at = now
+        return True
+
+
+console_handler.addFilter(WatchfilesChangeDetectedRateLimitFilter(interval_seconds=30))
+file_handler.addFilter(WatchfilesChangeDetectedRateLimitFilter(interval_seconds=30))
 
 # 清除可能已存在的处理器，然后添加新的处理器
 logger.handlers = []

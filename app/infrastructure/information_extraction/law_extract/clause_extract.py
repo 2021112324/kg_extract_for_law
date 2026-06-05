@@ -29,6 +29,71 @@ BATCH_LENGTH = 5
 MAX_WORKERS = 3
 TIMEOUT = 3000
 
+CN_NUM = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+}
+
+
+def _cn_number_to_int(text: str) -> int:
+    """将中文数字或阿拉伯数字转换为整数。"""
+    text = str(text or "").strip()
+    if not text:
+        raise ValueError("编号为空")
+    if text.isdigit():
+        return int(text)
+
+    total = 0
+    section = 0
+    number = 0
+    for char in text:
+        value = CN_NUM.get(char)
+        if value is None:
+            raise ValueError(f"无法解析中文数字: {text}")
+        if value == 10000:
+            section = (section + number) * value
+            total += section
+            section = 0
+            number = 0
+        elif value >= 10:
+            if number == 0:
+                number = 1
+            section += number * value
+            number = 0
+        else:
+            number = value
+    return total + section + number
+
+
+def _parse_clause_order_number(clause_number: str) -> int:
+    """从“第X条”或“第X条之一”中解析 X 对应的整数。"""
+    match = re.match(r"^第([零一二三四五六七八九十百千万\d]+)\s*条", str(clause_number or "").strip())
+    if not match:
+        raise ValueError(f"无法解析条款编号: {clause_number}")
+    return _cn_number_to_int(match.group(1))
+
+
+def _is_inserted_clause_number(clause_number: str) -> bool:
+    """判断是否为“第X条之一/之二”等修法插入条。"""
+    return bool(
+        re.match(
+            r"^第[零一二三四五六七八九十百千万\d]+\s*条\s*之[零一二三四五六七八九十百千万\d]+$",
+            str(clause_number or "").strip(),
+        )
+    )
+
 
 class ResultStats:
     def __init__(self):
@@ -182,17 +247,20 @@ class ClauseExtractor:
     ) -> dict:
         """
 实现功能：切分法规文件，将其整理成法规文件基础信息、条款的结构化数据，大致逻辑如下：
-1. file_info记录文件开头内容，current_chapter记录当前章，current_section记录当前节。
-2. 读取文件内容，若读取到章内容（即"第X章 XXX"），则current_chapter记录当前章内容（即"第X章 XXX"）；
+1. file_info记录文件开头内容，current_part记录当前编，current_subpart记录当前分编，current_chapter记录当前章，current_section记录当前节。
+2. 读取文件内容，若读取到编内容（即"第X编 XXX"），则current_part记录当前编内容；若读取到分编内容（即"第X分编 XXX"），则current_subpart记录当前分编内容；
+    若读取到章内容（即"第X章 XXX"），则current_chapter记录当前章内容（即"第X章 XXX"）；
     若读取到节内容（即"第X节 XXX"），则current_section记录当前节内容（即"第X节 XXX"）；
-    若读取到条款内容（即"第X条 XXX"），则将current_chapter、current_section、条款内容记录到结果中；
+    若读取到条款内容（即"第X条 XXX"），则将current_part、current_subpart、current_chapter、current_section、条款内容记录到结果中；
 3. file_info从开头开始记录，如果读取到"第一节"，则将"第一节"前的内容记录到file_info中，并删除file_info文本末尾的章和节（如果有的话）
 4. 条款内容为上一个"第X条"到下一个"第X条"之间的内容，或者读到章或节的标志，或者读到文件末尾，或者读到"附录"、"附件"等条款部分结束标志。
     切分后的数据结构：
     {
-        "file_info": "文件开头内容",
+        "file_info": "文件介绍相关内容",
         "clauses": [
             {
+                "编": "编内容",
+                "分编": "分编内容",
                 "章": "章内容",
                 "节": "节内容",
                 "条款编号": "第几条"
@@ -203,10 +271,15 @@ class ClauseExtractor:
         :param text:
         :return:
         """
-        # 定义正则表达式模式 - 匹配行首的"第X章/节/条 "格式（中间可能有空格，但后面必须有空格）
+        # 定义正则表达式模式 - 匹配行首的"第X编/分编/章/节/条 "格式（中间可能有空格，但后面必须有空格）
+        part_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*编\s+.*', re.MULTILINE)
+        subpart_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*分编\s+.*', re.MULTILINE)
         chapter_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*章\s+.*', re.MULTILINE)
         section_pattern = re.compile(r'^第[零一二三四五六七八九十百千万\d]+\s*节\s+.*', re.MULTILINE)
-        clause_pattern = re.compile(r'^第([零一二三四五六七八九十百千万\d]+)\s*条\s*(.*)', re.MULTILINE)
+        clause_pattern = re.compile(
+            r'^第([零一二三四五六七八九十百千万\d]+)\s*条\s*(之[零一二三四五六七八九十百千万\d]+)?\s*(.*)',
+            re.MULTILINE
+        )
 
         # 定义结束标志
         end_markers = ['附录', '附件', '附表', '后记', '参考文献', '索引']
@@ -215,9 +288,25 @@ class ClauseExtractor:
 
         # 初始化变量
         file_info = ""
+        current_part = ""
+        current_subpart = ""
         current_chapter = ""
         current_section = ""
         clauses = []
+        heading_strip_chars = ' \t\r\n\f\v#-*•·'
+
+        def _normalize_heading(raw_line: str) -> str:
+            return raw_line.strip().lstrip(heading_strip_chars)
+
+        def _build_clause_result(clause_number: str, clause_content: str) -> dict:
+            return {
+                "编": clean_string(current_part),
+                "分编": clean_string(current_subpart),
+                "章": clean_string(current_chapter),
+                "节": clean_string(current_section),
+                "条款编号": clean_string(clause_number),
+                "条款内容": clean_string(clause_content)
+            }
 
         # 记录file_info的结束位置（第一章或第一节）
         file_info_end_idx = None
@@ -225,23 +314,36 @@ class ClauseExtractor:
         for i, line in enumerate(lines):
             if not line.strip():
                 continue
+            normalized_line = _normalize_heading(line)
             # 逐行进行匹配
-            if chapter_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+            if part_pattern.match(normalized_line):
+                file_info_end_idx = i
+                current_part = normalized_line
+                current_subpart = ""
+                current_chapter = ""
+                current_section = ""
+            if subpart_pattern.match(normalized_line):
+                file_info_end_idx = i
+                current_subpart = normalized_line
+                current_chapter = ""
+                current_section = ""
+            if chapter_pattern.match(normalized_line):
                 # 记录开头内容的结束位置（不包含该行）
                 file_info_end_idx = i
                 # 将章内容记录到current_chapter中
-                current_chapter = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-            if section_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+                current_chapter = normalized_line
+                current_section = ""
+            if section_pattern.match(normalized_line):
                 # 将节内容记录到current_section中
-                current_section = line.strip().lstrip(' \t\r\n\f\v#-*•·')
-            if clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+                current_section = normalized_line
+            if clause_pattern.match(normalized_line):
                 # 记录条款内容的开始位置（包含该行）
                 clause_start_idx = i
-                if not file_info_end_idx:
+                if file_info_end_idx is None:
                     file_info_end_idx = i
                 break
 
-        if not clause_start_idx:
+        if clause_start_idx is None:
             logging.error("📄❌：文本中匹配条款失败")
             self.result_stats.error += 1
             self.result_stats.error_msg += f"文本中匹配条款失败:\n{text[:500]}\n"
@@ -269,69 +371,81 @@ class ClauseExtractor:
                 if is_end_marker:
                     # 如果当前正在收集条款内容，则保存它
                     if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
                         current_clause_content = ""
                         current_clause_number = ""
                     break
 
-                # 检查是否是章（匹配行首）
-                if chapter_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+                normalized_line = _normalize_heading(line)
+
+                # 检查是否是编（匹配行首）
+                if part_pattern.match(normalized_line):
                     # 如果当前正在收集条款内容，则先保存它
                     if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
+                        current_clause_content = ""
+                        current_clause_number = ""
+
+                    # 更新当前编；新编下的分编、章、节重新开始
+                    current_part = normalized_line
+                    current_subpart = ""
+                    current_chapter = ""
+                    current_section = ""
+                    continue
+
+                # 检查是否是分编（匹配行首）
+                if subpart_pattern.match(normalized_line):
+                    # 如果当前正在收集条款内容，则先保存它
+                    if current_clause_content:
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
+                        current_clause_content = ""
+                        current_clause_number = ""
+
+                    # 更新当前分编；新分编下的章、节重新开始
+                    current_subpart = normalized_line
+                    current_chapter = ""
+                    current_section = ""
+                    continue
+
+                # 检查是否是章（匹配行首）
+                if chapter_pattern.match(normalized_line):
+                    # 如果当前正在收集条款内容，则先保存它
+                    if current_clause_content:
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
                         current_clause_content = ""
                         current_clause_number = ""
 
                     # 更新当前章
-                    current_chapter = line.strip().lstrip(' \t\r\n\f\v#-*•·')
+                    current_chapter = normalized_line
                     # 清空当前节
                     current_section = ""
                     continue
 
                 # 检查是否是节（匹配行首）
-                if section_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+                if section_pattern.match(normalized_line):
                     # 如果当前正在收集条款内容，则先保存它
                     if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
                         current_clause_content = ""
                         current_clause_number = ""
 
                     # 更新当前节
-                    current_section = line.strip().lstrip(' \t\r\n\f\v#-*•·')
+                    current_section = normalized_line
                     continue
 
                 # 检查是否是条款（匹配行首）
-                if clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·')):
+                if clause_pattern.match(normalized_line):
                     # 如果当前正在收集条款内容，则先保存之前的条款
                     if current_clause_content:
-                        clauses.append({
-                            "章": clean_string(current_chapter),
-                            "节": clean_string(current_section),
-                            "条款编号": clean_string(current_clause_number),
-                            "条款内容": clean_string(current_clause_content)
-                        })
+                        clauses.append(_build_clause_result(current_clause_number, current_clause_content))
 
                     # 提取条款编号和内容
-                    clause_match = clause_pattern.match(line.lstrip(' \t\r\n\f\v#-*•·'))
+                    clause_match = clause_pattern.match(normalized_line)
                     # 从捕获组直接获取编号
                     clause_num_part = clause_match.group(1)  # 编号部分
-                    current_clause_number = f"第{clause_num_part}条"  # 重构完整编号
-                    current_clause_content = clause_match.group(2).strip()  # 内容部分
+                    clause_suffix = clause_match.group(2) or ""  # 如“之一”“之二”等补充条编号
+                    current_clause_number = f"第{clause_num_part}条{clause_suffix}"  # 重构完整编号
+                    current_clause_content = clause_match.group(3).strip()  # 内容部分
                     continue
 
                 # 如果当前正在收集条款内容，则添加到当前条款内容
@@ -342,20 +456,45 @@ class ClauseExtractor:
                         current_clause_content = line
             # 处理最后一个条款（如果有）
             if current_clause_content:
-                clauses.append({
-                    "章": clean_string(current_chapter),
-                    "节": clean_string(current_section),
-                    "条款编号": clean_string(current_clause_number),
-                    "条款内容": clean_string(current_clause_content)
-                })
+                clauses.append(_build_clause_result(current_clause_number, current_clause_content))
 
             if not clauses:
                 logging.error("📄❌：未找到条款内容")
                 self.result_stats.error += 1
                 self.result_stats.error_msg += "未找到条款内容\n" + text[:500] + "\n"
                 raise ValueError("未找到条款内容")
-            # 将第一条的条款内容拼接至file_info中
-            file_info += '\n' + clauses[0]['条款内容'] # TODO :补充后几条作为信息
+
+            base_clauses = [
+                clause for clause in clauses
+                if not _is_inserted_clause_number(clause.get("条款编号", ""))
+            ]
+            if not base_clauses:
+                logging.error("📄❌：未找到基础条款内容")
+                self.result_stats.error += 1
+                self.result_stats.error_msg += "未找到基础条款内容\n" + text[:500] + "\n"
+                raise ValueError("未找到基础条款内容")
+
+            last_base_clause_number = base_clauses[-1].get("条款编号", "")
+            last_base_clause_order = _parse_clause_order_number(last_base_clause_number)
+            base_clause_count = len(base_clauses)
+            inserted_clause_count = len(clauses) - base_clause_count
+            if last_base_clause_order != base_clause_count:
+                error_msg = (
+                    f"条款编号校验失败：最后基础条为 {last_base_clause_number}，"
+                    f"解析序号为 {last_base_clause_order}，"
+                    f"但基础条切分数为 {base_clause_count}，"
+                    f"插入条切分数为 {inserted_clause_count}，"
+                    f"总切分数为 {len(clauses)}"
+                )
+                logging.error(f"📄❌：{error_msg}")
+                self.result_stats.error += 1
+                self.result_stats.error_msg += error_msg + "\n" + text[:500] + "\n"
+                raise ValueError(error_msg)
+
+            # 将第一条、第二条、倒数第二条、最后一条的条款内容拼接至 file_info 中，数量不足时去重避免重复追加。
+            info_clause_indexes = [0, 1, len(clauses) - 2, len(clauses) - 1]
+            for idx in dict.fromkeys(i for i in info_clause_indexes if 0 <= i < len(clauses)):
+                file_info += '\n' + clauses[idx]['条款内容']
             return {
                 "file_info": clean_string(file_info),
                 "clauses": clauses
@@ -476,6 +615,8 @@ class ClauseExtractor:
             "node_name": "",
             "node_type": "",
             "properties": {
+                "编": "current_part",
+                "分编": "current_subpart",
                 "章": "current_chapter",
                 "节": "current_section",
                 "条": "current_clause_number",
@@ -510,6 +651,8 @@ class ClauseExtractor:
                 }
 
                 # 获取条款信息
+                part = one_clause.get("编", "")
+                subpart = one_clause.get("分编", "")
                 chapter = one_clause.get("章", "")
                 section = one_clause.get("节", "")
                 clause_number = one_clause.get("条款编号", "")
@@ -524,6 +667,10 @@ class ClauseExtractor:
                 extract_schema = schema_for_clause
                 extract_examples = example_for_clause
                 extract_content = f"{filename} "
+                if part:
+                    extract_content += f"{part} "
+                if subpart:
+                    extract_content += f"{subpart} "
                 if chapter:
                     extract_content += f"{chapter} "
                 if section:
@@ -576,6 +723,8 @@ class ClauseExtractor:
                         clause_result["node_name"] = clause_number
                         clause_result["node_type"] = "法条"
                         clause_result["properties"] = entity.properties
+                        clause_result["properties"]["编"] = part
+                        clause_result["properties"]["分编"] = subpart
                         clause_result["properties"]["章"] = chapter
                         clause_result["properties"]["节"] = section
                         clause_result["properties"]["条"] = clause_number
@@ -762,6 +911,8 @@ class ClauseExtractor:
                 clause_node_name = clause_number
                 clause_node_type = "法条"
                 clause_properties = {
+                    "编": clause.get("编"),
+                    "分编": clause.get("分编"),
                     "章": clause.get("章"),
                     "节": clause.get("节"),
                     "条": clause_number,

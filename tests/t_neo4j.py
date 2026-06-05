@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+# 将项目根目录加入 sys.path，解决 ModuleNotFoundError
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 
 if __name__ == "__main__":
@@ -16,7 +22,7 @@ if __name__ == "__main__":
 
 
     print("开始导入数据...")
-    neo4j_adapter.merge_graphs("c1_一审民事判决书", "c1_裁判文书")
+    neo4j_adapter.merge_graphs("A0_行政复议法规_20260603_143823_L", "A0_行政复议法规_20260603_023424_L")
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")

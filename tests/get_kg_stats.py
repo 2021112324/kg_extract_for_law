@@ -1,4 +1,9 @@
 
+import sys
+from pathlib import Path
+
+# 将项目根目录加入 Python 搜索路径
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter
 
@@ -11,12 +16,15 @@ if __name__ == "__main__":
     )
     # kg_name = "enterprise_regulations"
     kg_names = [
-        "合规案例库v8_kg_536094435075686400",
-        "c1_法律法规条款",
-        "c1_行政监管规则",
-        "a4_合规指引v1v2_kg_564731610319028224",
-        "c1_一审行政判决书",
-        "c1_一审民事判决书"
+        "A0_行政复议法规_20260603_023424_L",
+        "d4_行政监管规则_kg_584284360266481664",
+        "d4_法律法规条款"
+        # "合规案例库v8_kg_536094435075686400",
+        # "c1_法律法规条款",
+        # "c1_行政监管规则",
+        # "a4_合规指引v1v2_kg_564731610319028224",
+        # "c1_一审行政判决书",
+        # "c1_一审民事判决书"
         # "a4_合规指引v1_kg_564731610319028224",
         # "a4_合规指引v2_kg_565135353883656192",
         # "合规案例库v8_kg_536094435075686400",

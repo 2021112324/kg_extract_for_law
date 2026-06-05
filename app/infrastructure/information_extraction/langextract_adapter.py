@@ -19,7 +19,10 @@ current_file_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_file_dir)
 sys.path.insert(0, parent_dir)
 
-from langfuse import Langfuse
+try:
+    from langfuse import Langfuse
+except ImportError:
+    Langfuse = None
 
 from app.infrastructure.information_extraction.method import langextract as lx
 # 修改相对导入为绝对导入以支持直接运行模块
@@ -101,17 +104,20 @@ class LangextractAdapter(IInformationExtraction):
         """
         self.max_retries = max_retries
         self.default_config = config
-        self.langfuse = Langfuse(
-            secret_key="sk-lf-7d375833-5b71-4e24-924e-78be844889f0",
-            public_key="pk-lf-d7448fa2-0fb3-46ef-9e6d-e472a928ac31",
-            host="https://cloud.langfuse.com",
-            # secret_key="sk-lf-c0a7335b-b826-4071-bc93-3952bac9c3f0",
-            # public_key="pk-lf-3eaa9ef7-2d40-4fa9-85c3-ca0fa1d06657",
-            # host="http://60.205.171.106:3000",
-            flush_interval=10,  # 增加刷新间隔到10秒
-            flush_at=50,  # 每50个事件刷新一次
-            timeout=10,
-        )
+        if Langfuse is not None:
+            self.langfuse = Langfuse(
+                secret_key="sk-lf-7d375833-5b71-4e24-924e-78be844889f0",
+                public_key="pk-lf-d7448fa2-0fb3-46ef-9e6d-e472a928ac31",
+                host="https://cloud.langfuse.com",
+                # secret_key="sk-lf-c0a7335b-b826-4071-bc93-3952bac9c3f0",
+                # public_key="pk-lf-3eaa9ef7-2d40-4fa9-85c3-ca0fa1d06657",
+                # host="http://60.205.171.106:3000",
+                flush_interval=10,  # 增加刷新间隔到10秒
+                flush_at=50,  # 每50个事件刷新一次
+                timeout=10,
+            )
+        else:
+            self.langfuse = None
 
     def get_config(self):
         return self.default_config
