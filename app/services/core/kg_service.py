@@ -17,9 +17,16 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.infrastructure.graph_storage.factory import GraphStorageFactory
 from app.infrastructure.information_extraction.case_extract.case_extract import CaseExtractor
+from app.infrastructure.information_extraction.compliance_case_v1.compliance_case_parse import (
+    discover_compliance_case_files,
+)
+from app.infrastructure.information_extraction.compliance_case_v1.graph_extract import (
+    ComplianceCaseGraphExtractor,
+)
 from app.infrastructure.information_extraction.guide_extract.clause_extract import GuideClauseExtractor
 from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
+from app.infrastructure.information_extraction.national_standard.graph_extract import NationalStandardGraphExtractor
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.models.kg import KG as KGModel, KGExtractionTask, KGFile
@@ -83,6 +90,12 @@ class KGService:
         )
         self.guide_clause_extractor = GuideClauseExtractor(
             max_concurrent=50
+        )
+        self.national_standard_extractor = NationalStandardGraphExtractor(
+            max_concurrent=int(os.getenv("NATIONAL_STANDARD_SERVICE_MAX_CONCURRENT", "1"))
+        )
+        self.compliance_case_v1_extractor = ComplianceCaseGraphExtractor(
+            enable_llm=os.getenv("COMPLIANCE_CASE_V1_ENABLE_LLM", "true").lower() not in {"0", "false", "no"}
         )
 
     @staticmethod
@@ -2168,6 +2181,275 @@ class KGService:
         await self.clause_en_extractor.logging_result_stats()
         return True
 
+    async def national_standard_extract_by_local_dir(
+            self,
+            standard_data_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        从本地目录抽取国家标准知识图谱并保存至 Neo4j。
+
+        支持两种输入：
+        1. 单份国家标准目录：目录下直接包含 full.md；
+        2. 国家标准分类目录：目录下包含多个子目录，每个子目录包含 full.md。
+
+        每份标准创建一个 KGExtractionTask 和一个 task 子图，成功后再合并到目录级 KG 总图谱。
+        """
+        standard_data_dir = standard_data_dir.replace('\\', '/')
+        if not os.path.exists(standard_data_dir):
+            raise Exception(f"文件目录不存在: {standard_data_dir}")
+        if not os.path.isdir(standard_data_dir):
+            raise Exception(f"文件目录不是目录: {standard_data_dir}")
+
+        new_kg = KGCreate(
+            name=standard_data_dir.rstrip("/").split("/")[-1],
+            description="国家标准知识图谱",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+        standard_dirs = self._discover_national_standard_dirs(Path(standard_data_dir))
+        if not standard_dirs:
+            raise Exception(f"未发现可抽取的国家标准目录，目录下需包含 full.md: {standard_data_dir}")
+
+        error_files = []
+        success_count = 0
+        for standard_dir in standard_dirs:
+            standard_name = standard_dir.name
+            graph_name = generate_unique_name("national_standard_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=standard_name,
+                description="国家标准知识图谱抽取任务",
+                prompt="",
+                parameters={"input_path": str(standard_dir)},
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            try:
+                logging.info(f"国家标准图谱抽取开始: {standard_dir}")
+                graph_result = await self.national_standard_extractor.extract(standard_dir)
+                graph = graph_result.get("graph", {}) or {}
+                nodes = graph.get("nodes", []) or []
+                edges = graph.get("edges", []) or []
+                if graph_result.get("status") != "success":
+                    raise Exception(f"国家标准图谱抽取未成功: {graph_result.get('status')}")
+                if not nodes:
+                    raise Exception("国家标准图谱节点为空")
+
+                self.graph_storage.connect()
+                saved = self.graph_storage.add_subgraph_with_merge(
+                    graph,
+                    graph_name,
+                    "DomainLevel",
+                    filename=graph_result.get("filename") or standard_name,
+                )
+                self.graph_storage.disconnect()
+                if not saved:
+                    raise Exception("国家标准图谱保存到 Neo4j 失败")
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                success_count += 1
+                logging.info(
+                    "国家标准图谱抽取完成: %s, nodes=%s, edges=%s",
+                    standard_name,
+                    len(nodes),
+                    len(edges),
+                )
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                logging.error(f"{standard_name}国家标准图谱抽取或保存失败，请检查！" + str(e))
+                error_files.append((standard_name, str(e)))
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在合并国家标准图谱 {graph_name} -> {kg_graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"国家标准图谱 {graph_name} 合并完成")
+                self.graph_storage.disconnect()
+            logging.info("所有国家标准图谱处理完成")
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error(f"国家标准图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"国家标准图谱合并时出现问题，请检查！" + str(e))
+
+        for file, error in error_files:
+            logging.error(f"{file}国家标准文件处理出现问题，请检查！" + error)
+        if success_count == 0:
+            raise Exception("国家标准目录下没有成功入库的图谱")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(standard_dirs),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+        }
+
+    @staticmethod
+    def _discover_national_standard_dirs(root: Path) -> list[Path]:
+        """发现包含 full.md 的国家标准目录。"""
+        if (root / "full.md").exists():
+            return [root]
+        return [
+            path
+            for path in sorted(root.iterdir(), key=lambda item: item.name)
+            if path.is_dir() and (path / "full.md").exists()
+        ]
+
+    async def compliance_case_v1_extract_by_local_dir(
+            self,
+            compliance_case_data_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        从本地目录抽取合规案例 v1 知识图谱并保存至 Neo4j。
+
+        输入目录可为合规案例根目录，也可为某一类案例目录。方法会递归发现 .md/.txt
+        文件；每个文件对应一个 KGExtractionTask 和一个 Neo4j task 子图，成功后再
+        合并到目录级 KG 总图谱。
+        """
+
+        compliance_case_data_dir = str(compliance_case_data_dir).replace('\\', '/')
+        if not os.path.exists(compliance_case_data_dir):
+            raise Exception(f"文件目录不存在: {compliance_case_data_dir}")
+        if not os.path.isdir(compliance_case_data_dir):
+            raise Exception(f"文件目录不是目录: {compliance_case_data_dir}")
+
+        input_root = Path(compliance_case_data_dir)
+        input_files = discover_compliance_case_files(input_root)
+        if not input_files:
+            raise Exception(f"未发现可抽取的合规案例文件，目录下需包含 .md 或 .txt: {compliance_case_data_dir}")
+
+        new_kg = KGCreate(
+            name=input_root.name,
+            description="合规案例知识图谱 v1",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+
+        error_files = []
+        success_count = 0
+        for input_file in input_files:
+            relative_name = input_file.relative_to(input_root).as_posix()
+            task_name = input_file.stem
+            graph_name = generate_unique_name("compliance_case_v1_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=task_name,
+                description="合规案例 v1 知识图谱抽取任务",
+                prompt="",
+                parameters={"input_path": str(input_file), "relative_path": relative_name},
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            try:
+                logging.info(f"合规案例 v1 图谱抽取开始: {input_file}")
+                graph_result = await self.compliance_case_v1_extractor.extract(input_file)
+                graph = graph_result.get("graph", {}) or {}
+                nodes = graph.get("nodes", []) or []
+                edges = graph.get("edges", []) or []
+                if graph_result.get("status") not in {"success", "parser_only"}:
+                    raise Exception(f"合规案例 v1 图谱抽取未成功: {graph_result.get('status')}")
+                if not nodes:
+                    raise Exception("合规案例 v1 图谱节点为空")
+
+                self.graph_storage.connect()
+                saved = self.graph_storage.add_subgraph_with_merge(
+                    graph,
+                    graph_name,
+                    "DomainLevel",
+                    filename=graph_result.get("filename") or input_file.name,
+                )
+                self.graph_storage.disconnect()
+                if not saved:
+                    raise Exception("合规案例 v1 图谱保存到 Neo4j 失败")
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                success_count += 1
+                logging.info(
+                    "合规案例 v1 图谱抽取完成: %s, nodes=%s, edges=%s",
+                    relative_name,
+                    len(nodes),
+                    len(edges),
+                )
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                logging.error(f"{relative_name}合规案例 v1 图谱抽取或保存失败，请检查！" + str(e))
+                error_files.append((relative_name, str(e)))
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在合并合规案例 v1 图谱 {graph_name} -> {kg_graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"合规案例 v1 图谱 {graph_name} 合并完成")
+                self.graph_storage.disconnect()
+            logging.info("所有合规案例 v1 图谱处理完成")
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error(f"合规案例 v1 图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"合规案例 v1 图谱合并时出现问题，请检查！" + str(e))
+
+        for file, error in error_files:
+            logging.error(f"{file}合规案例 v1 文件处理出现问题，请检查！" + error)
+        if success_count == 0:
+            raise Exception("合规案例目录下没有成功入库的图谱")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(input_files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+        }
+
     async def guide_clause_extract_by_local_dir(
             self,
             guide_clause_file_dir,
@@ -2449,7 +2731,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"d4_{source_name}_{generate_snowflake_string_id()}"
+    return f"e1_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

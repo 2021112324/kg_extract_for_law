@@ -1157,6 +1157,92 @@ Raises:
         )
 
 
+@router.post("/kgs/{kg_id}/national_standard_extract_by_dir")
+async def national_standard_extract_by_dir(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),
+):
+    """
+基于国家标准两阶段抽取流程的知识图谱入库接口。
+
+功能：对指定目录下的国家标准 MinerU/Markdown 解析数据进行知识图谱抽取，并保存至 Neo4j。
+输入目录支持两种形式：
+1. 单份国家标准目录：目录下直接包含 full.md；
+2. 国家标准分类目录：目录下每个子目录是一份标准数据，且子目录中包含 full.md。
+
+流程：
+1. 一阶段以 full.md 为主解析标准文件信息、正文/附录树、表格、图片、引用候选；
+2. 二阶段调用 LLM 抽取标准文件、标准结构节点、术语定义、标准要求、指标限值、试验检测方法、引用标准、表格等图谱数据；
+3. 每份标准生成一个 task 子图并保存至 Neo4j；
+4. 所有成功 task 子图合并到目录级 KG 总图谱。
+
+以此，json请求格式为：
+{
+    "data_dir": "国家标准数据目录"
+}
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.national_standard_extract_by_local_dir,
+            {"standard_data_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="国家标准图谱抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行国家标准图谱抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+
+@router.post("/kgs/{kg_id}/compliance_case_v1_extract_by_dir")
+async def compliance_case_v1_extract_by_dir(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),
+):
+    """
+基于 compliance_case_v1 单阶段抽取流程的合规案例知识图谱入库接口。
+
+功能：对指定目录下的合规案例 .md/.txt 文件进行知识图谱抽取，并保存至 Neo4j。
+输入目录支持合规案例根目录，也支持“合规案例库”“合规风险案例”等分类目录。
+
+流程：
+1. 递归发现目录下的 .md/.txt 文件；
+2. 每个文件规则读取已有结构，并调用一次 LLM 抽取实体和关系；
+3. 每个文件生成一个 task 子图并保存至 Neo4j；
+4. 所有成功 task 子图合并到目录级 KG 总图谱。
+
+以此，json请求格式为：
+{
+    "data_dir": "合规案例数据目录"
+}
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.compliance_case_v1_extract_by_local_dir,
+            {"compliance_case_data_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="合规案例 v1 图谱抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行合规案例 v1 图谱抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+
 @router.post("/kgs/{kg_id}/litigation_extract_by_dir")
 async def litigation_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器

@@ -397,7 +397,7 @@ class NationalStandardExtractor:
         validation["image_uploads"] = image_uploads
         validation["review_status"] = "reviewed" if source.get("reviewed_md") else "unreviewed"
         validation["failed_data"] = (
-            self.collect_validation_failed_data(body_tree, appendix_tree, images, validation)
+            self.collect_validation_failed_data(body_tree, appendix_tree, images, validation, source)
             if not validation.get("passed")
             else []
         )
@@ -872,7 +872,11 @@ class NationalStandardExtractor:
             if in_toc:
                 # 真实正文一般从 `1 范围` 开始。如果没有前言/引言分隔，
                 # 遇到非目录形式的 1 号章节时退出目次并继续处理该 block。
-                if section_title and section_title.group("number") == "1" and not self._looks_like_toc_line(text):
+                if (
+                    section_title
+                    and section_title.group("number") == "1"
+                    and not self._looks_like_toc_line(text, allow_plain_page=True)
+                ):
                     in_toc = False
                 else:
                     continue
@@ -1133,12 +1137,14 @@ class NationalStandardExtractor:
         appendix_tree: list[dict[str, Any]],
         images: list[dict[str, Any]],
         validation: dict[str, Any],
+        source: dict[str, Path | None] | None = None,
     ) -> list[dict[str, Any]]:
         """记录触发结构校验问题的数据内容，方便人工回查。
 
         这里不尝试“自动修正文义”，只把问题对应的节点/图片摘出来。
         """
         records: list[dict[str, Any]] = []
+        source_lines, source_path = self._read_validation_source_lines(source)
         node_by_number = {
             str(node.get("number", "")): node
             for node in self._walk_nodes(body_tree + appendix_tree)
@@ -1151,18 +1157,18 @@ class NationalStandardExtractor:
                 for number in issue.get("numbers", []) or []:
                     node = node_by_number.get(str(number))
                     if node:
-                        records.append(self._validation_node_record("issue", issue, node))
+                        records.append(self._validation_node_record("issue", issue, node, source_lines, source_path))
             elif issue.get("type") == "duplicate_appendix":
                 for node in appendix_tree:
                     if node.get("appendix_code") in set(issue.get("appendix_codes", []) or []):
-                        records.append(self._validation_node_record("issue", issue, node))
+                        records.append(self._validation_node_record("issue", issue, node, source_lines, source_path))
 
         for warning in validation.get("warnings", []) or []:
             if warning.get("type") == "sibling_number_continuity":
                 parent = str(warning.get("parent", ""))
                 node = node_by_number.get(parent)
                 if node:
-                    records.append(self._validation_node_record("warning", warning, node))
+                    records.append(self._validation_node_record("warning", warning, node, source_lines, source_path))
             elif warning.get("type") in {"image_missing", "image_path_empty"}:
                 image = image_by_id.get(str(warning.get("image_id", "")))
                 if image:
@@ -1180,19 +1186,124 @@ class NationalStandardExtractor:
         return records
 
     @staticmethod
-    def _validation_node_record(level: str, problem: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
+    def _read_validation_source_lines(source: dict[str, Path | None] | None) -> tuple[list[str], str]:
+        """读取 Markdown/TXT 原文行，用于校验失败时记录上下文。"""
+        if not source:
+            return [], ""
+        path = source.get("full_md") or source.get("input_file")
+        if not path:
+            return [], ""
+        source_path = Path(path)
+        if source_path.suffix.lower() not in {".md", ".txt"}:
+            return [], str(source_path)
+        try:
+            return source_path.read_text(encoding="utf-8", errors="ignore").splitlines(), str(source_path)
+        except OSError as exc:
+            logging.warning("读取结构校验原文失败: %s", exc)
+            return [], str(source_path)
+
+    @staticmethod
+    def _source_line_key(line: str) -> str:
+        """把 Markdown 行规整成便于和节点编号/标题匹配的文本。"""
+        text = str(line or "").strip()
+        heading = HEADING_RE.match(text)
+        if heading:
+            text = heading.group("text").strip()
+        return _clean_text(_normalize_md_heading_text(text))
+
+    @classmethod
+    def _source_context_for_node(
+        cls,
+        node: dict[str, Any],
+        source_lines: list[str],
+        source_path: str,
+        radius: int = 4,
+    ) -> dict[str, Any]:
+        """在 full.md/TXT 中查找失败节点的上下文片段。"""
+        if not source_lines:
+            return {"source_path": source_path, "matched": False, "context_lines": []}
+
+        number = _clean_text(node.get("number", ""))
+        title = _clean_text(node.get("title", ""))
+        full_title = _clean_text(node.get("full_path_title", ""))
+        content_lines = _line_list(str(node.get("content") or ""))
+        content_first_line = _clean_text(content_lines[0]) if content_lines else ""
+
+        candidates = []
+        if number and title:
+            candidates.append(f"{number} {title}")
+        if full_title:
+            candidates.append(full_title.split(">")[-1].strip())
+        if title:
+            candidates.append(title)
+        if content_first_line:
+            candidates.append(content_first_line)
+        if number:
+            candidates.append(number)
+
+        normalized_candidates = []
+        for candidate in candidates:
+            normalized = _clean_text(_normalize_md_heading_text(candidate))
+            if normalized and normalized not in normalized_candidates:
+                normalized_candidates.append(normalized)
+
+        matched_index = -1
+        matched_candidate = ""
+        for index, line in enumerate(source_lines):
+            line_key = cls._source_line_key(line)
+            for candidate in normalized_candidates:
+                if line_key == candidate or (len(candidate) >= 8 and candidate in line_key):
+                    matched_index = index
+                    matched_candidate = candidate
+                    break
+            if matched_index >= 0:
+                break
+
+        if matched_index < 0:
+            return {
+                "source_path": source_path,
+                "matched": False,
+                "matched_candidate": normalized_candidates[0] if normalized_candidates else "",
+                "context_lines": [],
+            }
+
+        start = max(0, matched_index - radius)
+        end = min(len(source_lines), matched_index + radius + 1)
+        return {
+            "source_path": source_path,
+            "matched": True,
+            "matched_candidate": matched_candidate,
+            "matched_line_no": matched_index + 1,
+            "matched_text": source_lines[matched_index],
+            "context_lines": [
+                {"line_no": line_no + 1, "text": source_lines[line_no]}
+                for line_no in range(start, end)
+            ],
+        }
+
+    @classmethod
+    def _validation_node_record(
+        cls,
+        level: str,
+        problem: dict[str, Any],
+        node: dict[str, Any],
+        source_lines: list[str] | None = None,
+        source_path: str = "",
+    ) -> dict[str, Any]:
         """构造结构校验问题对应的节点摘录。"""
         content = str(node.get("content") or "")
         return {
             "level": level,
             "type": problem.get("type", ""),
             "message": problem.get("message", ""),
+            "problem": problem,
             "number": node.get("number", ""),
             "title": node.get("title", ""),
             "path": node.get("path", ""),
             "full_path_title": node.get("full_path_title", ""),
             "content_preview": content[:500],
             "child_numbers": [child.get("number", "") for child in node.get("children", [])],
+            "source_context": cls._source_context_for_node(node, source_lines or [], source_path),
         }
 
     def _new_node(
@@ -1740,9 +1851,34 @@ class NationalStandardExtractor:
         return True
 
     @staticmethod
-    def _looks_like_toc_line(text: str) -> bool:
-        """判断一行是否像目次中的点线页码行。"""
-        return bool(re.search(r"(?:…{1,}|(?:\.\s*){3,})\s*\d+\s*$", text or ""))
+    def _looks_like_toc_line(text: str, allow_plain_page: bool = False) -> bool:
+        """判断一行是否像目次中的目录行。
+
+        默认只识别带省略号/点线页码的强目录行；在已经进入目次区域时，
+        allow_plain_page=True 会额外识别 `1 范围 1`、`# 10 改进 14`
+        这类弱目录行，避免目录内容进入正文树。
+        """
+        value = str(text or "").strip()
+        heading = HEADING_RE.match(value)
+        if heading:
+            value = heading.group("text").strip()
+        value = _normalize_md_heading_text(value)
+        if re.search(r"(?:…{1,}|(?:\.\s*){3,})\s*(?:\d+|[IVXLCDM]+)\s*$", value, re.IGNORECASE):
+            return True
+        if not allow_plain_page:
+            return False
+
+        section = SECTION_TITLE_RE.match(value)
+        if section:
+            title = section.group("title").strip()
+            return bool(re.match(r"^.+\s+(?:\d{1,4}|[IVXLCDM]+)\s*$", title, re.IGNORECASE))
+
+        appendix = APPENDIX_TITLE_RE.match(value)
+        if appendix:
+            title = appendix.group("title").strip()
+            return bool(re.match(r"^.+\s+(?:\d{1,4}|[IVXLCDM]+)\s*$", title, re.IGNORECASE))
+
+        return False
 
     @staticmethod
     def _looks_like_missing_top_section_title(

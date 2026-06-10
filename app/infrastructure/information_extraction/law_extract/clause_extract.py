@@ -46,6 +46,17 @@ CN_NUM = {
     "万": 10000,
 }
 
+RISK_TYPE_VALUES = [
+    "产品法律风险",
+    "供应链合规风险",
+    "劳动用工法律合规风险",
+    "企业关联方合规风险",
+    "企业国际化经营合规风险",
+    "企业信用风险",
+]
+
+QUANT_CONDITION_KEYS = ["原文件", "量化值类型", "最小值", "最大值", "单位", "约束关系"]
+
 
 def _cn_number_to_int(text: str) -> int:
     """将中文数字或阿拉伯数字转换为整数。"""
@@ -83,6 +94,204 @@ def _parse_clause_order_number(clause_number: str) -> int:
     if not match:
         raise ValueError(f"无法解析条款编号: {clause_number}")
     return _cn_number_to_int(match.group(1))
+
+
+def _split_to_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple) or isinstance(value, set):
+        raw_items = list(value)
+    else:
+        raw_items = re.split(r"[、,，;；/|]+", str(value))
+    items = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _normalize_risk_type(value) -> list:
+    return [item for item in _split_to_list(value) if item in RISK_TYPE_VALUES]
+
+
+def _normalize_economic_industry(value) -> list:
+    items = _split_to_list(value)
+    if not items:
+        return ["通用"]
+    if "其他" in items and len(items) == 1:
+        return ["通用"]
+    specific_items = [item for item in items if item not in {"通用", "其他"}]
+    return specific_items or ["通用"]
+
+
+def _normalize_function_type(value, text: str = "") -> str:
+    raw = str(value or "").strip()
+    if raw in {"禁止", "必要", "可选"}:
+        return raw
+    judge_text = f"{raw}\n{text or ''}"
+    if re.search(r"不得|禁止|严禁|不准|不得以外", judge_text):
+        return "禁止"
+    if re.search(r"应当|必须|应予|应由|应向|应将|应\b|需|须", judge_text):
+        return "必要"
+    if re.search(r"可以|可向|可由|有权|授权|鼓励|自愿", judge_text):
+        return "可选"
+    if raw in {"义务", "强制", "规范", "程序", "责任"}:
+        return "必要"
+    if raw in {"权利", "授权", "许可"}:
+        return "可选"
+    return "必要"
+
+
+def _parse_number_token(token: str):
+    token = str(token or "").strip()
+    if not token:
+        return None
+    try:
+        return float(token) if "." in token else int(token)
+    except ValueError:
+        try:
+            return _cn_number_to_int(token)
+        except ValueError:
+            return None
+
+
+def _infer_quant_type(text: str) -> str:
+    if re.search(r"元|万元|罚款|金额|所得|费用|赔偿", text):
+        return "金额"
+    if re.search(r"%|％|百分|比例|率", text):
+        return "比例"
+    if re.search(r"年|月|日|天|小时|期限|期间|届满|以前|以内|前|后", text):
+        return "期限"
+    if "次" in text:
+        return "次数"
+    if "倍" in text:
+        return "倍数"
+    return "其他"
+
+
+def _infer_quant_unit(text: str) -> str:
+    for unit in ["万元", "元", "%", "％", "年", "月", "日", "天", "小时", "次", "倍"]:
+        if unit in text:
+            return "%" if unit == "％" else unit
+    return ""
+
+
+def _normalize_quant_value_by_unit(value, unit: str):
+    if value is None:
+        return None
+    if unit == "万元":
+        return value * 10000
+    return value
+
+
+def _build_quant_condition_from_text(text: str) -> dict | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    unit = _infer_quant_unit(raw)
+    numbers = []
+    for match in re.finditer(r"(\d+(?:\.\d+)?|[零一二三四五六七八九十百千万]+)", raw):
+        value = _parse_number_token(match.group(1))
+        if value is not None:
+            numbers.append(_normalize_quant_value_by_unit(value, unit))
+
+    relation = "其他"
+    min_value = None
+    max_value = None
+    has_lower = bool(re.search(r"以上|不少于|不低于|不得低于|超过", raw))
+    has_upper = bool(re.search(r"以下|以内|不超过|不得超过|低于", raw))
+    if has_lower and has_upper:
+        relation = "区间"
+        if len(numbers) >= 2:
+            min_value = numbers[0]
+            max_value = numbers[1]
+    elif has_lower:
+        relation = "下限"
+        if numbers:
+            min_value = numbers[0]
+    elif has_upper:
+        relation = "上限"
+        if numbers:
+            max_value = numbers[0]
+    elif numbers:
+        relation = "等于"
+        min_value = numbers[0]
+        max_value = numbers[0]
+
+    return {
+        "原文件": raw,
+        "量化值类型": _infer_quant_type(raw),
+        "最小值": min_value,
+        "最大值": max_value,
+        "单位": unit,
+        "约束关系": relation,
+    }
+
+
+def _normalize_quant_condition(value):
+    if isinstance(value, dict):
+        if not any(str(value.get(key, "") or "").strip() for key in QUANT_CONDITION_KEYS):
+            return None
+        result = {key: value.get(key) for key in QUANT_CONDITION_KEYS}
+        result["原文件"] = result.get("原文件") or value.get("原文") or value.get("raw_text") or ""
+        return result
+    if isinstance(value, list):
+        conditions = [_normalize_quant_condition(item) for item in value]
+        conditions = [item for item in conditions if item]
+        if not conditions:
+            return None
+        return conditions[0] if len(conditions) == 1 else conditions
+    return _build_quant_condition_from_text(str(value or "").strip())
+
+
+def _normalize_law_properties(
+    properties: dict | None,
+    text: str = "",
+    is_file_info: bool = False,
+    node_type: str = "",
+) -> dict:
+    props = dict(properties or {})
+    if "合规风险类型" in props:
+        props["合规风险类型"] = _normalize_risk_type(props.get("合规风险类型"))
+    elif is_file_info:
+        props["合规风险类型"] = []
+
+    if "合规域" in props:
+        props["合规域"] = _split_to_list(props.get("合规域"))
+    elif "应用领域" in props:
+        props["合规域"] = _split_to_list(props.get("应用领域"))
+    else:
+        props["合规域"] = []
+
+    if "经济行业" in props:
+        props["经济行业"] = _normalize_economic_industry(props.get("经济行业"))
+    else:
+        props["经济行业"] = _normalize_economic_industry(props.get("适用行业"))
+
+    props.pop("应用领域", None)
+    props.pop("适用行业", None)
+
+    if not is_file_info:
+        content_text = text or props.get("条款单元内容") or props.get("法条全文") or ""
+        if "功能类型" in props:
+            original_function_type = str(props.get("功能类型") or "").strip()
+            props["功能类型"] = _normalize_function_type(original_function_type, content_text)
+            if original_function_type and original_function_type not in {"禁止", "必要", "可选"}:
+                other_info = str(props.get("其他信息") or "").strip()
+                note = f"原功能类型：{original_function_type}"
+                props["其他信息"] = f"{other_info}；{note}" if other_info else note
+
+        if node_type == "条款单元":
+            quant_condition = _normalize_quant_condition(props.get("量化条件"))
+            props["量化条件"] = quant_condition
+            props["量化特征"] = "定量" if quant_condition else "定性"
+        else:
+            props.pop("量化条件", None)
+            props.pop("量化特征", None)
+    return props
 
 
 def _is_inserted_clause_number(clause_number: str) -> bool:
@@ -573,7 +782,11 @@ class ClauseExtractor:
                     file_info_result["node_id"] = node_id
                     file_info_result["node_name"] = node_name
                     file_info_result["node_type"] = entity_type
-                    file_info_result["properties"] = entity.properties
+                    file_info_result["properties"] = _normalize_law_properties(
+                        entity.properties,
+                        text=file_info,
+                        is_file_info=True,
+                    )
                     file_info_processed = True
                 elif entity_type == "法规依据":
                     node_name = entity.name
@@ -722,7 +935,11 @@ class ClauseExtractor:
                         clause_result["node_id"] = node_id
                         clause_result["node_name"] = clause_number
                         clause_result["node_type"] = "法条"
-                        clause_result["properties"] = entity.properties
+                        clause_result["properties"] = _normalize_law_properties(
+                            entity.properties,
+                            text=clause_content,
+                            node_type="法条",
+                        )
                         clause_result["properties"]["编"] = part
                         clause_result["properties"]["分编"] = subpart
                         clause_result["properties"]["章"] = chapter
@@ -743,7 +960,11 @@ class ClauseExtractor:
                             "node_id": node_id,
                             "node_name": node_name,
                             "node_type": "条款单元",
-                            "properties": entity.properties,
+                            "properties": _normalize_law_properties(
+                                entity.properties,
+                                text=entity.properties.get("条款单元内容") or clause_content,
+                                node_type="条款单元",
+                            ),
                             "外部引用依据": [],
                             "内部引用依据": []
                         }
