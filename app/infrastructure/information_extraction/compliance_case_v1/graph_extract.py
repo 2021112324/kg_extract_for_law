@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -79,6 +80,18 @@ COMPLIANCE_CASE_BATCH_LENGTH = int(os.getenv("COMPLIANCE_CASE_BATCH_LENGTH", "1"
 COMPLIANCE_CASE_MAX_WORKERS = int(os.getenv("COMPLIANCE_CASE_MAX_WORKERS", "1"))
 
 
+class ResultStats:
+    """知识图谱抽取结果统计，记录错误、弱警告、强警告的数量和描述信息。"""
+
+    def __init__(self):
+        self.error = 0
+        self.error_msg = ""
+        self.week_warning = 0
+        self.week_warning_msg = ""
+        self.strong_warning = 0
+        self.strong_warning_msg = ""
+
+
 class ComplianceCaseGraphExtractor:
     """合规案例单阶段抽取器。
 
@@ -91,6 +104,7 @@ class ComplianceCaseGraphExtractor:
 
     def __init__(self, enable_llm: bool = True) -> None:
         self.enable_llm = enable_llm
+        self.result_stats = ResultStats()
         self.extractor = None
         if enable_llm:
             # LangextractConfig 是项目内 langextract 适配器的模型配置。
@@ -124,7 +138,7 @@ class ComplianceCaseGraphExtractor:
         llm_result = await self._extract_with_llm(document) if self.enable_llm else self._empty_llm_result()
 
         # 第三步：构建图谱。先放 parser 生成的案例主节点，再合并 LLM 结果。
-        graph_builder = _ComplianceCaseGraphBuilder(document)
+        graph_builder = _ComplianceCaseGraphBuilder(document, self.result_stats)
         graph_builder.add_case_context_node()
         graph_builder.add_llm_result(llm_result)
         graph = graph_builder.to_graph()
@@ -132,6 +146,14 @@ class ComplianceCaseGraphExtractor:
         # 第四步：从图谱导出知识库字段。注意这只是下游视图。
         case_knowledge = export_case_knowledge_from_graph(graph, document.to_dict())
         status = "success" if llm_result.get("status") == "success" else llm_result.get("status", "failed")
+
+        # 统计错误：LLM 抽取失败 或 图谱只有案例主节点（无有效抽取内容）
+        if status != "success":
+            self.result_stats.error += 1
+            self.result_stats.error_msg += f"{Path(input_path).name}: {status}; "
+        elif len(graph.get("nodes", [])) <= 1:
+            self.result_stats.error += 1
+            self.result_stats.error_msg += f"{Path(input_path).name}: 图谱只有案例主节点，无有效抽取内容; "
         return {
             "filename": Path(input_path).name,
             "case_id": document.case_id,
@@ -147,6 +169,13 @@ class ComplianceCaseGraphExtractor:
                 "llm_call_count": 1 if self.enable_llm else 0,
             },
         }
+
+    async def logging_result_stats(self):
+        """输出知识图谱抽取的错误、弱警告、强警告统计信息。"""
+        logging.info("📄✅：数据统计")
+        logging.info(f"📄✅：错误数: {self.result_stats.error}")
+        logging.info(f"📄✅：弱警告数: {self.result_stats.week_warning}")
+        logging.info(f"📄✅：强警告数: {self.result_stats.strong_warning}")
 
     async def _extract_with_llm(self, document: ComplianceCaseDocument) -> dict[str, Any]:
         """调用 LLM 做一次性实体关系抽取。
@@ -245,8 +274,9 @@ class _ComplianceCaseGraphBuilder:
     - 关系端点必须能解析到已有节点，否则跳过，避免生成悬空边。
     """
 
-    def __init__(self, document: ComplianceCaseDocument) -> None:
+    def __init__(self, document: ComplianceCaseDocument, stats: ResultStats | None = None) -> None:
         self.document = document
+        self.stats = stats or ResultStats()
         # key 是 (node_type, node_name_or_merge_key)，用于节点去重。
         self.nodes: dict[tuple[str, str], dict[str, Any]] = {}
         self.edges: list[dict[str, Any]] = []
@@ -286,10 +316,12 @@ class _ComplianceCaseGraphBuilder:
             name = str(entity.get("name") or "").strip()
             node_type = str(entity.get("type") or "").strip()
             if not name or not node_type:
+                self.stats.week_warning += 1
                 continue
             if node_type == "风险点 / 合规指标":
                 node_type = "风险点"
             if node_type not in NODE_TYPES:
+                self.stats.strong_warning += 1
                 continue
             properties = entity.get("properties") or {}
             if node_type == "案例":
@@ -307,11 +339,12 @@ class _ComplianceCaseGraphBuilder:
             target_name = str(props.get("客体") or relation.get("target") or "").strip()
             relation_type = str(props.get("谓词") or relation.get("type") or "").strip()
             if not source_name or not target_name or not relation_type:
+                self.stats.week_warning += 1
                 continue
             source_id = self._resolve_node_id(source_name)
             target_id = self._resolve_node_id(target_name)
             if not source_id or not target_id:
-                # 不生成悬空边。后续如需审计，可在这里增加 skipped_relations 日志。
+                self.stats.strong_warning += 1
                 continue
             self.add_edge(source_id, target_id, relation_type, props, source="llm")
 
@@ -342,6 +375,7 @@ class _ComplianceCaseGraphBuilder:
                 or str(self.document.table_summary.get("案例要点", "")).strip()
             )
             if conclusion:
+                self.stats.week_warning += 1
                 self.add_node(
                     "处理结果1",
                     "案例结果",
@@ -358,6 +392,7 @@ class _ComplianceCaseGraphBuilder:
                 or _first_text(fields, ("风险点", "处置方案"))
             )
             if insight:
+                self.stats.week_warning += 1
                 self.add_node(
                     "案例启示1",
                     "案例启示",
@@ -370,6 +405,7 @@ class _ComplianceCaseGraphBuilder:
         if not self._has_node_type("处置方案"):
             disposal = _first_text(fields, ("处置方案",))
             if disposal:
+                self.stats.week_warning += 1
                 self.add_node(
                     "处置方案1",
                     "处置方案",
@@ -382,6 +418,7 @@ class _ComplianceCaseGraphBuilder:
         if not self._has_node_type("风险点"):
             risk_point = _first_text(fields, ("风险点",))
             if risk_point:
+                self.stats.week_warning += 1
                 self.add_node(
                     "风险点1",
                     "风险点",
@@ -394,6 +431,7 @@ class _ComplianceCaseGraphBuilder:
         if not self._has_node_type("案例分析"):
             analysis = _first_text(fields, ("案例分析", "分析"))
             if analysis:
+                self.stats.week_warning += 1
                 self.add_node(
                     "分析1",
                     "案例分析",
@@ -407,6 +445,7 @@ class _ComplianceCaseGraphBuilder:
         if not self._has_node_type("法规条款依据"):
             legal_basis = _first_text(fields, ("法律依据",))
             if legal_basis:
+                self.stats.week_warning += 1
                 for index, item in enumerate(_split_legal_basis_items(legal_basis), 1):
                     self.add_node(
                         f"法规依据{index}",
@@ -562,6 +601,8 @@ class _ComplianceCaseGraphBuilder:
         if mapped:
             properties["风险类型"] = mapped
         else:
+            if raw_value:
+                self.stats.week_warning += 1
             properties.pop("风险类型", None)
 
     def add_edge(
@@ -581,10 +622,12 @@ class _ComplianceCaseGraphBuilder:
         if not source_id or not target_id or not relation_type:
             return
         if source_id == target_id:
+            self.stats.week_warning += 1
             return
         source_type = self._node_type(source_id)
         target_type = self._node_type(target_id)
         if (source_type, relation_type, target_type) not in ALLOWED_EDGE_TRIPLES:
+            self.stats.strong_warning += 1
             return
         cleaned_properties = _clean_properties(properties or {})
         cleaned_properties.setdefault("主体", self._node_name(source_id))

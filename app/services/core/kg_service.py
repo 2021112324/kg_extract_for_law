@@ -2320,6 +2320,65 @@ class KGService:
             if path.is_dir() and (path / "full.md").exists()
         ]
 
+    async def _process_single_compliance_case_file(
+            self,
+            input_file: Path,
+            input_root: Path,
+            task_id: int,
+            graph_name: str,
+            relative_name: str,
+    ):
+        """
+        处理单个合规案例文件：抽取图谱并保存到 Neo4j（用于并发批处理）。
+        每个并发任务拥有独立的 DB 会话。
+        """
+        db_gen = get_db()
+        db = next(db_gen)
+        try:
+            logging.info(f"合规案例 v1 图谱抽取开始: {input_file}")
+            graph_result = await self.compliance_case_v1_extractor.extract(input_file)
+            graph = graph_result.get("graph", {}) or {}
+            nodes = graph.get("nodes", []) or []
+            edges = graph.get("edges", []) or []
+            if graph_result.get("status") not in {"success", "parser_only"}:
+                raise Exception(f"合规案例 v1 图谱抽取未成功: {graph_result.get('status')}")
+            if not nodes:
+                raise Exception("合规案例 v1 图谱节点为空")
+
+            saved = self.graph_storage.add_subgraph_with_merge(
+                graph,
+                graph_name,
+                "DomainLevel",
+                filename=graph_result.get("filename") or input_file.name,
+            )
+            if not saved:
+                raise Exception("合规案例 v1 图谱保存到 Neo4j 失败")
+
+            task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id).first()
+            if task:
+                task.status = 2
+                db.add(task)
+                db.commit()
+
+            logging.info(
+                "合规案例 v1 图谱抽取完成: %s, nodes=%s, edges=%s",
+                relative_name, len(nodes), len(edges),
+            )
+            return ("success", relative_name)
+        except Exception as e:
+            try:
+                task = db.query(KGExtractionTask).filter(KGExtractionTask.id == task_id).first()
+                if task:
+                    task.status = 4
+                    db.add(task)
+                    db.commit()
+            except Exception:
+                pass
+            logging.error(f"{relative_name}合规案例 v1 图谱抽取或保存失败，请检查！{str(e)}")
+            return ("error", relative_name, str(e))
+        finally:
+            db.close()
+
     async def compliance_case_v1_extract_by_local_dir(
             self,
             compliance_case_data_dir,
@@ -2353,8 +2412,8 @@ class KGService:
         kg_id = kg_result.get("data").get("id")
         kg_graph_name = kg_result.get("data").get("graph_name")
 
-        error_files = []
-        success_count = 0
+        # ====== Phase 1: 创建所有任务到数据库 ======
+        all_file_tasks = []
         for input_file in input_files:
             relative_name = input_file.relative_to(input_root).as_posix()
             task_name = input_file.stem
@@ -2372,51 +2431,43 @@ class KGService:
             db.flush()
             db.commit()
             db.refresh(new_task)
+            all_file_tasks.append((input_file, new_task.id, graph_name, relative_name))
 
-            try:
-                logging.info(f"合规案例 v1 图谱抽取开始: {input_file}")
-                graph_result = await self.compliance_case_v1_extractor.extract(input_file)
-                graph = graph_result.get("graph", {}) or {}
-                nodes = graph.get("nodes", []) or []
-                edges = graph.get("edges", []) or []
-                if graph_result.get("status") not in {"success", "parser_only"}:
-                    raise Exception(f"合规案例 v1 图谱抽取未成功: {graph_result.get('status')}")
-                if not nodes:
-                    raise Exception("合规案例 v1 图谱节点为空")
+        # ====== Phase 2: 每20个文件一批，并发进行知识图谱抽取 ======
+        batch_size = 20
+        error_files = []
+        success_count = 0
 
-                self.graph_storage.connect()
-                saved = self.graph_storage.add_subgraph_with_merge(
-                    graph,
-                    graph_name,
-                    "DomainLevel",
-                    filename=graph_result.get("filename") or input_file.name,
-                )
-                self.graph_storage.disconnect()
-                if not saved:
-                    raise Exception("合规案例 v1 图谱保存到 Neo4j 失败")
+        self.graph_storage.connect()
+        try:
+            for i in range(0, len(all_file_tasks), batch_size):
+                batch = all_file_tasks[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(all_file_tasks) + batch_size - 1) // batch_size
+                logging.info(f"合规案例 v1 批次 {batch_num}/{total_batches} 开始处理，共 {len(batch)} 个文件")
 
-                new_task.status = 2
-                db.add(new_task)
-                db.commit()
-                db.refresh(new_task)
-                success_count += 1
-                logging.info(
-                    "合规案例 v1 图谱抽取完成: %s, nodes=%s, edges=%s",
-                    relative_name,
-                    len(nodes),
-                    len(edges),
-                )
-            except Exception as e:
-                try:
-                    self.graph_storage.disconnect()
-                except Exception:
-                    pass
-                new_task.status = 4
-                db.add(new_task)
-                db.commit()
-                logging.error(f"{relative_name}合规案例 v1 图谱抽取或保存失败，请检查！" + str(e))
-                error_files.append((relative_name, str(e)))
+                results = await asyncio.gather(*[
+                    self._process_single_compliance_case_file(
+                        input_file, input_root, task_id, graph_name, relative_name
+                    )
+                    for input_file, task_id, graph_name, relative_name in batch
+                ], return_exceptions=True)
 
+                for j, result in enumerate(results):
+                    _, _, _, relative_name = batch[j]
+                    if isinstance(result, Exception):
+                        error_files.append((relative_name, str(result)))
+                        logging.error(f"{relative_name} 合规案例 v1 批次处理异常: {result}")
+                    elif result[0] == "success":
+                        success_count += 1
+                    else:
+                        error_files.append((result[1], result[2]))
+
+                logging.info(f"合规案例 v1 批次 {batch_num}/{total_batches} 完成")
+        finally:
+            self.graph_storage.disconnect()
+
+        # ====== Phase 3: 合并图谱 ======
         tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
         graph_names = [task.graph_name for task in tasks]
         try:
@@ -2439,6 +2490,7 @@ class KGService:
 
         for file, error in error_files:
             logging.error(f"{file}合规案例 v1 文件处理出现问题，请检查！" + error)
+        await self.compliance_case_v1_extractor.logging_result_stats()
         if success_count == 0:
             raise Exception("合规案例目录下没有成功入库的图谱")
         return {
