@@ -1066,12 +1066,13 @@ async def clause_en_extract_by_dir(
 
 功能：对指定目录下的英文法律、法规、法典、行政命令等文本进行英文知识图谱抽取。
 流程与 /clause_extract_by_dir 类似，但底层使用：
-app/infrastructure/information_extraction/law_en_extract/ClauseEnExtractor
+app/infrastructure/information_extraction/en_law/FormatOneEnLawExtractor
 
 输出图谱要求：
-1. 节点类型为英文，例如 Legal Document、Legal Provision、Provision Unit、Citation。
+1. 节点类型为英文，例如 LegalDocument、LegalProvision、ProvisionUnit、Citation。
 2. 关系类型为英文，例如 CONTAINS、CITES、BASED_ON。
-3. 属性名和属性值尽量保持英文，便于和英文法规原文对应。
+3. 除合规风险类型等业务约定字段外，属性名和属性值尽量保持英文，便于和英文法规原文对应。
+4. 正式入库前会去除行号、原文兜底全文、嵌套审查字段等不适合 Neo4j 的属性。
 
 以此，json请求格式为：
 {
