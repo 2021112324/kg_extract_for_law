@@ -2374,8 +2374,13 @@ class KGService:
                     db.commit()
             except Exception:
                 pass
+            error_msg = str(e)
+            if "Neo4j" in error_msg or "图谱保存" in error_msg or "入库" in error_msg:
+                self.compliance_case_v1_extractor.result_stats.record_storage_error(relative_name, error_msg)
+            else:
+                self.compliance_case_v1_extractor.result_stats.record_file_error(relative_name, error_msg)
             logging.error(f"{relative_name}合规案例 v1 图谱抽取或保存失败，请检查！{str(e)}")
-            return ("error", relative_name, str(e))
+            return ("error", relative_name, error_msg)
         finally:
             db.close()
 
@@ -2435,8 +2440,36 @@ class KGService:
 
         # ====== Phase 2: 每20个文件一批，并发进行知识图谱抽取 ======
         batch_size = 20
+        merge_size = 100
         error_files = []
         success_count = 0
+        pending_merge_graph_names = []
+
+        def merge_batch_graphs(graph_names: list[str], merge_reason: str) -> None:
+            """将一批文件级 task 子图合并进目录级总图谱，并删除已合并子图。"""
+
+            if not graph_names:
+                return
+            logging.info(
+                "合规案例 v1 %s，开始合并 %s 个子图 -> %s",
+                merge_reason,
+                len(graph_names),
+                kg_graph_name,
+            )
+            for graph_name in graph_names:
+                logging.info(f"正在合并合规案例 v1 图谱 {graph_name} -> {kg_graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"合规案例 v1 子图 {graph_name} 合并后已删除")
+                task = db.query(KGExtractionTask).filter(
+                    KGExtractionTask.kg_id == kg_id,
+                    KGExtractionTask.graph_name == graph_name,
+                ).first()
+                if task:
+                    task.status = 3
+                    db.add(task)
+                    db.commit()
+                logging.info(f"合规案例 v1 图谱 {graph_name} 合并完成")
 
         self.graph_storage.connect()
         try:
@@ -2454,39 +2487,37 @@ class KGService:
                 ], return_exceptions=True)
 
                 for j, result in enumerate(results):
-                    _, _, _, relative_name = batch[j]
+                    _, _, graph_name, relative_name = batch[j]
                     if isinstance(result, Exception):
                         error_files.append((relative_name, str(result)))
+                        self.compliance_case_v1_extractor.result_stats.record_file_error(relative_name, str(result))
                         logging.error(f"{relative_name} 合规案例 v1 批次处理异常: {result}")
                     elif result[0] == "success":
                         success_count += 1
+                        pending_merge_graph_names.append(graph_name)
                     else:
                         error_files.append((result[1], result[2]))
 
+                while len(pending_merge_graph_names) >= merge_size:
+                    merge_batch_graphs(
+                        pending_merge_graph_names[:merge_size],
+                        f"已保存 {merge_size} 个文件图谱",
+                    )
+                    pending_merge_graph_names = pending_merge_graph_names[merge_size:]
+
                 logging.info(f"合规案例 v1 批次 {batch_num}/{total_batches} 完成")
+
+            merge_batch_graphs(
+                pending_merge_graph_names,
+                f"尾批剩余 {len(pending_merge_graph_names)} 个文件图谱",
+            )
+        except Exception as e:
+            logging.error(f"合规案例 v1 图谱抽取或分批合并时出现问题，请检查！" + str(e))
+            raise Exception(f"合规案例 v1 图谱抽取或分批合并时出现问题，请检查！" + str(e))
         finally:
             self.graph_storage.disconnect()
 
-        # ====== Phase 3: 合并图谱 ======
-        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
-        graph_names = [task.graph_name for task in tasks]
-        try:
-            for graph_name in graph_names:
-                self.graph_storage.connect()
-                logging.info(f"正在合并合规案例 v1 图谱 {graph_name} -> {kg_graph_name}")
-                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
-                if if_del_task:
-                    self.graph_storage.delete_subgraph(graph_name)
-                logging.info(f"合规案例 v1 图谱 {graph_name} 合并完成")
-                self.graph_storage.disconnect()
-            logging.info("所有合规案例 v1 图谱处理完成")
-        except Exception as e:
-            try:
-                self.graph_storage.disconnect()
-            except Exception:
-                pass
-            logging.error(f"合规案例 v1 图谱合并时出现问题，请检查！" + str(e))
-            raise Exception(f"合规案例 v1 图谱合并时出现问题，请检查！" + str(e))
+        logging.info("所有合规案例 v1 图谱处理完成")
 
         for file, error in error_files:
             logging.error(f"{file}合规案例 v1 文件处理出现问题，请检查！" + error)
@@ -2783,7 +2814,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"e1_{source_name}_{generate_snowflake_string_id()}"
+    return f"e5_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

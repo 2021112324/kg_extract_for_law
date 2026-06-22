@@ -32,6 +32,7 @@ from app.infrastructure.information_extraction.compliance_case_v1.compliance_cas
 from app.infrastructure.information_extraction.compliance_case_v1.export_case_knowledge import (
     CONTROLLED_RISK_TYPES,
     export_case_knowledge_from_graph,
+    _map_indicator_system_risk_types,
     _map_to_controlled_risk_type,
 )
 from app.infrastructure.information_extraction.compliance_case_v1.prompt.example import (
@@ -58,12 +59,24 @@ CASE_PROTECTED_PROPERTIES = {
     "案例编号",
     "案例名称",
     "案例类型",
+    "风险类型",
     "合规领域",
+    "原始合规领域",
     "关键词",
     "数据来源类型",
     "原文全文",
-    "source_path",
 }
+PROPERTY_DROP_OVERRIDES = {
+    "案例": {"source_path"},
+    "风险点": {"风险类型原文", "是否叶子指标", "指标ID", "去编号后类型", "根节点类型"},
+}
+PROPERTY_ALLOW_OVERRIDES = {
+    "案例分析": {"知识用途", "内容来源"},
+    "案例结果": {"知识用途", "内容来源"},
+    "案例启示": {"知识用途", "内容来源"},
+    "处置方案": {"知识用途", "内容来源"},
+}
+NODE_ALLOWED_PROPERTIES = {}
 
 COMPLIANCE_CASE_MODEL = os.getenv("COMPLIANCE_CASE_MODEL", "qwen3-30b-a3b-instruct-2507")
 COMPLIANCE_CASE_API_KEY = os.getenv(
@@ -84,12 +97,35 @@ class ResultStats:
     """知识图谱抽取结果统计，记录错误、弱警告、强警告的数量和描述信息。"""
 
     def __init__(self):
+        # error 保留为抽取阶段错误，避免和入库/文件处理阶段混淆。
         self.error = 0
         self.error_msg = ""
+        self.storage_error = 0
+        self.storage_error_msg = ""
+        self.file_error = 0
+        self.file_error_msg = ""
         self.week_warning = 0
         self.week_warning_msg = ""
         self.strong_warning = 0
         self.strong_warning_msg = ""
+
+    @property
+    def total_error(self) -> int:
+        """返回全流程错误数：抽取错误 + 入库错误 + 文件处理错误。"""
+
+        return self.error + self.storage_error + self.file_error
+
+    def record_storage_error(self, filename: str, error: str) -> None:
+        """记录 Neo4j 入库/图谱保存阶段错误。"""
+
+        self.storage_error += 1
+        self.storage_error_msg += f"{filename}: {error}; "
+
+    def record_file_error(self, filename: str, error: str) -> None:
+        """记录批处理外层文件处理错误。"""
+
+        self.file_error += 1
+        self.file_error_msg += f"{filename}: {error}; "
 
 
 class ComplianceCaseGraphExtractor:
@@ -134,8 +170,30 @@ class ComplianceCaseGraphExtractor:
         # 第一步：只做结构读取，不做语义抽取。
         document = parse_compliance_case_file(input_path)
 
-        # 第二步：一个完整案例调用一次 LLM。no-llm 模式下返回空抽取结果。
+        # 第二步：一个完整案例调用一次 LLM。no-llm 模式仅用于本地调试。
         llm_result = await self._extract_with_llm(document) if self.enable_llm else self._empty_llm_result()
+        status = "success" if llm_result.get("status") == "success" else llm_result.get("status", "failed")
+
+        if self.enable_llm and status != "success":
+            self.result_stats.error += 1
+            error_detail = str(llm_result.get("error") or status)
+            self.result_stats.error_msg += f"{Path(input_path).name}: LLM抽取失败: {error_detail}; "
+            logging.error(f"合规案例 v1 图谱抽取失败，不生成图谱: {Path(input_path).name}, error={error_detail}")
+            return {
+                "filename": Path(input_path).name,
+                "case_id": document.case_id,
+                "status": "failed",
+                "extraction_mode": "single_stage_llm",
+                "parsed_document": document.to_dict(),
+                "llm_extraction": llm_result,
+                "graph": {"nodes": [], "edges": []},
+                "case_knowledge": {},
+                "stats": {
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "llm_call_count": 1,
+                },
+            }
 
         # 第三步：构建图谱。先放 parser 生成的案例主节点，再合并 LLM 结果。
         graph_builder = _ComplianceCaseGraphBuilder(document, self.result_stats)
@@ -145,13 +203,9 @@ class ComplianceCaseGraphExtractor:
 
         # 第四步：从图谱导出知识库字段。注意这只是下游视图。
         case_knowledge = export_case_knowledge_from_graph(graph, document.to_dict())
-        status = "success" if llm_result.get("status") == "success" else llm_result.get("status", "failed")
 
-        # 统计错误：LLM 抽取失败 或 图谱只有案例主节点（无有效抽取内容）
-        if status != "success":
-            self.result_stats.error += 1
-            self.result_stats.error_msg += f"{Path(input_path).name}: {status}; "
-        elif len(graph.get("nodes", [])) <= 1:
+        # 统计错误：LLM 成功返回但图谱只有案例主节点，说明没有有效抽取内容。
+        if self.enable_llm and len(graph.get("nodes", [])) <= 1:
             self.result_stats.error += 1
             self.result_stats.error_msg += f"{Path(input_path).name}: 图谱只有案例主节点，无有效抽取内容; "
         return {
@@ -173,9 +227,18 @@ class ComplianceCaseGraphExtractor:
     async def logging_result_stats(self):
         """输出知识图谱抽取的错误、弱警告、强警告统计信息。"""
         logging.info("📄✅：数据统计")
-        logging.info(f"📄✅：错误数: {self.result_stats.error}")
+        logging.info(f"📄✅：错误数: {self.result_stats.total_error}")
+        logging.info(f"📄✅：抽取错误数: {self.result_stats.error}")
+        logging.info(f"📄✅：入库错误数: {self.result_stats.storage_error}")
+        logging.info(f"📄✅：文件处理错误数: {self.result_stats.file_error}")
         logging.info(f"📄✅：弱警告数: {self.result_stats.week_warning}")
         logging.info(f"📄✅：强警告数: {self.result_stats.strong_warning}")
+        if self.result_stats.error_msg:
+            logging.info(f"📄✅：抽取错误信息: {self.result_stats.error_msg[:3000]}")
+        if self.result_stats.storage_error_msg:
+            logging.info(f"📄✅：入库错误信息: {self.result_stats.storage_error_msg[:3000]}")
+        if self.result_stats.file_error_msg:
+            logging.info(f"📄✅：文件处理错误信息: {self.result_stats.file_error_msg[:3000]}")
 
     async def _extract_with_llm(self, document: ComplianceCaseDocument) -> dict[str, Any]:
         """调用 LLM 做一次性实体关系抽取。
@@ -294,12 +357,9 @@ class _ComplianceCaseGraphBuilder:
             "案例编号": self.document.case_number,
             "案例名称": self.document.case_title,
             "案例类型": self.document.table_summary.get("备注", self.document.source_type),
-            "合规领域": self.document.compliance_domain,
             "案例摘要": self.document.table_summary.get("案例要点", ""),
-            "关键词": self.document.keywords,
             "数据来源类型": self.document.source_type,
             "原文全文": self.document.full_text,
-            "source_path": self.document.source_path,
         }
         return self.add_node(self.document.case_id, "案例", properties, source="parser")
 
@@ -399,6 +459,8 @@ class _ComplianceCaseGraphBuilder:
                     {
                         "启示提示": insight,
                         "启示类型": "案例启示" if fields.get("案例启示") else "案例总结",
+                        "知识用途": "参考知识",
+                        "内容来源": "案例启示" if fields.get("案例启示") else "案例总结",
                     },
                     source="parser",
                 )
@@ -412,6 +474,8 @@ class _ComplianceCaseGraphBuilder:
                     {
                         "处置方案内容": disposal,
                         "处置类型": "处置方案",
+                        "知识用途": "参考知识",
+                        "内容来源": "处置方案",
                     },
                     source="parser",
                 )
@@ -424,7 +488,6 @@ class _ComplianceCaseGraphBuilder:
                     "风险点",
                     {
                         "风险点原文": risk_point,
-                        "风险类型": _short_text(risk_point, 80),
                     },
                     source="parser",
                 )
@@ -439,6 +502,8 @@ class _ComplianceCaseGraphBuilder:
                         "分析编号": "分析1",
                         "分析过程": analysis,
                         "分析结论": _short_text(analysis, 120),
+                        "知识用途": "参考知识",
+                        "内容来源": "分析",
                     },
                     source="parser",
                 )
@@ -530,13 +595,10 @@ class _ComplianceCaseGraphBuilder:
         if key in self.nodes:
             # 已存在节点时只合并属性和来源，不新建节点。
             if node_type == "案例":
-                self.nodes[key]["properties"].update(
-                    {
-                        prop_key: prop_value
-                        for prop_key, prop_value in cleaned_properties.items()
-                        if prop_key not in CASE_PROTECTED_PROPERTIES
-                    }
-                )
+                existing_properties = self.nodes[key]["properties"]
+                for prop_key, prop_value in cleaned_properties.items():
+                    if prop_key not in CASE_PROTECTED_PROPERTIES or existing_properties.get(prop_key) in (None, "", [], {}):
+                        existing_properties[prop_key] = prop_value
             else:
                 self.nodes[key]["properties"].update(cleaned_properties)
             self.nodes[key]["source"] = _merge_source_label(self.nodes[key].get("source", ""), source)
@@ -567,43 +629,121 @@ class _ComplianceCaseGraphBuilder:
         """
 
         cleaned_properties = _clean_properties(properties or {})
-        if node_type == "风险点":
+        if node_type == "案例":
+            self._normalize_case_properties(cleaned_properties)
+        elif node_type == "风险点":
             self._normalize_risk_point_properties(cleaned_properties)
-        return cleaned_properties
+        elif node_type in {"案例分析", "案例结果", "案例启示", "处置方案"}:
+            self._mark_reference_knowledge(node_type, cleaned_properties)
+        return self._filter_node_properties(node_type, cleaned_properties)
+
+    def _filter_node_properties(self, node_type: str, properties: dict[str, Any]) -> dict[str, Any]:
+        """按 schema 白名单过滤最终入库属性。"""
+
+        allowed = set(NODE_ALLOWED_PROPERTIES.get(node_type) or set())
+        allowed.update(PROPERTY_ALLOW_OVERRIDES.get(node_type, set()))
+        dropped = PROPERTY_DROP_OVERRIDES.get(node_type, set())
+        if not allowed:
+            if properties:
+                self.stats.strong_warning += 1
+            return {}
+        unknown_keys = set(properties) - allowed - dropped
+        if unknown_keys:
+            self.stats.strong_warning += 1
+        return {key: value for key, value in properties.items() if key in allowed and key not in dropped}
+
+    def _normalize_case_properties(self, properties: dict[str, Any]) -> None:
+        """只校验案例“风险类型”是否符合六类受控词表。
+
+        “合规领域”是旧字段名，仅作为兼容输入；新结果统一写入“风险类型”。
+        """
+
+        raw_values = _as_list(properties.get("风险类型")) + _as_list(properties.get("合规领域"))
+        normalized: list[str] = []
+        invalid_values: list[str] = []
+        for raw_value in raw_values:
+            text = str(raw_value or "").strip()
+            if not text:
+                continue
+            if text in CONTROLLED_RISK_TYPES:
+                mapped = text
+            else:
+                mapped = _map_to_controlled_risk_type(text)
+            if mapped and mapped not in normalized:
+                normalized.append(mapped)
+            elif not mapped:
+                invalid_values.append(text)
+        if invalid_values:
+            properties.setdefault("风险类型原文", invalid_values)
+            self.stats.week_warning += 1
+        if normalized:
+            properties["风险类型"] = normalized
+        else:
+            properties.pop("风险类型", None)
+        properties.pop("合规领域", None)
 
     def _normalize_risk_point_properties(self, properties: dict[str, Any]) -> None:
         """将风险点的“风险类型”收敛到六类受控风险类型。"""
 
-        raw_value = str(properties.get("风险类型") or "").strip()
-        candidates: list[Any] = [
-            raw_value,
-            properties.get("风险点原文"),
-            properties.get("指标路径"),
-            properties.get("指标名称"),
-            self.document.compliance_domain,
-            *self.document.keywords,
-        ]
+        raw_values = _as_list(properties.get("风险类型"))
+        indicator_text = " ".join(
+            str(properties.get(key) or "")
+            for key in ("风险点原文", "指标路径", "指标名称")
+        )
+        system_mapped = _map_indicator_system_risk_types(indicator_text)
+        normalized: list[str] = []
+        invalid_values: list[str] = []
 
-        mapped = ""
-        for candidate in candidates:
+        for mapped in system_mapped:
+            if mapped not in normalized:
+                normalized.append(mapped)
+
+        for candidate in raw_values:
             text = str(candidate or "").strip()
             if not text:
                 continue
             if text in CONTROLLED_RISK_TYPES:
                 mapped = text
-                break
-            mapped = _map_to_controlled_risk_type(text)
+            else:
+                mapped = _map_to_controlled_risk_type(text)
             if mapped:
-                break
+                if not normalized:
+                    normalized.append(mapped)
+                elif mapped not in normalized and not system_mapped:
+                    normalized.append(mapped)
+            else:
+                invalid_values.append(text)
 
-        if raw_value and raw_value != mapped:
-            properties.setdefault("风险类型原文", raw_value)
-        if mapped:
-            properties["风险类型"] = mapped
+        if system_mapped:
+            mismatched_raw_values = [
+                str(value).strip()
+                for value in raw_values
+                if str(value or "").strip() and str(value or "").strip() not in normalized
+            ]
+            if mismatched_raw_values:
+                properties.setdefault("风险类型原文", mismatched_raw_values)
+        elif invalid_values:
+            properties.setdefault("风险类型原文", invalid_values)
+            self.stats.week_warning += 1
+
+        if normalized:
+            properties["风险类型"] = normalized[0] if len(normalized) == 1 else normalized
         else:
-            if raw_value:
+            if raw_values:
                 self.stats.week_warning += 1
             properties.pop("风险类型", None)
+
+    def _mark_reference_knowledge(self, node_type: str, properties: dict[str, Any]) -> None:
+        """标注专家结论、分析、处置方案等扩展内容的使用边界。"""
+
+        properties.setdefault("知识用途", "参考知识")
+        source_map = {
+            "案例分析": "分析",
+            "案例结果": "结论",
+            "案例启示": "案例启示",
+            "处置方案": "处置方案",
+        }
+        properties.setdefault("内容来源", source_map.get(node_type, node_type))
 
     def add_edge(
         self,
@@ -874,6 +1014,36 @@ async def extract_compliance_case_graph_batch(
     return summary
 
 
+def _extract_all_allowed_properties_from_schema(schema_text: str) -> dict[str, set[str]]:
+    """从 Markdown schema 中提取每类节点允许的属性名。"""
+
+    allowed: dict[str, set[str]] = {}
+    node_matches = list(re.finditer(r"^##\s+(.+?)\s*$", schema_text or "", flags=re.MULTILINE))
+    for index, match in enumerate(node_matches):
+        node_type = match.group(1).strip()
+        block_start = match.end()
+        block_end = node_matches[index + 1].start() if index + 1 < len(node_matches) else len(schema_text)
+        node_block = schema_text[block_start:block_end]
+        property_match = re.search(
+            r"^###\s+属性\s*$([\s\S]*?)(?=^###\s+|\Z)",
+            node_block,
+            flags=re.MULTILINE,
+        )
+        if not property_match:
+            continue
+        properties: set[str] = set()
+        for line in property_match.group(1).splitlines():
+            item_match = re.match(r"\s*-\s*([^：:\n]+)[：:]", line)
+            if item_match:
+                properties.add(item_match.group(1).strip())
+        if properties:
+            allowed[node_type] = properties
+    return allowed
+
+
+NODE_ALLOWED_PROPERTIES = _extract_all_allowed_properties_from_schema(schema_for_compliance_case)
+
+
 def _clean_properties(properties: dict[str, Any]) -> dict[str, Any]:
     """删除空属性，减少 node.json/edge.json 噪声。"""
 
@@ -897,6 +1067,16 @@ def _short_text(value: str, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit].rstrip() + "..."
+
+
+def _as_list(value: Any) -> list[Any]:
+    """把单值或列表统一为列表。"""
+
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return [item for item in value if item not in (None, "", [], {})]
+    return [value]
 
 
 def _split_legal_basis_items(value: str) -> list[str]:

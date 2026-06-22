@@ -424,7 +424,8 @@ class Resolver(AbstractResolver):
         logging.error("Error position: %d", e.pos)
         logging.error("Error context: %s", repr(content[max(0, e.pos-30):e.pos+30]))
         # 输出完整内容的前200个字符，便于调试
-        logging.error("Full content (first 200 chars): %s", repr(content[:200]))
+        # logging.error("Full content (first 200 chars): %s", repr(content[:200]))
+        logging.error("Full content: %s", repr(content))
         
         # TODO: 优化1-14 如果是JSON格式且json_repair可用，则尝试修复
         if self.format_type == data.FormatType.JSON and repair_json is not None:

@@ -36,8 +36,9 @@ class ComplianceCaseDocument:
     - case_number：原始案例编号，如“案例1-1”中的 1-1 或 TXT 中的序号。
     - case_title：短标题，优先来自 Markdown 案例标题或 TXT 结论。
     - source_type：数据来源类型，目前为“合规案例库”或“合规风险案例”。
-    - compliance_domain：合规领域，Markdown 案例一般可由章节标题得到。
-    - keywords：关键词，优先来自 Markdown 表格或 TXT 风险点。
+    - compliance_domain：原始数据中直接给出的合规领域，如 Markdown 章节标题或 TXT 独立字段；不做规则推断。
+    - original_compliance_domains：保留兼容字段，解析阶段不主动生成；应由 LLM 按 schema 抽取。
+    - keywords：原始数据中直接给出的关键词，如 Markdown 摘要表“关键词”列；不从正文或风险点推断。
     - table_summary：Markdown 开头 HTML 表格中的摘要字段。
     - fields：按原始结构标题/字段标签提取出的结构内容。
     - full_text：清理后的全文，作为兜底和可追溯原文。
@@ -50,6 +51,7 @@ class ComplianceCaseDocument:
     source_type: str
     source_path: str
     compliance_domain: str = ""
+    original_compliance_domains: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     table_summary: dict[str, Any] = field(default_factory=dict)
     fields: dict[str, str] = field(default_factory=dict)
@@ -170,12 +172,12 @@ def build_compliance_case_llm_input(document: ComplianceCaseDocument) -> str:
         "【案例标题】",
         document.case_title,
     ]
-    if document.compliance_domain:
-        parts.extend(["", "【合规领域】", document.compliance_domain])
-    if document.keywords:
-        parts.extend(["", "【关键词】", "、".join(document.keywords)])
     if document.table_summary:
         parts.extend(["", "【表格摘要】", _format_mapping(document.table_summary)])
+    if document.compliance_domain:
+        parts.extend(["", "【源数据原始合规领域】", document.compliance_domain])
+    if document.keywords:
+        parts.extend(["", "【关键词】", "、".join(document.keywords)])
     for key, value in document.fields.items():
         # fields 是原始结构内容；空字段不放入输入，减少模型噪声。
         if value.strip():
@@ -195,12 +197,13 @@ def _parse_case_library_markdown(path: Path, text: str) -> ComplianceCaseDocumen
     clean_text = _clean_markdown_text(text)
     # 表格摘要是案例标题、关键词、案例类型、案例要点的重要来源。
     table_summary = _extract_first_table_summary(clean_text)
-    # 标题用于识别合规领域和正文结构。
+    # 这里的合规领域来自源数据标题结构本身，只做格式整理，不做语义推断。
     headings = _extract_headings(clean_text)
     case_number, case_title = _extract_case_number_and_title(path, clean_text, table_summary)
     compliance_domain = _extract_compliance_domain(headings)
     keywords = _split_keywords(str(table_summary.get("关键词", "")))
     fields = _extract_markdown_sections(clean_text)
+    full_text = _build_case_library_full_text(fields, table_summary, clean_text)
     return ComplianceCaseDocument(
         case_id=_make_case_id(CASE_LIBRARY_DIRNAME, path.stem),
         case_number=case_number or path.stem,
@@ -211,7 +214,7 @@ def _parse_case_library_markdown(path: Path, text: str) -> ComplianceCaseDocumen
         keywords=keywords,
         table_summary=table_summary,
         fields=fields,
-        full_text=clean_text,
+        full_text=full_text,
     )
 
 
@@ -226,16 +229,17 @@ def _parse_risk_case_txt(path: Path, text: str) -> ComplianceCaseDocument:
     fields = _extract_txt_fields(clean_text)
     case_number = fields.get("序号") or _extract_digits(path.stem) or path.stem
     title = _build_risk_case_title(case_number, fields)
-    keywords = _infer_keywords_from_risk_points(fields.get("风险点", ""))
+    keywords = _split_keywords(fields.get("关键词", ""))
     return ComplianceCaseDocument(
         case_id=_make_case_id(RISK_CASE_DIRNAME, case_number),
         case_number=case_number,
         case_title=title,
         source_type=RISK_CASE_DIRNAME,
         source_path=str(path),
+        compliance_domain=fields.get("合规领域", ""),
         keywords=keywords,
         fields={k: v for k, v in fields.items() if k != "序号"},
-        full_text=clean_text,
+        full_text=fields.get("企业材料", clean_text).strip(),
     )
 
 
@@ -352,13 +356,7 @@ def _extract_case_number_and_title(path: Path, text: str, table_summary: dict[st
 
 
 def _extract_compliance_domain(headings: list[str]) -> str:
-    """从标题序列中识别合规领域。
-
-    经验规则：
-    - 第一个标题通常是“章节”，跳过。
-    - 第二个标题通常是合规领域，如“反腐败反商业贿赂”。
-    - 遇到“案例...”标题后停止，避免把案例标题误当领域。
-    """
+    """从 Markdown 源数据标题层级读取明示合规领域。"""
 
     ignored = {"章节"}
     for heading in headings:
@@ -404,6 +402,27 @@ def _extract_markdown_sections(text: str) -> dict[str, str]:
     return fields
 
 
+def _build_case_library_full_text(
+    fields: dict[str, str],
+    table_summary: dict[str, str],
+    clean_text: str,
+) -> str:
+    """为“合规案例库”生成案例主节点的原文全文。
+
+    合规案例库的 Markdown 常包含摘要表、法律依据、案例分析等大量材料；
+    这些内容会分别进入风险点、法规依据、分析等节点，不应整体塞入
+    “案例.原文全文”。该属性只保留案例事件/案情事实正文。
+    """
+
+    fact_text = str(fields.get("案情简介", "")).strip()
+    if fact_text:
+        return fact_text
+    summary = str(table_summary.get("案例要点", "")).strip()
+    if summary:
+        return summary
+    return clean_text.strip()
+
+
 def _match_section_key(heading: str, aliases: list[tuple[str, str]]) -> str:
     """把标题文本映射到标准结构字段名。"""
 
@@ -426,7 +445,7 @@ def _extract_txt_fields(text: str) -> dict[str, str]:
     如果找不到任何标签，则把全文放入“企业材料”，保证不会丢文本。
     """
 
-    labels = ["序号", "企业材料", "结论", "分析", "风险点", "法律依据", "处置方案"]
+    labels = ["序号", "合规领域", "关键词", "企业材料", "结论", "分析", "风险点", "法律依据", "处置方案"]
     label_re = re.compile(rf"^({'|'.join(map(re.escape, labels))})\s*$", re.M)
     matches = list(label_re.finditer(text))
     fields: dict[str, str] = {}
@@ -441,32 +460,12 @@ def _extract_txt_fields(text: str) -> dict[str, str]:
 
 
 def _split_keywords(value: str) -> list[str]:
-    """拆分表格中的关键词字段。"""
+    """拆分源数据中直接提供的关键词字段。"""
 
     if not value:
         return []
     parts = re.split(r"[、,，;；\s]+", value)
     return [p.strip() for p in parts if p.strip()]
-
-
-def _infer_keywords_from_risk_points(value: str) -> list[str]:
-    """从风险点文本中提取可用关键词。
-
-    这不是指标映射，只是为了给案例节点提供关键词候选。
-    指标 ID 仍然必须由后处理匹配指标知识库生成，不能在这里臆造。
-    """
-
-    if not value:
-        return []
-    names: list[str] = []
-    for quoted in re.findall(r"《([^》]+)》", value):
-        if quoted not in names:
-            names.append(quoted)
-    for match in re.findall(r"\d+(?:\.\d+)*\s*([^；;。]+)", value):
-        name = _normalize_space(match).strip("- ")
-        if name and name not in names:
-            names.append(name)
-    return names[:12]
 
 
 def _build_risk_case_title(case_number: str, fields: dict[str, str]) -> str:

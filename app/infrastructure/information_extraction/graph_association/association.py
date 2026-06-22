@@ -12,6 +12,7 @@ from app.infrastructure.graph_storage.base import GraphNode
 
 from .matcher import (
     match_clause_node_via_cypher,
+    parse_clause_number,
 )
 
 logger = logging.getLogger(__name__)
@@ -258,7 +259,19 @@ class GraphAssociator:
                 self._normalize_case_clause_number(tag_a, node)
 
             clause_number = str(node.properties.get("条款编号", "") or "").strip()
+            # 条款编号无效时（如"新修订"），当成无条款处理，直接匹配法规文件
+            if clause_number and parse_clause_number(clause_number) is None:
+                logger.info(f"  [{idx}/{total}] '{node.name}' 条款编号 '{clause_number}' 非有效编号，回退为匹配法规文件")
+                clause_number = ""
             task_type = f"{task_prefix} → {'法条' if clause_number else '法规文件'}"
+
+            # 法规名称为空时，尝试从节点名称中提取
+            reg_name = str(node.properties.get("法规名称", "") or "").strip()
+            if not reg_name or reg_name == "无":
+                extracted = _extract_name_from_node_name(node.name)
+                if extracted:
+                    node.properties["法规名称"] = extracted
+                    logger.info(f"  [{idx}/{total}] 法规名称为空，从节点名提取: '{extracted}'")
 
             parent_file, method = match_node_to_file_with_method(
                 node, target_files, source_name_keys=["法规名称"]
@@ -535,7 +548,7 @@ def match_node_to_file_with_method(
     source_name_keys: List[str] = None,
 ):
     """同 match_node_to_file，同时返回匹配方式。"""
-    from .matcher import _to_str_list
+    from .matcher import _to_str_list, _strip_version_suffix
 
     source_name_keys = source_name_keys or ["文件全称", "文件别名"]
     search_names: List[Tuple[str, str]] = []
@@ -543,6 +556,14 @@ def match_node_to_file_with_method(
         for value in _to_str_list(node.properties.get(key, "")):
             if value:
                 search_names.append((key, value))
+                # 同时加入去除书名号的版本
+                cleaned = value.strip("\u300a\u300b\u3008\u3009")
+                if cleaned != value:
+                    search_names.append((key, cleaned))
+                # 若名称含《》，提取《》之间的内容（如 原国土资源部《闲置土地处置办法》→ 闲置土地处置办法）
+                inner = _extract_bookmark_content(value)
+                if inner and inner != value and inner != cleaned:
+                    search_names.append((key, inner))
 
     if not search_names or not target_files:
         return None, ""
@@ -553,9 +574,16 @@ def match_node_to_file_with_method(
         fn = str(f.properties.get("文件全称", ""))
         if fn:
             by_fullname[fn] = f
+            # 同时加入去除版本后缀的版本，如 工伤保险条例(2010修订) → 工伤保险条例
+            stripped_fn = _strip_version_suffix(fn)
+            if stripped_fn != fn and stripped_fn not in by_fullname:
+                by_fullname[stripped_fn] = f
         for a in _to_str_list(f.properties.get("文件别名", "")):
             if a:
                 by_alias[a] = f
+                stripped_a = _strip_version_suffix(a)
+                if stripped_a != a and stripped_a not in by_alias:
+                    by_alias[stripped_a] = f
 
     for source_key, name in search_names:
         if name in by_fullname:
@@ -577,4 +605,76 @@ def match_node_to_file_with_method(
             if stripped and stripped in by_alias:
                 return by_alias[stripped], f"{source_key}去'中华人民共和国'前缀后匹配文件别名"
 
+    # 4. 去除"新修订"等修饰词后再匹配
+    for source_key, name in search_names:
+        for prefix in ["新修订的", "新修订"]:
+            if name.startswith(prefix):
+                stripped_name = name[len(prefix):].strip()
+                if not stripped_name:
+                    continue
+                if stripped_name in by_fullname:
+                    return by_fullname[stripped_name], f"{source_key}去'{prefix}'后匹配文件全称"
+                if stripped_name in by_alias:
+                    return by_alias[stripped_name], f"{source_key}去'{prefix}'后匹配文件别名"
+                # 再去中华人民共和国前缀
+                if not stripped_name.startswith("中华人民共和国"):
+                    prefixed2 = "中华人民共和国" + stripped_name
+                    if prefixed2 in by_fullname:
+                        return by_fullname[prefixed2], f"{source_key}去'{prefix}'加'中华人民共和国'后匹配文件全称"
+                    if prefixed2 in by_alias:
+                        return by_alias[prefixed2], f"{source_key}去'{prefix}'加'中华人民共和国'后匹配文件别名"
+                else:
+                    stripped2 = stripped_name[7:]
+                    if stripped2 and stripped2 in by_fullname:
+                        return by_fullname[stripped2], f"{source_key}去'{prefix}'去'中华人民共和国'后匹配文件全称"
+                    if stripped2 and stripped2 in by_alias:
+                        return by_alias[stripped2], f"{source_key}去'{prefix}'去'中华人民共和国'后匹配文件别名"
+
+    # 5. 剥离发文机关前缀（如 司法部《xxx》 → xxx）
+    for source_key, name in search_names:
+        org_prefixes = ["司法部", "国务院", "最高人民法院", "最高人民检察院", "中共中央办公厅", "国务院办公厅"]
+        for org in org_prefixes:
+            if name.startswith(org):
+                stripped_name = name[len(org):].strip().strip("《》〈〉")
+                if not stripped_name:
+                    continue
+                if stripped_name in by_fullname:
+                    return by_fullname[stripped_name], f"{source_key}去'{org}'发文机关前缀后匹配文件全称"
+                if stripped_name in by_alias:
+                    return by_alias[stripped_name], f"{source_key}去'{org}'发文机关前缀后匹配文件别名"
+
     return None, ""
+
+
+def _extract_bookmark_content(name: str) -> str:
+    """从名称中提取《》之间的内容，丢弃外部发文机关前缀。
+
+    示例:
+        '原国土资源部《闲置土地处置办法》' → '闲置土地处置办法'
+        '司法部《关于进一步加强行政复议调解工作推动行政争议实质性化解的指导意见》' → '关于进一步加强行政复议调解工作推动行政争议实质性化解的指导意见'
+        '中华人民共和国行政复议法' → ''（不含《》，返回空）
+    """
+    import re
+    m = re.search(r'\u300a([^\u300b]+)\u300b', name)
+    return m.group(1).strip() if m else ''
+
+
+def _extract_name_from_node_name(node_name: str) -> str:
+    """从节点名提取可能的法规名称。
+
+    示例:
+        '中华人民共和国行政复议法_第十条' → '中华人民共和国行政复议法'
+        '《工伤保险条例》1' → '《工伤保险条例》'
+        '《中华人民共和国行政复议法》第五条' → '《中华人民共和国行政复议法》'
+    """
+    import re
+    name = (node_name or "").strip()
+    if not name:
+        return ""
+    # 去除末尾的条款编号和数字后缀（_分隔或直接连接）
+    name = re.sub(r'[_\s]*第[零一二三四五六七八九十百千万\d]+\s*条.*$', '', name)
+    # 去除末尾的下划线+数字
+    name = re.sub(r'_\d+$', '', name)
+    # 去除末尾的数字后缀
+    name = re.sub(r'\d+$', '', name)
+    return name.strip()

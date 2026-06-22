@@ -23,6 +23,35 @@ CONTROLLED_RISK_TYPES = [
     "企业信用风险",
 ]
 
+RISK_TYPE_INDICATOR_SYSTEM_RULES = [
+    ("产品法律风险", r"(?:\d+[.．、])?产品法律风险(?:体系)?指标"),
+    ("供应链合规风险", r"(?:\d+[.．、])?供应链合规风险(?:体系)?指标"),
+    ("劳动用工法律合规风险", r"(?:\d+[.．、])?劳动用工法律合规风险(?:体系)?指标|(?:\d+[.．、])?劳动法律风险(?:体系)?指标"),
+    ("企业关联方合规风险", r"(?:\d+[.．、])?企业关联方合规风险(?:体系)?指标|(?:\d+[.．、])?关联方合规风险(?:体系)?指标"),
+    ("企业国际化经营合规风险", r"(?:\d+[.．、])?企业国际化经营合规风险(?:体系)?指标|(?:\d+[.．、])?国际化经营风险(?:体系)?指标"),
+    ("企业信用风险", r"(?:\d+[.．、])?企业信用风险(?:体系)?指标|(?:\d+[.．、])?信用风险(?:体系)?指标"),
+]
+
+RISK_POINT_ROOT_TYPE_MAPPING = {
+    "产品法律风险体系指标": "产品法律风险",
+    "产品法律风险指标": "产品法律风险",
+    "信用风险指标": "企业信用风险",
+    "企业信用风险指标体系": "企业信用风险",
+    "劳动用工法律合规风险指标": "劳动用工法律合规风险",
+    "劳动用工法律风险指标": "劳动用工法律合规风险",
+    "人力资源合规风险指标": "劳动用工法律合规风险",
+    "供应链合规风险指标": "供应链合规风险",
+    "企业关联方合规风险指标": "企业关联方合规风险",
+    "关联方合规风险指标": "企业关联方合规风险",
+    "企业国际化经营合规风险指标": "企业国际化经营合规风险",
+    "治理结构与组织合规指标": "劳动用工法律合规风险",
+    "知识产权信用": "产品法律风险",
+    "知识产权合规": "产品法律风险",
+    "知识产权合规风险": "产品法律风险",
+    "侵权应对机制": "产品法律风险",
+    "公司治理与信用管理合规": "企业信用风险",
+}
+
 RISK_TYPE_KEYWORD_RULES = [
     ("劳动用工法律合规风险", r"劳动|用工|员工|工伤|社保|劳务|劳动合同|职业健康|特殊劳动"),
     ("供应链合规风险", r"供应链|供应商|采购|分包|承包|招投标|招标|投标|物流|运输|原材料"),
@@ -45,7 +74,6 @@ def export_case_knowledge_from_graph(
 
     兜底逻辑示例：
     - 如果 LLM 没有补出“案例名称”，就使用 parser 解析出的 case_title。
-    - 如果图谱里没有“关键词”，就使用 parser 从表格/风险点提取的 keywords。
 
     注意：
     本函数不会从原文重新抽取新实体，也不会推理额外关系。
@@ -67,6 +95,8 @@ def export_case_knowledge_from_graph(
     insight_nodes = _nodes_by_type(nodes, "案例启示")
 
     return {
+        "object_type": "case_knowledge",
+
         # case_id 优先使用图谱主节点 ID；没有主节点时退回 parser 结果。
         "case_id": case_node.get("node_id") if case_node else parsed_document.get("case_id", ""),
 
@@ -77,10 +107,9 @@ def export_case_knowledge_from_graph(
             case_node.get("node_name") if case_node else "",
         ),
 
-        # 合规领域一般来自 Markdown 章节标题，也可能由 LLM 放入案例属性。
-        "source_compliance_domain": _first_non_empty(
-            case_props.get("合规领域"),
-            parsed_document.get("compliance_domain"),
+        # source_compliance_domain 是原始合规领域，不等同于六类 risk_types。
+        "source_compliance_domain": _join_inline(
+            _unique_values(case_props.get("原始合规领域"))
         ),
 
         # full_text 保留完整原文，便于后续审计和回溯。
@@ -88,13 +117,15 @@ def export_case_knowledge_from_graph(
 
         # risk_types 是受控字段，只允许输出 CONTROLLED_RISK_TYPES 中的枚举值。
         "risk_types": _normalize_risk_types(
-            [node.get("properties", {}).get("风险类型") for node in risk_nodes],
+            [node.get("properties", {}).get("风险类型") for node in risk_nodes]
+            + _unique_values(case_props.get("风险类型"))
+            + _unique_values(case_props.get("合规领域")),
             case_props=case_props,
             parsed_document=parsed_document,
         ),
 
-        # 关键词优先使用案例节点属性，没有则使用 parser 兜底。
-        "keywords": _unique_values(case_props.get("关键词") or parsed_document.get("keywords") or []),
+        # 关键词只来自图谱案例节点属性，不由 parser 或导出层重新抽取。
+        "keywords": _normalize_keywords(case_props.get("关键词") or []),
 
         # 法规依据 ID 来自法规节点；同时补充依据/违反关系指向的法规节点 ID。
         "related_regulation_ids": _unique_values(
@@ -104,15 +135,19 @@ def export_case_knowledge_from_graph(
         # 指标 ID 只能来自风险点节点属性。原文没有 ID 时这里保持空列表。
         "related_indicator_ids": _unique_values([node.get("properties", {}).get("指标ID") for node in risk_nodes]),
 
-        # 多个分析节点的结论/分析过程用空行拼接，保留可读性。
-        "conclusion": _join_values([node.get("properties", {}).get("分析结论") for node in analysis_nodes]),
-        "analysis": _join_values([node.get("properties", {}).get("分析过程") for node in analysis_nodes]),
+        # 专家结论、分析、处置方案按扩展参考知识保留，默认不直接参与后续模型输入。
+        "conclusion": _text_values(
+            [node.get("properties", {}).get("裁决决定") for node in _nodes_by_type(nodes, "案例结果")]
+        ),
+        "conclusion_usage": "参考知识，不直接参与后续模型输入",
+        "analysis": _text_values([node.get("properties", {}).get("分析过程") for node in analysis_nodes]),
+        "analysis_usage": "参考知识，不直接参与后续模型输入",
 
         # 处置方案可来自“处置方案”节点，也可来自“案例启示”节点。
-        "disposal_plan": _join_values(
+        "disposal_plan": _text_values(
             [node.get("properties", {}).get("处置方案内容") for node in disposal_nodes]
-            + [node.get("properties", {}).get("启示提示") for node in insight_nodes]
         ),
+        "disposal_plan_usage": "参考知识，不直接参与后续模型输入",
     }
 
 
@@ -191,15 +226,18 @@ def _normalize_risk_types(
     parsed_document = parsed_document or {}
     candidates: list[Any] = []
     candidates.extend(_unique_values(values))
+    candidates.extend(_unique_values(case_props.get("风险类型")))
     candidates.extend(_unique_values(case_props.get("合规领域")))
-    candidates.extend(_unique_values(parsed_document.get("compliance_domain")))
-    candidates.extend(_unique_values(case_props.get("关键词")))
-    candidates.extend(_unique_values(parsed_document.get("keywords")))
-
     result: list[str] = []
     for candidate in candidates:
         text = str(candidate or "").strip()
         if not text:
+            continue
+        system_risk_types = _map_indicator_system_risk_types(text)
+        for mapped in system_risk_types:
+            if mapped not in result:
+                result.append(mapped)
+        if system_risk_types:
             continue
         if text in CONTROLLED_RISK_TYPES and text not in result:
             result.append(text)
@@ -207,6 +245,82 @@ def _normalize_risk_types(
         mapped = _map_to_controlled_risk_type(text)
         if mapped and mapped not in result:
             result.append(mapped)
+    return result
+
+
+_RISK_POINT_BOOK_TITLE_RE = re.compile(r"《([^》]+)》")
+_RISK_POINT_ROOT_SEPARATORS = {"-", "－", "—", "–", ":", "："}
+
+
+def extract_risk_point_root_types(value: str) -> list[str]:
+    """提取风险点文本中的指标体系根节点标题。
+
+    风险点中可能同时出现指标体系书名号和法规书名号，例如：
+    “《2.产品法律风险体系指标》 - ... 是否按照《安全生产法》要求...”
+    这里仅接受“《...》”后紧接路径分隔符或编号路径起点的标题，避免把法规引用
+    误识别为风险点根节点。
+    """
+
+    text = str(value or "")
+    if not text:
+        return []
+
+    result: list[str] = []
+    for match in _RISK_POINT_BOOK_TITLE_RE.finditer(text):
+        if not _is_risk_point_root_title(text, match.end()):
+            continue
+        title = re.sub(r"\s+", "", match.group(1).strip())
+        if title and title not in result:
+            result.append(title)
+    return result
+
+
+def strip_risk_point_root_order(value: str) -> str:
+    """去除风险点根节点标题前的编号，保留可用于映射六类风险的稳定标题。"""
+
+    text = re.sub(r"\s+", "", str(value or "").strip())
+    return re.sub(r"^\d+(?:\.\d+)*[.．、]?", "", text)
+
+
+def _is_risk_point_root_title(text: str, end_index: int) -> bool:
+    tail = text[end_index:].lstrip()
+    if not tail:
+        return False
+    if tail[0] in _RISK_POINT_ROOT_SEPARATORS:
+        return True
+    return bool(re.match(r"\d+(?:\.\d+)*", tail))
+
+
+def _map_indicator_system_risk_types(value: str) -> list[str]:
+    """从风险点原文中的指标体系名称映射到六类受控风险类型。
+
+    该规则优先级高于语义关键词映射。例如原文出现
+    “《供应链合规风险指标》”，即使指标名称中包含“合同与交易信用”等词，
+    也应优先识别为“供应链合规风险”。
+    """
+
+    raw_text = str(value or "")
+    root_types = extract_risk_point_root_types(raw_text)
+    if root_types:
+        result: list[str] = []
+        for root_type in root_types:
+            mapped = RISK_POINT_ROOT_TYPE_MAPPING.get(strip_risk_point_root_order(root_type), "")
+            if mapped and mapped not in result:
+                result.append(mapped)
+        return result
+
+    text = re.sub(r"\s+", "", raw_text)
+    if not text:
+        return []
+    matches: list[tuple[int, str]] = []
+    for risk_type, pattern in RISK_TYPE_INDICATOR_SYSTEM_RULES:
+        match = re.search(pattern, text)
+        if match:
+            matches.append((match.start(), risk_type))
+    result: list[str] = []
+    for _, risk_type in sorted(matches, key=lambda item: item[0]):
+        if risk_type not in result:
+            result.append(risk_type)
     return result
 
 
@@ -227,6 +341,35 @@ def _join_values(values: list[Any]) -> str:
 
     items = [str(value).strip() for value in _unique_values(values) if str(value).strip()]
     return "\n\n".join(items)
+
+
+def _join_inline(values: Any) -> str:
+    """对多个短标签去重后用中文分号拼接。"""
+
+    return "；".join(str(value).strip() for value in _unique_values(values) if str(value).strip())
+
+
+def _text_values(values: list[Any]) -> list[str]:
+    """输出知识库数组字段，保留顺序并去重。"""
+
+    return [str(value).strip() for value in _unique_values(values) if str(value).strip()]
+
+
+def _normalize_keywords(values: Any) -> list[str]:
+    """清理关键词，避免完整指标路径进入知识库关键词。"""
+
+    result: list[str] = []
+    for value in _unique_values(values):
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if len(text) > 40:
+            continue
+        if " - " in text or re.search(r"\d+\.\d+", text):
+            continue
+        if text not in result:
+            result.append(text)
+    return result
 
 
 def _edge_related_regulation_ids(edges: list[dict[str, Any]]) -> list[str]:

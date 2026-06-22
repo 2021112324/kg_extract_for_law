@@ -81,6 +81,37 @@ def _to_str_list(val) -> List[str]:
     return [str(val)]
 
 
+# 版本后缀正则：匹配末尾的 (2010修订)（2023年修正）(试行)（修正部分）等
+_VERSION_SUFFIX_RE = re.compile(
+    r'[\(（]'
+    r'(?:\d{4}\s*年?\s*(?:修订|修正)|试行|修正部分|暂行)'
+    r'[\)）]$'
+)
+
+
+def _extract_bookmark_content(name: str) -> str:
+    """从名称中提取《》之间的内容，丢弃外部发文机关前缀。
+
+    示例:
+        '原国土资源部《闲置土地处置办法》' → '闲置土地处置办法'
+        '司法部《关于进一步加强行政复议调解工作推动行政争议实质性化解的指导意见》' → '关于进一步加强行政复议调解工作推动行政争议实质性化解的指导意见'
+        '中华人民共和国行政复议法' → ''（不含《》，返回空）
+    """
+    m = re.search(r'\u300a([^\u300b]+)\u300b', name)
+    return m.group(1).strip() if m else ''
+
+
+def _strip_version_suffix(name: str) -> str:
+    """去除法规名称末尾的版本后缀。
+
+    示例:
+        '工伤保险条例(2010修订)' → '工伤保险条例'
+        '中华人民共和国行政复议法(2023修订)' → '中华人民共和国行政复议法'
+        '网络预约出租汽车经营服务管理暂行办法(2022修正)' → '网络预约出租汽车经营服务管理暂行办法'
+    """
+    return _VERSION_SUFFIX_RE.sub('', name).strip()
+
+
 # ---- 文件名匹配 ----
 
 def match_node_to_file(
@@ -104,10 +135,25 @@ def match_node_to_file(
     search_names: List[str] = []
     fullname = node.properties.get("文件全称", "")
     if fullname:
-        search_names.append(str(fullname))
+        val = str(fullname)
+        search_names.append(val)
+        cleaned = val.strip("\u300a\u300b\u3008\u3009")
+        if cleaned != val:
+            search_names.append(cleaned)
+        # 若名称含《》，提取《》之间的内容（如 原国土资源部《闲置土地处置办法》→ 闲置土地处置办法）
+        inner = _extract_bookmark_content(val)
+        if inner and inner != val and inner != cleaned:
+            search_names.append(inner)
     alias = node.properties.get("文件别名", "")
     if alias:
-        search_names.extend(_to_str_list(alias))
+        for val in _to_str_list(alias):
+            search_names.append(val)
+            cleaned = val.strip("\u300a\u300b\u3008\u3009")
+            if cleaned != val:
+                search_names.append(cleaned)
+            inner = _extract_bookmark_content(val)
+            if inner and inner != val and inner != cleaned:
+                search_names.append(inner)
 
     if not search_names or not target_files:
         return None
@@ -119,9 +165,15 @@ def match_node_to_file(
         fn = str(f.properties.get("文件全称", ""))
         if fn:
             by_fullname[fn] = f
+            stripped_fn = _strip_version_suffix(fn)
+            if stripped_fn != fn and stripped_fn not in by_fullname:
+                by_fullname[stripped_fn] = f
         for a in _to_str_list(f.properties.get("文件别名", "")):
             if a:
                 by_alias[a] = f
+                stripped_a = _strip_version_suffix(a)
+                if stripped_a != a and stripped_a not in by_alias:
+                    by_alias[stripped_a] = f
 
     # 1-2. 精确 + 交叉
     for name in search_names:

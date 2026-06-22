@@ -193,8 +193,10 @@ def validate_result_quality() -> dict[str, Any]:
         }
         for node in nodes
         if node.get("node_type") == "风险点"
-        and (node.get("properties") or {}).get("风险类型")
-        and (node.get("properties") or {}).get("风险类型") not in CONTROLLED_RISK_TYPES
+        and any(
+            risk_type not in CONTROLLED_RISK_TYPES
+            for risk_type in _as_list((node.get("properties") or {}).get("风险类型"))
+        )
     ]
 
     serious_issues: list[str] = []
@@ -388,6 +390,14 @@ def main() -> None:
             indent=2,
         )
     )
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 if __name__ == "__main__":
