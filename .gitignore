@@ -147,3 +147,4 @@ openspec/
 .claude/
 .codex/
 app/infrastructure/information_extraction/compliance_case_v1/reference/
+result2/

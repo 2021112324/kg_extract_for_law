@@ -24,6 +24,12 @@ from app.infrastructure.information_extraction.compliance_case_v1.graph_extract 
     ComplianceCaseGraphExtractor,
 )
 from app.infrastructure.information_extraction.guide_extract.clause_extract import GuideClauseExtractor
+from app.infrastructure.information_extraction.en_law import FormatOneEnLawExtractor
+from app.infrastructure.information_extraction.en_law.neo4j_export import (
+    EnLawNeo4jRunStats,
+    discover_en_law_files,
+    prepare_en_law_kg_for_neo4j,
+)
 from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
 from app.infrastructure.information_extraction.national_standard.graph_extract import NationalStandardGraphExtractor
@@ -84,6 +90,10 @@ class KGService:
         )
         self.clause_en_extractor = ClauseEnExtractor(
             max_concurrent=50
+        )
+        self.format_one_en_law_extractor = FormatOneEnLawExtractor(
+            max_concurrent=int(os.getenv("EN_LAW_SERVICE_MAX_CONCURRENT", "1")),
+            lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
         )
         self.litigation_extractor = CaseExtractor(
             max_concurrent=50
@@ -2080,106 +2090,160 @@ class KGService:
             db: Session,
     ):
         """
-        从本地目录提取英文法条知识图谱。
+        从本地目录提取格式一英文法规知识图谱，并保存至 Neo4j。
 
         该方法与 clause_extract_by_local_dir 的流程一致，区别是：
-        1. 使用 app.infrastructure.information_extraction.law_en_extract 下的 ClauseEnExtractor；
-        2. 输出的节点类型、关系类型和属性名均为英文；
-        3. 适用于英文法律、法规、法典、行政命令、条例等文本。
+        1. 使用 app.infrastructure.information_extraction.en_law.FormatOneEnLawExtractor；
+        2. 输出节点类型、关系类型和大部分属性名为英文；
+        3. 入库前会删除行号、原文兜底全文、嵌套审查字段等不适合 Neo4j 的属性；
+        4. 正式抽取时统计抽取错误、入库错误、文件处理错误、弱警告和强警告。
 
         :param clause_file_dir: 英文法条文件夹路径
         :param if_del_task: 合并子图后是否删除 task 子图
         :param db: 数据库会话
         :return:
         """
-        # 检验参数
-        clause_file_dir = clause_file_dir.replace('\\', '/')
+        clause_file_dir = str(clause_file_dir).replace('\\', '/')
         if not os.path.exists(clause_file_dir):
             raise Exception(f"文件目录不存在: {clause_file_dir}")
         if not os.path.isdir(clause_file_dir):
             raise Exception(f"文件目录不是目录: {clause_file_dir}")
+
+        input_root = Path(clause_file_dir)
+        input_files = discover_en_law_files(input_root)
+        if not input_files:
+            raise Exception(f"未发现可抽取的英文法规文件，目录下需包含 .md 或 .txt: {clause_file_dir}")
+
         new_kg = KGCreate(
-            name=clause_file_dir.split("/")[-1],
-            description="英文法条知识图谱",
+            name=input_root.name,
+            description="格式一英文法规知识图谱",
         )
-        kg_result = await kg_service.create_kg(new_kg, db)
+        kg_result = await self.create_kg(new_kg, db)
         kg_id = kg_result.get("data").get("id")
         kg_graph_name = kg_result.get("data").get("graph_name")
-        files = os.listdir(clause_file_dir)
+
+        run_stats = EnLawNeo4jRunStats(total_files=len(input_files))
         error_files = []
-        # 方案一：一个文件一个文件地抽取英文法条图谱，方便每个文件对应一个 task 子图。
-        for file in files:
+        success_count = 0
+
+        for input_file in input_files:
+            relative_name = input_file.relative_to(input_root).as_posix()
+            graph_name = generate_unique_name("en_law_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=input_file.stem,
+                description="格式一英文法规知识图谱抽取任务",
+                prompt="",
+                parameters={"input_path": str(input_file), "relative_path": relative_name},
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
             try:
-                file_path = os.path.join(clause_file_dir, file)
-                filename = file.split(".")[0]
-                # 目前只处理 Markdown 和纯文本文件。
-                if file.endswith('.md') or file.endswith('.txt'):
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        graph_name = generate_unique_name(f"{kg_result.get('data').get('name')}_task")
-                        new_task = KGExtractionTask(
-                            kg_id=kg_id,
-                            name=filename,
-                            description="英文法条抽取任务",
-                            prompt="",
-                            parameters={},
-                            graph_name=graph_name,
-                            status=1,
-                        )
-                        db.add(new_task)
-                        db.flush()
-                        db.commit()
-                        db.refresh(new_task)
-                        # 提取英文法条知识图谱。
-                        try:
-                            clause_kg = await self.clause_en_extractor.extract_clauses(
-                                filename=filename,
-                                text=content
-                            )
-                        except Exception as e:
-                            new_task.status = 4
-                            db.add(new_task)
-                            db.commit()
-                            logging.error(f"{file}英文法条图谱抽取时出现问题，请检查！" + str(e))
-                            raise Exception(f"{file}英文法条图谱抽取时出现问题，请检查！" + str(e))
-                        # 保存英文法条知识图谱到当前 task 子图。
-                        try:
-                            self.graph_storage.connect()
-                            self.graph_storage.add_subgraph_with_merge(clause_kg, graph_name, "DomainLevel")
-                            self.graph_storage.disconnect()
-                        except Exception as e:
-                            new_task.status = 4
-                            db.add(new_task)
-                            db.commit()
-                            logging.error(f"{file}英文法条图谱保存时出现问题，请检查！" + str(e))
-                            raise Exception(f"{file}英文法条图谱保存时出现问题，请检查！" + str(e))
-                        new_task.status = 2
-                        db.add(new_task)
-                        db.commit()
-                        db.refresh(new_task)
+                logging.info(f"格式一英文法规图谱抽取开始: {relative_name}")
+                try:
+                    clause_kg = await self.format_one_en_law_extractor.extract_file_to_kg(
+                        str(input_file),
+                        run_llm=True,
+                        output_dir=None,
+                    )
+                except Exception as e:
+                    run_stats.add_extraction_error(relative_name, str(e))
+                    raise Exception(f"{relative_name}英文法规图谱抽取时出现问题，请检查！{str(e)}")
+
+                run_stats.add_kg_warnings(relative_name, clause_kg)
+                neo4j_kg = prepare_en_law_kg_for_neo4j(clause_kg)
+                if not neo4j_kg.get("nodes"):
+                    raise Exception("英文法规图谱节点为空")
+
+                try:
+                    self.graph_storage.connect()
+                    saved = self.graph_storage.add_subgraph_with_merge(
+                        neo4j_kg,
+                        graph_name,
+                        "DomainLevel",
+                        filename=relative_name,
+                    )
+                    self.graph_storage.disconnect()
+                    if not saved:
+                        raise Exception("英文法规图谱保存到 Neo4j 失败")
+                except Exception as e:
+                    try:
+                        self.graph_storage.disconnect()
+                    except Exception:
+                        pass
+                    run_stats.add_storage_error(relative_name, str(e))
+                    raise Exception(f"{relative_name}英文法规图谱保存时出现问题，请检查！{str(e)}")
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                run_stats.success_files += 1
+                success_count += 1
+                logging.info(
+                    "格式一英文法规图谱抽取完成: %s, nodes=%s, edges=%s",
+                    relative_name,
+                    len(neo4j_kg.get("nodes") or []),
+                    len(neo4j_kg.get("edges") or []),
+                )
             except Exception as e:
-                logging.error(f"{file}英文法条文件处理出现问题，请检查！" + str(e))
-                error_files.append((file, str(e)))
-        # 获取 kg_id 下所有成功 task 的 graph_name，并合并到目录级总图谱。
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                if "图谱抽取时出现问题" not in str(e) and "图谱保存时出现问题" not in str(e):
+                    run_stats.add_file_processing_error(relative_name, str(e))
+                logging.error(f"{relative_name}英文法规文件处理出现问题，请检查！{str(e)}")
+                error_files.append((relative_name, str(e)))
+
         tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
         graph_names = [task.graph_name for task in tasks]
         try:
             for graph_name in graph_names:
                 self.graph_storage.connect()
-                logging.info(f"正在处理英文法条图谱 {graph_name}")
+                logging.info(f"正在合并格式一英文法规图谱 {graph_name} -> {kg_graph_name}")
                 self.graph_storage.merge_graphs(graph_name, kg_graph_name)
                 if if_del_task:
                     self.graph_storage.delete_subgraph(graph_name)
-                logging.info(f"英文法条图谱 {graph_name} 处理完成")
+                logging.info(f"格式一英文法规图谱 {graph_name} 合并完成")
                 self.graph_storage.disconnect()
-            logging.info("所有英文法条图谱处理完成")
+            logging.info("所有格式一英文法规图谱处理完成")
         except Exception as e:
-            logging.error(f"英文法条图谱合并时出现问题，请检查！" + str(e))
-            raise Exception(f"英文法条图谱合并时出现问题，请检查！" + str(e))
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error(f"格式一英文法规图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"格式一英文法规图谱合并时出现问题，请检查！" + str(e))
+
         for file, error in error_files:
-            logging.error(f"{file}英文法条文件处理出现问题，请检查！" + error)
-        await self.clause_en_extractor.logging_result_stats()
-        return True
+            logging.error(f"{file}英文法规文件处理出现问题，请检查！" + error)
+        logging.info(f"📄✅：错误数: {run_stats.error}")
+        logging.info(f"📄✅：抽取错误数: {run_stats.extraction_error}")
+        logging.info(f"📄✅：入库错误数: {run_stats.storage_error}")
+        logging.info(f"📄✅：文件处理错误数: {run_stats.file_processing_error}")
+        logging.info(f"📄✅：弱警告数: {run_stats.warning}")
+        logging.info(f"📄✅：强警告数: {run_stats.strong_warning}")
+        await self.format_one_en_law_extractor.logging_result_stats()
+        if success_count == 0:
+            raise Exception("英文法规目录下没有成功入库的图谱")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(input_files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+            "stats": run_stats.to_dict(),
+        }
 
     async def national_standard_extract_by_local_dir(
             self,
@@ -2783,7 +2847,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"e1_{source_name}_{generate_snowflake_string_id()}"
+    return f"e5_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()
