@@ -45,8 +45,9 @@ NATIONAL_STANDARD_MINIO_PREFIX = os.getenv("NATIONAL_STANDARD_MINIO_PREFIX", "�
 # 主要用于文件封面、引用文件章节和表格中识别 GB、GB/T、HJ、ISO 等标准编号。
 # 示例：GB 15258—2009、GB/T 16483、HJ 75、ISO 14001。
 STANDARD_NO_RE = re.compile(
-    r"\b(?P<code>GB(?:/T|/Z)?|HJ(?:/T)?|ISO|IEC|YY(?:/T)?|NB|DL|JB|AQ|SN|QB|HG|CJ|CJJ)"
-    r"\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4})?\b",
+    r"\b(?P<code>GB(?:/T|/Z)?|HJ(?:/T)?|SJ(?:/T)?|ISO|IEC|YY(?:/T)?|NB|DL|JB|AQ|SN|QB|HG|CJ|CJJ)"
+    r"\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4}|:\d{4})?"
+    r"(?:/(?:ISO|IEC)\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4}|:\d{4})?)?\b",
     re.IGNORECASE,
 )
 
@@ -54,10 +55,13 @@ STANDARD_NO_RE = re.compile(
 # 与 STANDARD_NO_RE 不同，这里要求整行以标准编号开头，并把编号后的内容作为标准名称候选。
 # 示例：GB 12268 危险货物品名表。
 REFERENCE_RE = re.compile(
-    r"^(?P<number>(?:GB(?:/T|/Z)?|HJ(?:/T)?|ISO|IEC|YY(?:/T)?|NB|DL|JB|AQ|SN|QB|HG|CJ|CJJ)"
-    r"\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4})?)\s*(?P<name>.*)$",
+    r"^(?P<number>(?:GB(?:/T|/Z)?|HJ(?:/T)?|SJ(?:/T)?|ISO|IEC|YY(?:/T)?|NB|DL|JB|AQ|SN|QB|HG|CJ|CJJ)"
+    r"\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4}|:\d{4})?"
+    r"(?:/(?:ISO|IEC)\s*[A-Z0-9./-]*\s*\d+(?:[—-]\d{4}|:\d{4})?)?)\s*(?P<name>.*)$",
     re.IGNORECASE,
 )
+
+CURRENT_STANDARD_NO_PREFIXES = {"GB", "GB/T", "GB/Z", "HJ", "HJ/T", "SJ", "SJ/T"}
 
 # 日期识别规则。
 # 支持 2009-06-21、2009年6月21日、2009.06.21 等常见写法。
@@ -328,6 +332,9 @@ class NationalStandardExtractor:
 
         # 目录输入时，按 V2 规则只寻找 Markdown/TXT 主输入。
         json_files = list(path.glob("*.json"))
+        source["content_list"] = self._first_existing(
+            [*path.glob("*content_list.json"), *path.glob("*content_list_v2.json")]
+        )
         source["reviewed_md"] = self._first_existing(
             [
                 path / "full_fixed.md",
@@ -736,10 +743,12 @@ class NationalStandardExtractor:
                 break
             cover_lines.extend(_line_list(block.text))
 
+        content_list_cover_lines = self._load_content_list_cover_lines(source.get("content_list") if source else None)
+        if content_list_cover_lines:
+            cover_lines = list(dict.fromkeys(content_list_cover_lines + cover_lines))
         cover_text = "\n".join(cover_lines)
 
-        # dict.fromkeys 用于在保持顺序的同时去重。
-        standard_numbers = list(dict.fromkeys(match.group(0).strip() for match in STANDARD_NO_RE.finditer(cover_text)))
+        standard_numbers = self._rank_cover_standard_numbers(cover_lines)
         dates = [match.group("date") for match in DATE_RE.finditer(cover_text)]
 
         # 优先从带“发布/实施”关键词的行中找日期；找不到时退化为按出现顺序取日期。
@@ -752,6 +761,7 @@ class NationalStandardExtractor:
             "标准中文名称": chinese_name,
             "标准英文名称": english_name,
             "标准编号": standard_numbers[0] if standard_numbers else "",
+            "标准编号候选": standard_numbers,
             "合规风险类型": compliance_risk_type,
             "标准性质": self._guess_standard_type(standard_numbers[0] if standard_numbers else "", cover_text),
             "发布日期": release_date,
@@ -764,6 +774,84 @@ class NationalStandardExtractor:
             "适用范围摘要": "",
             "封面文本": cover_text,
         }
+
+    @staticmethod
+    def _rank_cover_standard_numbers(lines: list[str]) -> list[str]:
+        """按“当前标准编号”可能性排序封面区域中的标准号。
+
+        轻量规则只用于候选排序：优先 GB/GB/T/HJ/SJ 等当前标准前缀，
+        降权“代替/采用/引用”等上下文，避免把旧版号或 ISO/IEC 采用号
+        排在当前标准号前面。
+        """
+        reference_context_re = re.compile(r"(规范性引用|引用文件|参考文献)")
+        candidates: list[tuple[int, int, str]] = []
+        seen: set[str] = set()
+        for line_index, raw_line in enumerate(lines):
+            line = _clean_text(raw_line)
+            if not line:
+                continue
+            for match in STANDARD_NO_RE.finditer(line):
+                number = re.sub(r"\s+", " ", match.group(0).strip())
+                if not number or number in seen:
+                    continue
+                code = match.group("code").upper()
+                before_number = line[: match.start()]
+                bad_context = bool(reference_context_re.search(line))
+                bad_context = bad_context or bool(re.search(r"(代替|替代|废止)", before_number))
+                bad_context = bad_context or bool(code in {"ISO", "IEC"} and re.search(r"(采用|等同|修改|IDT|MOD|NEQ)", line, re.IGNORECASE))
+                if bad_context:
+                    continue
+                seen.add(number)
+                score = 0
+                if code in CURRENT_STANDARD_NO_PREFIXES:
+                    score += 100
+                elif code in {"ISO", "IEC"}:
+                    score += 10
+                if re.search(r"[—-]\d{4}\b", number):
+                    score += 20
+                if line == number or line.startswith(number):
+                    score += 20
+                if re.search(r"(发布|实施|ICS|CCS)", line):
+                    score -= 20
+                # 封面当前标准号通常靠前，位置越靠前得分越高。
+                score -= min(line_index, 60)
+                candidates.append((score, line_index, number))
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        return [number for _, _, number in candidates]
+
+    @staticmethod
+    def _load_content_list_cover_lines(path: Path | None, max_items: int = 180) -> list[str]:
+        """读取 content_list 前部文本，作为文件基础信息候选补充。
+
+        V2 正文结构仍以 Markdown 为主输入；这里仅用于补足封面标准号等
+        full.md 可能遗漏的文件级元数据。
+        """
+        if not path:
+            return []
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        items = data if isinstance(data, list) else data.get("content_list") or data.get("blocks") or data.get("items") or []
+        lines: list[str] = []
+        for item in items[:max_items] if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("content") or ""
+            if isinstance(text, str):
+                lines.extend(_line_list(text))
+            elif isinstance(text, list):
+                for value in text:
+                    if isinstance(value, str):
+                        lines.extend(_line_list(value))
+        cleaned: list[str] = []
+        for line in lines:
+            if len(cleaned) >= max_items:
+                break
+            text = _clean_text(line)
+            if text:
+                cleaned.append(text)
+        return cleaned
 
     @staticmethod
     def _read_compliance_risk_type(source: dict[str, Path | None]) -> str:
@@ -1929,10 +2017,16 @@ class NationalStandardExtractor:
         cleaned = [_clean_text(line) for line in lines if _clean_text(line)]
         cn_name = ""
         en_name = ""
-        for line in cleaned:
+        for index, line in enumerate(cleaned):
             if re.search(r"[\u4e00-\u9fff]", line) and not STANDARD_NO_RE.search(line):
                 if 4 <= len(line) <= 80 and not re.search(r"(发布|实施|ICS|CCS|中华人民共和国|国家市场监督)", line):
-                    cn_name = line
+                    cn_parts = [line]
+                    for next_line in cleaned[index + 1 : index + 3]:
+                        if NationalStandardExtractor._is_title_continuation_line(next_line):
+                            cn_parts.append(next_line)
+                        else:
+                            break
+                    cn_name = " ".join(cn_parts)
                     break
         for line in cleaned:
             if re.search(r"[A-Za-z]", line) and not re.search(r"[\u4e00-\u9fff]", line) and not STANDARD_NO_RE.search(line):
@@ -1945,6 +2039,17 @@ class NationalStandardExtractor:
                     cn_name = cleaned[index - 1]
                     break
         return cn_name, en_name
+
+    @staticmethod
+    def _is_title_continuation_line(line: str) -> bool:
+        """判断封面相邻行是否是中文标准标题的高确定性续行。"""
+        if not line or STANDARD_NO_RE.search(line):
+            return False
+        if not re.search(r"[\u4e00-\u9fff]", line):
+            return False
+        if re.search(r"(发布|实施|ICS|CCS|中华人民共和国|国家市场监督|本电子版)", line):
+            return False
+        return bool(re.search(r"^第\s*\d+(?:[-.]\d+)?\s*部分", line))
 
     @staticmethod
     def _guess_standard_type(standard_number: str, cover_text: str) -> str:
