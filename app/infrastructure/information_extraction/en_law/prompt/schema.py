@@ -125,30 +125,30 @@ values must be English relation names, such as "BASED_ON".
 #
 # ## ProvisionUnit / 条文单元
 # ProvisionUnit：Article 内部可被引用、可独立落库或可表达完整规则的 paragraph、point、subpoint、dash item。
-# unit_number：稳定结构编号，例如 Article 7(1)、Article 7(1)(a)。
+# unit_number：稳定结构编号，必须锚定当前输入 Article 的编号；正文中引用的其他 Article 不能作为本单元编号。
 # unit_level：结构层级，例如 paragraph、point、subpoint、dash_item。
 # unit_content：条文单元完整文本；若下级项依赖上级引导语，应补入必要上下文。
 # unit_purpose：该单元的明确目的或主题，不明显时可留空。
 # applicable_industry：该单元适用行业枚举，优先依据本单元及必要上文判断。
 # compliance_domains：该单元涉及的合规域数组，要求来自明确监管对象、义务或禁止事项。
 # economic_industries：该单元适用经济行业数组，不能为空，一般适用时为 ["General"]。
-# function_type：条文功能类型，只能选 prohibition、mandatory、optional、other。
+# function_type：条文功能类型，只能选 prohibition、mandatory、optional；无法抽取时留空，不输出 other。
 # function_type 注解：shall not/must not/banned/excluded 属于 prohibition。
 # function_type 注解：shall/must/required/obligation/procedure 属于 mandatory。
 # function_type 注解：may/permission/right/authorization 属于 optional。
-# function_type 注解：无法可靠归入前三类时选择 other，并在 other_information 中说明原始语义。
+# function_type 注解：other 只允许后处理兜底生成，不允许 LLM 主动输出。
 # quantitative_feature：量化特征，只能是 Qualitative 或 Quantitative，不输出 Mixed。
 # quantitative_feature 注解：有金额、比例、期限、次数、倍数、范围、阈值等可核验数字条件时为 Quantitative。
 # quantitative_feature 注解：只有行为、原则、义务、权利、禁止事项而无具体数字条件时为 Qualitative。
-# quantitative_condition：量化条件对象或 null，不是风险分值，也不是模型自评得分。
-# quantitative_condition.raw_text：量化条件的原文短语或句子，应保留原始表达。
-# quantitative_condition.quantitative_value_type：量化值类型，如 Amount、Ratio、Time Limit、Frequency、Multiplier、Other。
-# quantitative_condition.minimum_value：下限数值，没有下限时为 null。
-# quantitative_condition.maximum_value：上限数值，没有上限时为 null。
-# quantitative_condition.unit：原文明示单位，例如 EUR、day、month、year、%、times、multiple。
-# quantitative_condition.constraint_relation：约束关系，如 Range、Lower Bound、Upper Bound、Equal、Other。
-# quantitative_condition 联动规则：若该对象非空，quantitative_feature 必须为 Quantitative。
-# quantitative_condition 联动规则：若没有可核验量化条件，该对象必须为 null，quantitative_feature 必须为 Qualitative。
+# quantitative_indicator：量化指标对象或 null，不是风险分值，也不是模型自评得分。
+# quantitative_indicator.raw_text：量化条件的原文短语或句子，应保留原始表达。
+# quantitative_indicator.value_type：量化值类型，如 Amount、Ratio、Time Limit、Frequency、Multiplier、Other。
+# quantitative_indicator.min：下限数值，没有下限时为 null。
+# quantitative_indicator.max：上限数值，没有上限时为 null。
+# quantitative_indicator.unit：原文明示单位，例如 EUR、day、month、year、%、times、multiple。
+# quantitative_indicator.relation：约束关系，如 Range、Lower Bound、Upper Bound、Equal、Other。
+# quantitative_indicator 联动规则：若该对象非空，quantitative_feature 必须为 Quantitative。
+# quantitative_indicator 联动规则：若没有可核验量化条件，该对象必须为 null，quantitative_feature 必须为 Qualitative。
 # applicable_subject：被该单元直接规制的主体，如 operator、manufacturer、provider、competent authority。
 # responsibility_role：主体在规则中的责任角色，如 responsible operator、supervisory body。
 # conduct_description：被要求、允许或禁止的行为描述，是条文义务抽取的核心字段。
@@ -199,16 +199,16 @@ LegalProvision entity for the input Article.
 A stable paragraph, point, subpoint or item inside the Article that can be cited
 or understood as a legal rule unit. Preserve parent context when needed.
 ### Properties
-- unit_number: stable number such as Article 7(1), Article 7(1)(a) or the provided structural number
+- unit_number: stable structural number of this unit. Use only the current input Article number as the Article prefix. If the input Article is Article 20, units inside it must be numbered as Article 20(1), Article 20(1)(a), Article 20(2), etc. Do not use Article numbers that only appear in citations, cross-references, amended text, examples, or referenced procedures. If the local structure is clear but the full number is not written in the source, combine the current Article number with the local paragraph/point marker. If no reliable local marker exists, use the current Article number plus a short descriptive suffix rather than borrowing another Article number.
 - unit_level: paragraph, point, subpoint, dash_item or other
 - unit_content: complete text of the unit, including inherited lead-in if needed
 - unit_purpose: concise topic or purpose of this unit if explicit
 - applicable_industry: choose one from [Manufacturing, Electronic Information Industry, General, Other]. Use Manufacturing if the unit clearly applies to manufacturing but not electronic information; use Electronic Information Industry if it clearly applies to electronic information but not manufacturing; use General if it applies to both or is generally applicable; use Other if it is unrelated to both manufacturing and electronic information.
 - compliance_domains: string array. Compliance management domains, risk domains or regulatory topics explicitly reflected by the unit, such as product quality, data security, intellectual property, environmental protection, labor employment or supply chain management. Use an empty array if no compliance domain is explicit.
 - economic_industries: string array. Applicable national economic industry categories, preferably at a consistent level comparable to GB/T 4754 categories. If the unit targets one or more specific industries, output the specific categories. If it is generally applicable and not targeted at any specific industry, output ["General"]. Do not combine "General" with specific industries. Do not leave this property blank or missing.
-- function_type: choose one from [prohibition, mandatory, optional, other]. Prohibition covers "shall not", "must not", banned or excluded conduct. Mandatory covers "shall", "must", required obligations or compulsory procedures. Optional covers "may", rights, authorizations or permissions. If the text cannot be reliably classified into the first three values, choose other and explain the original nuance in other_information.
+- function_type: choose one from [prohibition, mandatory, optional]. Prohibition covers "shall not", "must not", banned or excluded conduct. Mandatory covers "shall", "must", required obligations, definitions that set binding legal meaning, compulsory procedures or required compliance conditions. Optional covers "may", rights, authorizations or permissions. Do not output other. If the function type cannot be extracted, leave this property empty.
 - quantitative_feature: choose one from [Qualitative, Quantitative]. Qualitative means the unit regulates conduct patterns, rights, obligations, principles or requirements without concrete numbers. Quantitative means it contains concrete numbers, amounts, deadlines, ratios, ranges, frequencies, multipliers or other measurable elements. Do not output Mixed.
-- quantitative_condition: structured object or null. Use this only for computable or verifiable quantitative constraints in the original text, such as amounts, ratios, deadlines, frequencies, multipliers or numerical ranges. It is not a risk score. If no quantifiable condition exists, this must be null and quantitative_feature must be Qualitative. If a quantifiable condition exists, preserve the original phrase and structure it as {{"raw_text":"original phrase or sentence","quantitative_value_type":"Amount/Ratio/Time Limit/Frequency/Multiplier/Other","minimum_value":number or null,"maximum_value":number or null,"unit":"EUR/day/month/year/%/times/multiple or other explicit unit","constraint_relation":"Range/Lower Bound/Upper Bound/Equal/Other"}}. If quantitative_condition is a non-empty object, quantitative_feature must be Quantitative.
+- quantitative_indicator: structured object or null. Use this only for computable or verifiable quantitative constraints in the original text, such as amounts, ratios, deadlines, frequencies, multipliers or numerical ranges. It is not a risk score. If no quantifiable condition exists, this must be null and quantitative_feature must be Qualitative. If a quantifiable condition exists, preserve the original phrase and structure it exactly as {{"raw_text":"original phrase or sentence","value_type":"Amount/Ratio/Time Limit/Frequency/Multiplier/Other","min":number or null,"max":number or null,"unit":"EUR/day/month/year/%/times/multiple or other explicit unit","relation":"Range/Lower Bound/Upper Bound/Equal/Other"}}. Do not output quantitative_condition, quantitative_value_type, minimum_value, maximum_value or constraint_relation. If quantitative_indicator is a non-empty object, quantitative_feature must be Quantitative.
 - applicable_subject: subject directly governed by the unit
 - responsibility_role: role of the subject in the unit, such as responsible operator, competent authority, supervisory body or other explicit role
 - conduct_description: required, permitted or prohibited conduct

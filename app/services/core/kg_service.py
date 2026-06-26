@@ -92,7 +92,7 @@ class KGService:
             max_concurrent=50
         )
         self.format_one_en_law_extractor = FormatOneEnLawExtractor(
-            max_concurrent=int(os.getenv("EN_LAW_SERVICE_MAX_CONCURRENT", "1")),
+            max_concurrent=50,
             lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
         )
         self.litigation_extractor = CaseExtractor(
@@ -2878,7 +2878,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"e5_{source_name}_{generate_snowflake_string_id()}"
+    return f"e6_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

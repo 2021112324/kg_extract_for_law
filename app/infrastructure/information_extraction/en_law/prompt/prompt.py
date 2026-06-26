@@ -134,7 +134,7 @@ Their values must still be English.
 # - ProvisionUnit 应尽量对应可引用、可落库、可追溯的 paragraph/point/subpoint。
 # - 当 point 或 subpoint 依赖上级 lead-in 才能表达完整义务时，要在 unit_content 中保留必要上文。
 # - Citation 只抽文本中明示的法律引用，不把普通名词、机构名或政策背景误当引用。
-# - quantitative_feature 与 quantitative_condition 必须联动：无可核验数字条件时为 Qualitative + null。
+# - quantitative_feature 与 quantitative_indicator 必须联动：无可核验数字条件时为 Qualitative + null。
 # - 数字、期限、比例、金额、倍数、公式和单位属于重要合规约束，应保留原文短语。
 # - 修订型 Article 只在原文明确 amend/replace/insert/delete/repeal 时填写 amendment_target/action。
 #
@@ -163,13 +163,20 @@ Annex content or the full Whereas section.
 4. Extract Citation entities only for citations explicitly present in the text.
 5. Extract applicable_industry, compliance_domains and economic_industries from
    explicit scope or regulated subject text.
-6. Extract quantitative feature and quantitative condition according to the
+6. Extract quantitative_feature and quantitative_indicator according to the
    linked rules in the schema.
 7. Ignore footnote/source markers such as $^{{1}}$ or ( $^{{8}}$ ).
 8. Preserve formulas, units, thresholds and chemical expressions as text; do not
    try to mathematically solve formulas.
 9. Do not invent legal consequences, dates, subjects, citations, industries,
-   quantitative conditions or amendment targets.
+   quantitative indicators or amendment targets.
+10. For ProvisionUnit.unit_number, use the current input Article number as the
+    only Article prefix. Do not use Article numbers that appear only in
+    citations, cross-references, amended provisions, referenced procedures or
+    examples.
+11. Never copy names, text, entities, numbers or attributes from the Examples
+    section into the answer. Extract only facts that are explicitly present in
+    the current input Article.
 
 # Parser Compatibility Rule
 For relation records only, use extraction class exactly "{RELATION_CLASS}" and

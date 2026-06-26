@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ NODE_PROPERTIES_EXCLUDED_FROM_NEO4J = {
     "quantitative_condition",
 }
 
-# 边上的 source 目前只说明该边是否由 fallback 逻辑补充，属于构图审查信息，不作为业务关系属性入库。
+# 边上的 source 目前只说明该边是否由构图补充逻辑生成，属于构图审查信息，不作为业务关系属性入库。
 EDGE_PROPERTIES_EXCLUDED_FROM_NEO4J = {
     "source",
 }
@@ -118,6 +119,9 @@ def _clean_properties(
         if key in excluded_keys:
             continue
         if value in (None, "", [], {}):
+            continue
+        if key == "quantitative_indicator" and isinstance(value, (dict, list)):
+            cleaned[key] = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             continue
         cleaned[key] = value
     return cleaned

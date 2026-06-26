@@ -9,7 +9,7 @@
 
 使用方式：
 - 只测试切分：调用 `split_file()` 或 `split_text()`。
-- 跳过 LLM 生成 fallback 图谱：调用 `extract_file_to_kg(..., run_llm=False)`。
+- 跳过 LLM 只生成文件级图谱并记录 Article 缺失错误：调用 `extract_file_to_kg(..., run_llm=False)`。
 - 完整抽取：调用 `extract_file_to_kg(..., run_llm=True)`。
 """
 
@@ -33,6 +33,7 @@ from app.infrastructure.information_extraction.en_law.config import (
     EN_LAW_BATCH_LENGTH,
     EN_LAW_MAX_CHAR_BUFFER,
     EN_LAW_MAX_CONCURRENT,
+    EN_LAW_MAX_TOKENS,
     EN_LAW_MAX_WORKERS,
     EN_LAW_MODEL,
     EN_LAW_MODEL_API_KEY,
@@ -152,7 +153,7 @@ class FormatOneEnLawExtractor:
         """初始化抽取器运行参数。"""
         # Article 级 LLM 抽取的最大并发量。
         self.max_concurrent = max_concurrent
-        # 宽松模式：失败 Article 会进入 fallback 图谱节点，不直接中断整份文件。
+        # 宽松模式：失败 Article 会记录错误并跳过，不生成 fallback 节点。
         self.lenient_mode = lenient_mode
         # 信号量用于限制 asyncio 并发请求数量。
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -175,7 +176,11 @@ class FormatOneEnLawExtractor:
             model_name=EN_LAW_MODEL,
             api_key=EN_LAW_MODEL_API_KEY,
             api_url=EN_LAW_MODEL_API_URL,
-            config={"timeout": EN_LAW_TIMEOUT, "extraction_timeout": EN_LAW_EXTRACTION_TIMEOUT},
+            config={
+                "timeout": EN_LAW_TIMEOUT,
+                "extraction_timeout": EN_LAW_EXTRACTION_TIMEOUT,
+                "max_tokens": EN_LAW_MAX_TOKENS,
+            },
             max_char_buffer=EN_LAW_MAX_CHAR_BUFFER,
             batch_length=EN_LAW_BATCH_LENGTH,
             max_workers=EN_LAW_MAX_WORKERS,
@@ -209,7 +214,7 @@ class FormatOneEnLawExtractor:
         # 格式一数据源是 Markdown 文本，统一按 UTF-8 读取。
         with open(input_path, "r", encoding="utf-8") as file:
             text = file.read()
-        # 文件名会进入 split_result，后续作为图谱 metadata 和 fallback 名称来源。
+        # 文件名会进入 split_result，后续作为图谱 metadata 和错误定位来源。
         result = self.split_text(text, filename=os.path.basename(input_path), include_annex_content=include_annex_content)
         # 如果指定输出目录，则保存 split JSON，便于审查切分结果。
         if output_dir:
@@ -342,7 +347,7 @@ class FormatOneEnLawExtractor:
         # 按 split_result 中 Article 原顺序合并任务结果。
         for article, result in zip(split_result.get("clauses", []), results):
             if isinstance(result, Exception):
-                # 失败时保留原 Article 输入，方便后续 fallback 或人工复查。
+                # 失败时保留原 Article 输入，方便后续错误记录或人工复查。
                 failed_article_results.append(
                     {
                         "article_number": article.get("article_number"),
@@ -359,7 +364,7 @@ class FormatOneEnLawExtractor:
                 # 成功时直接加入结果列表。
                 article_results.append(result)
 
-        # 严格模式下 Article 失败必须中断，避免生成带 fallback 的“伪完整”正式 KG。
+        # 严格模式下 Article 失败必须中断，避免生成缺失 Article 的正式 KG。
         if failed_article_results and not self.lenient_mode:
             failed_numbers = ", ".join(
                 str(item.get("article_number") or item.get("article_heading") or "unknown")
@@ -414,7 +419,7 @@ class FormatOneEnLawExtractor:
         """从法规文本直接抽取最终图谱。"""
         # 第一步：规则切分，得到文件头、Whereas、Article、Annex 等结构。
         split_result = self.split_text(text, filename=filename)
-        # 第二步：可选 LLM 抽取；run_llm=False 时进入离线 fallback 图谱路径。
+        # 第二步：可选 LLM 抽取；run_llm=False 时不生成 Article 级 LLM 知识。
         raw_llm_result = await self.llm_extract_from_split_result(filename, split_result, output_dir) if run_llm else {}
         # 第三步：把规则切分和 LLM 输出合并为图谱节点/边。
         kg = self.build_graph(filename, split_result, raw_llm_result)

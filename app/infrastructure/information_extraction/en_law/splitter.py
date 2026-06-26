@@ -92,6 +92,30 @@ def strip_markdown_heading(line: str) -> str:
     return re.sub(r"^\s*#{1,6}\s*", "", str(line or "").strip()).strip()
 
 
+def _looks_like_inline_article_heading(raw_tail: str) -> bool:
+    """判断 Article 编号同一行后面的文本是否像标题而不是正文引用。"""
+    raw = str(raw_tail or "").strip()
+    if not raw:
+        return True
+    # 标题行不应以括号、逗号等正文延续符号开头，例如 Article 3(5) 或 Article 1, Article 2。
+    if re.match(r"^[,;()]|^\([^)]+\)", raw):
+        return False
+    tail = re.sub(r"^[\s.\-–—:]+", "", raw).strip()
+    if not tail:
+        return True
+    # 真正标题通常较短；长句更可能是正文中的引用、适用说明或修订说明。
+    if len(tail) > 120 or len(tail.split()) > 12:
+        return False
+    # 句号结尾通常表示正文句子，不应作为新 Article 标题。
+    if tail.endswith("."):
+        return False
+    # 标题一般以大写字母或数字开头；小写开头如 "of Directive ..." 多为正文引用延续。
+    first = tail[0]
+    if first.isalpha() and not first.isupper():
+        return False
+    return True
+
+
 def clean_text(text: str) -> str:
     """规范文本空白，同时尽量保留段落边界。"""
     # 先统一换行。
@@ -144,6 +168,8 @@ def match_article(line: str) -> dict[str, str] | None:
     # 去掉 Markdown # 后再匹配 Article。
     match = ARTICLE_RE.match(strip_markdown_heading(line))
     if not match:
+        return None
+    if not _looks_like_inline_article_heading(match.group("tail") or ""):
         return None
     # number 是纯编号，例如 `1` 或 `1a`。
     number = match.group("number")

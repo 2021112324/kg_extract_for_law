@@ -82,3 +82,22 @@ Scope
     assert "no_recitals_detected" in result["warnings"]
     # Article 正文仍应正常识别。
     assert len(result["clauses"]) == 1
+
+
+def test_splitter_keeps_article_references_inside_current_article():
+    """验证正文中的 Article 引用或修订说明不会被误切成新的正文 Article。"""
+    text = """REGULATION (EU) 2023/000 OF THE EUROPEAN PARLIAMENT AND OF THE COUNCIL
+
+Article 140
+Amendment of Directive 1999/45/EC
+Article 14 of Directive 1999/45/EC shall be deleted.
+
+Article 141
+Entry into force
+This Regulation shall enter into force on the twentieth day following that of its publication.
+"""
+
+    result = split_format_one_document(text, filename="amendment.md")
+
+    assert [item["article_number"] for item in result["clauses"]] == ["Article 140", "Article 141"]
+    assert "Article 14 of Directive 1999/45/EC shall be deleted." in result["clauses"][0]["content"]

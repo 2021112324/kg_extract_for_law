@@ -38,13 +38,15 @@ EN_LAW_BATCH_LENGTH = int(os.getenv("EN_LAW_BATCH_LENGTH", "5"))
 EN_LAW_MAX_WORKERS = int(os.getenv("EN_LAW_MAX_WORKERS", "3"))
 # LLM 请求超时时间，单位取决于底层 LangextractConfig 的实现。
 EN_LAW_TIMEOUT = int(os.getenv("EN_LAW_TIMEOUT", "3000"))
+# 单次 LLM 输出最大 token 数；用于缓解 Article 抽取结果过长导致 JSON 截断。
+EN_LAW_MAX_TOKENS = int(os.getenv("EN_LAW_MAX_TOKENS", "48000"))
 # Langextract 外层抽取调用超时时间，单位为秒；正式默认保留长超时，测试时可用环境变量缩短。
 EN_LAW_EXTRACTION_TIMEOUT = int(os.getenv("EN_LAW_EXTRACTION_TIMEOUT", "3600"))
 # Langextract 抽取失败后的重试次数；正式默认沿用参考实现的 5 次，测试时可通过环境变量降低。
 EN_LAW_MAX_RETRIES = int(os.getenv("EN_LAW_MAX_RETRIES", "5"))
 # Article 级并发抽取上限；避免一次性提交过多 Article 请求。
 EN_LAW_MAX_CONCURRENT = int(os.getenv("EN_LAW_MAX_CONCURRENT", "5"))
-# 宽松模式开关；开启时 LLM 某些 Article 失败仍会生成 fallback Article 节点。
+# 宽松模式开关；开启时 LLM 某些 Article 失败会记录错误并继续，不生成 fallback Article 节点。
 EN_LAW_LENIENT_MODE = os.getenv("EN_LAW_LENIENT_MODE", "true").lower() in {"1", "true", "yes"}
 
 # 文首“合规风险类型”允许值；用于校验文件头中给出的中文业务分类是否属于预期范围。

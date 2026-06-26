@@ -9,7 +9,7 @@
 - 创建 Neo4j 友好的节点 ID。
 - 构建 LegalDocument、LegalProvision、ProvisionUnit、Citation 等节点。
 - 构建 CONTAINS、BASED_ON、CITES 等关系。
-- 在 LLM 失败时生成 fallback Article 节点，保证图谱结构不断裂。
+- Article 节点由一阶段规则稳定生成，LLM 仅补充语义属性和关系。
 - 尽量把同文件内部 Citation 解析到已有 Article 或 ProvisionUnit 节点。
 """
 
@@ -24,6 +24,8 @@ from typing import Any
 from app.infrastructure.string_utils.id_tool import generate_hex_uuid
 # 项目公共 Neo4j 清洗工具，用于避免节点 ID 中出现特殊控制字符。
 from app.infrastructure.string_utils.str_clean import clean_string_for_neo4j_extended
+# 合规风险类型枚举，用于把文首中文风险类型拆成稳定数组。
+from app.infrastructure.information_extraction.en_law.config import RISK_TYPE_VALUES
 
 
 # Langextract 兼容关系实体类名；schema/prompt 中也使用同一个值。
@@ -46,6 +48,7 @@ CITATION = "Citation"
 SPLITTER_LOCKED_PROVISION_FIELDS = {
     "provision_number",
     "provision_heading",
+    "provision_content",
     "classification_context",
     "classification_title",
     "classification_chapter",
@@ -58,11 +61,20 @@ SPLITTER_LOCKED_PROVISION_FIELDS = {
     "part",
     "line_start",
     "line_end",
+    "content_line_start",
+    "content_line_end",
     "is_amendment_article",
+    "extraction_status",
+    "llm_extraction_status",
 }
 
-# ProvisionUnit.function_type 的 KG 允许枚举。LLM 越界值统一落到 other。
-FUNCTION_TYPES = {"prohibition", "mandatory", "optional", "other"}
+# ProvisionUnit.function_type 的 LLM 允许枚举。LLM 空值保持为空，越界值由后处理置为 other。
+LLM_FUNCTION_TYPES = {"prohibition", "mandatory", "optional"}
+
+ARTICLE_PREFIX_RE = re.compile(r"^Article\s+\d+[A-Za-z]?", re.IGNORECASE)
+LOCAL_NUMBER_RE = re.compile(r"^\(?(\d+[A-Za-z]?)\)?$")
+LOCAL_POINT_RE = re.compile(r"^\(([a-z]+|[ivxlcdm]+)\)$", re.IGNORECASE)
+FUNCTION_TYPE_FALLBACK = "other"
 
 # 兼容历史结果和少量 LLM 可能输出的带空格类型。
 ENTITY_TYPE_ALIASES = {
@@ -192,23 +204,20 @@ def make_node(name: str, node_type: str, properties: dict[str, Any] | None, file
     }
 
 
-def _json_dumps_compact(value: Any) -> str:
-    """把嵌套属性转成稳定 JSON 字符串，供 Neo4j 入库字段使用。"""
-    import json
-
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
 def _normalize_bool(value: Any) -> bool:
     """把 Yes/No、true/false 等模型输出统一为 bool。"""
     return str(value or "").strip().lower() in {"yes", "true", "1", "internal", "y"}
 
 
-def _classification_context_text(value: Any) -> str:
-    """把分类上下文转成可检索文本。"""
-    if isinstance(value, dict):
-        return " / ".join(str(value.get(key) or "").strip() for key in ("title", "chapter", "section", "part") if str(value.get(key) or "").strip())
-    return str(value or "").strip()
+def _split_risk_types(value: Any) -> list[str]:
+    """按六类风险枚举拆分文首合规风险类型，避免复合字符串直接入下游字段。"""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    matched = [risk_type for risk_type in RISK_TYPE_VALUES if risk_type in text]
+    if matched:
+        return matched
+    return [text]
 
 
 def _add_classification_flat_fields(props: dict[str, Any], article: dict[str, Any]) -> None:
@@ -216,24 +225,22 @@ def _add_classification_flat_fields(props: dict[str, Any], article: dict[str, An
     context = article.get("classification_context") or {}
     if not isinstance(context, dict):
         context = {}
-    props["classification_context"] = context
     props["title"] = article.get("title", context.get("title", ""))
     props["chapter"] = article.get("chapter", context.get("chapter", ""))
     props["section"] = article.get("section", context.get("section", ""))
     props["part"] = article.get("part", context.get("part", ""))
-    props["classification_title"] = props.get("title", "")
-    props["classification_chapter"] = props.get("chapter", "")
-    props["classification_section"] = props.get("section", "")
-    props["classification_part"] = props.get("part", "")
-    props["classification_context_text"] = _classification_context_text(context)
 
 
 def _normalize_function_type(value: Any) -> str:
     """把 ProvisionUnit.function_type 收敛到 KG 枚举。"""
-    normalized = str(value or "").strip().lower().replace(" ", "_")
-    if normalized in FUNCTION_TYPES:
+    if value in (None, ""):
+        return ""
+    normalized = str(value).strip().lower().replace(" ", "_")
+    if not normalized:
+        return ""
+    if normalized in LLM_FUNCTION_TYPES:
         return normalized
-    return "other"
+    return FUNCTION_TYPE_FALLBACK
 
 
 def _normalize_quantitative_feature(value: Any) -> str:
@@ -244,15 +251,93 @@ def _normalize_quantitative_feature(value: Any) -> str:
     return "Qualitative"
 
 
+def _normalize_quantitative_indicator(props: dict[str, Any]) -> dict[str, Any] | None:
+    """把新旧量化字段统一为 quantitative_indicator 结构。"""
+    indicator = props.get("quantitative_indicator")
+    if indicator in (None, "", {}):
+        indicator = props.get("quantitative_condition")
+    if not isinstance(indicator, dict) or not indicator:
+        return None
+
+    return {
+        "raw_text": indicator.get("raw_text"),
+        "value_type": indicator.get("value_type") or indicator.get("quantitative_value_type"),
+        "min": indicator.get("min", indicator.get("minimum_value")),
+        "max": indicator.get("max", indicator.get("maximum_value")),
+        "unit": indicator.get("unit"),
+        "relation": indicator.get("relation") or indicator.get("constraint_relation"),
+    }
+
+
 def _normalize_provision_unit_props(props: dict[str, Any]) -> dict[str, Any]:
     """规范化 ProvisionUnit 属性，减少 KG 枚举和 Neo4j 入库问题。"""
     result = dict(props)
     result["function_type"] = _normalize_function_type(result.get("function_type"))
     result["quantitative_feature"] = _normalize_quantitative_feature(result.get("quantitative_feature"))
-    quantitative_condition = result.get("quantitative_condition")
-    if isinstance(quantitative_condition, (dict, list)):
-        result["quantitative_condition_json"] = _json_dumps_compact(quantitative_condition)
+    quantitative_indicator = _normalize_quantitative_indicator(result)
+    result.pop("quantitative_condition", None)
+    if quantitative_indicator:
+        result["quantitative_indicator"] = quantitative_indicator
+        result["quantitative_feature"] = "Quantitative"
+    else:
+        result["quantitative_indicator"] = None
+        result["quantitative_feature"] = "Qualitative"
     return result
+
+
+def _normalize_unit_number_for_parent(props: dict[str, Any], article_number: str) -> tuple[dict[str, Any], str | None]:
+    """把 ProvisionUnit.unit_number 锚定到当前父级 Article。"""
+    result = dict(props)
+    unit_number = str(result.get("unit_number") or "").strip()
+    if not article_number or not unit_number:
+        return result, None
+
+    article_match = ARTICLE_PREFIX_RE.match(unit_number)
+    if article_match:
+        old_prefix = article_match.group(0)
+        if old_prefix == article_number:
+            return result, None
+        result["unit_number"] = article_number + unit_number[article_match.end():]
+        return result, f"{unit_number} -> {result['unit_number']}"
+
+    local_number = LOCAL_NUMBER_RE.match(unit_number)
+    if local_number:
+        result["unit_number"] = f"{article_number}({local_number.group(1)})"
+        return result, f"{unit_number} -> {result['unit_number']}"
+
+    local_point = LOCAL_POINT_RE.match(unit_number)
+    if local_point:
+        result["unit_number"] = f"{article_number}{unit_number}"
+        return result, f"{unit_number} -> {result['unit_number']}"
+
+    return result, None
+
+
+def _token_set(value: str) -> set[str]:
+    """提取用于原文重叠校验的英文/数字 token。"""
+    return set(re.findall(r"[A-Za-z0-9]+", value.lower()))
+
+
+def _unit_content_supported_by_article(unit_content: Any, article_content: str) -> bool:
+    """校验 ProvisionUnit 内容是否基本来自当前 Article 原文。"""
+    if not isinstance(unit_content, str):
+        return True
+    unit_text = unit_content.strip()
+    if not unit_text:
+        return True
+
+    normalized_unit = re.sub(r"\s+", " ", unit_text)
+    normalized_article = re.sub(r"\s+", " ", article_content or "")
+    if normalized_unit in normalized_article:
+        return True
+
+    unit_tokens = _token_set(normalized_unit)
+    if len(unit_tokens) < 6:
+        return True
+    article_tokens = _token_set(normalized_article)
+    if not article_tokens:
+        return False
+    return len(unit_tokens & article_tokens) / len(unit_tokens) >= 0.65
 
 
 def _normalize_citation_props(props: dict[str, Any]) -> dict[str, Any]:
@@ -405,10 +490,12 @@ class FormatOneGraphBuilder:
 
     def __init__(self, lenient_mode: bool = True):
         """初始化图谱装配器。"""
-        # lenient_mode=True 时，即使 Article 没有 LLM 结果，也会生成 fallback 节点。
+        # lenient_mode 保留为兼容配置；Article 节点始终由一阶段生成，不再因 LLM 失败缺失。
         self.lenient_mode = lenient_mode
         # warnings 用于收集装配过程中无法解析但不致命的问题。
         self.warnings: list[str] = []
+        # errors 用于收集 Article 抽取失败等不应入库为正常节点的问题。
+        self.errors: list[str] = []
 
     def _build_document_node(
         self,
@@ -447,6 +534,8 @@ class FormatOneGraphBuilder:
 
         # 按业务要求，最终图谱中保留中文属性名“合规风险类型”。
         props["合规风险类型"] = risk_type
+        # 同时提供数组化英文属性，供后续导出 regulation_knowledge.risk_types 使用。
+        props["risk_types"] = _split_risk_types(risk_type)
         # 记录源文件名，便于 Neo4j 里回溯来源。
         props.setdefault("source_filename", filename)
         # 记录文件格式，后续多格式合并时可区分来源。
@@ -500,23 +589,6 @@ class FormatOneGraphBuilder:
 
         return doc_node, node_lookup, nodes, edges
 
-    def _fallback_article_node(self, filename: str, article: dict[str, Any]) -> dict[str, Any]:
-        """在 LLM 没有成功抽取 Article 时生成兜底 LegalProvision 节点。"""
-        # fallback 节点保留 Article 编号、标题、上下文和全文，便于后续补抽。
-        props = {
-            "provision_number": article.get("article_number"),
-            "provision_heading": article.get("article_heading"),
-            "article_text": article.get("content"),
-            "line_start": article.get("line_start"),
-            "line_end": article.get("line_end"),
-            "is_amendment_article": article.get("is_amendment_article", False),
-            "llm_extraction_status": "fallback",
-        }
-        _add_classification_flat_fields(props, article)
-        # fallback 节点名优先使用 Article 编号。
-        name = article.get("article_number") or LEGAL_PROVISION
-        return make_node(name, LEGAL_PROVISION, props, filename)
-
     def _build_article_contexts(
         self,
         filename: str,
@@ -535,9 +607,9 @@ class FormatOneGraphBuilder:
             (result.get("article_number") or result.get("section_number") or ""): result
             for result in article_results
         }
-        # 收集失败 Article 编号。只有宽松模式才允许失败 Article 生成 fallback 节点。
-        failed_numbers = {
-            failed.get("article_number") or failed.get("section_number") or ""
+        # 收集失败 Article，后续只记录错误，不再生成 fallback 节点。
+        failed_map = {
+            failed.get("article_number") or failed.get("section_number") or "": failed
             for failed in failed_articles
         }
 
@@ -553,30 +625,42 @@ class FormatOneGraphBuilder:
                 entity for entity in normalized["entities"]
                 if entity.get("entity_type") == LEGAL_PROVISION
             ]
+            # LegalProvision 基础节点始终由一阶段 Article 生成；LLM 只补充语义属性。
+            props: dict[str, Any] = {}
+            provision_name = article_number
             if provision_entities:
-                # 使用 LLM LegalProvision 属性，并补充规则切分得到的稳定结构字段。
                 provision = provision_entities[0]
-                props = dict(provision.get("properties") or {})
+                props.update(provision.get("properties") or {})
+                provision_name = provision.get("name") or article_number
                 for key in SPLITTER_LOCKED_PROVISION_FIELDS:
                     props.pop(key, None)
-                props.update({
-                    "provision_number": article_number,
-                    "provision_heading": article.get("article_heading"),
-                    "line_start": article.get("line_start"),
-                    "line_end": article.get("line_end"),
-                    "is_amendment_article": article.get("is_amendment_article", False),
-                })
-                _add_classification_flat_fields(props, article)
-                article_node = make_node(provision.get("name") or article_number, LEGAL_PROVISION, props, filename)
-            elif self.lenient_mode and article_number in failed_numbers:
-                # 宽松模式下，已知失败 Article 生成 fallback 节点以保留可追踪位置。
-                article_node = self._fallback_article_node(filename, article)
-            elif self.lenient_mode and not result:
-                # 纯规则 fallback 或没有 LLM 结果时，宽松模式仍生成 Article 兜底节点。
-                article_node = self._fallback_article_node(filename, article)
+            elif article_number in failed_map:
+                # LLM 失败只记录错误，不影响一阶段 LegalProvision 节点生成。
+                failed = failed_map.get(article_number) or {}
+                self.errors.append(
+                    f"Article extraction failed; LegalProvision kept from splitter: "
+                    f"{filename} {article_number}: {failed.get('error') or 'unknown error'}"
+                )
+            elif not result:
+                # 没有 LLM 结果只记录错误，不影响一阶段 LegalProvision 节点生成。
+                self.errors.append(
+                    f"Article extraction missing; LegalProvision kept from splitter: {filename} {article_number}"
+                )
             else:
-                # 严格模式下没有可用 Article 节点时直接失败，避免生成缺失 Article 的 KG。
-                raise ValueError(f"Article has no LegalProvision extraction in strict mode: {article_number}")
+                # 有 LLM 结果但没有 LegalProvision，视为抽取结构错误；节点仍由一阶段保留。
+                self.errors.append(
+                    f"Article extraction has no LegalProvision; LegalProvision kept from splitter: "
+                    f"{filename} {article_number}"
+                )
+
+            props.update({
+                "provision_number": article_number,
+                "provision_heading": article.get("article_heading"),
+                "provision_content": article.get("content", ""),
+                "is_amendment_article": article.get("is_amendment_article", False),
+            })
+            _add_classification_flat_fields(props, article)
+            article_node = make_node(provision_name, LEGAL_PROVISION, props, filename)
 
             nodes.append(article_node)
             # local_lookup 只服务于当前 Article 内部的实体关系解析。
@@ -642,6 +726,7 @@ class FormatOneGraphBuilder:
             normalized = context["normalized"]
             node_lookup = context["local_lookup"]
             article_number = article.get("article_number") or ""
+            article_content = article.get("content") or ""
             # 法规文件包含每个 Article。
             _append_edge(edges, edge_seen, make_edge(doc_node["node_id"], article_node["node_id"], "CONTAINS", filename))
 
@@ -663,6 +748,20 @@ class FormatOneGraphBuilder:
                 if entity_type == PROVISION_UNIT:
                     # ProvisionUnit 是 Article 内部可引用的稳定法律规则单元。
                     props = _normalize_provision_unit_props(props)
+                    old_unit_number = props.get("unit_number")
+                    props, unit_number_change = _normalize_unit_number_for_parent(props, article_number)
+                    if unit_number_change:
+                        self.warnings.append(
+                            f"Normalized ProvisionUnit.unit_number to parent Article: "
+                            f"{filename} {article_number} {unit_number_change}"
+                        )
+                        if name == old_unit_number:
+                            name = props.get("unit_number") or name
+                    if not _unit_content_supported_by_article(props.get("unit_content"), article_content):
+                        raise ValueError(
+                            f"ProvisionUnit content is not supported by current Article text: "
+                            f"{filename} {article_number} {props.get('unit_number') or name}"
+                        )
                     node = make_node(name, PROVISION_UNIT, props, filename)
                     nodes.append(node)
                     # ProvisionUnit 可通过节点名或 unit_number 被关系引用。
@@ -738,7 +837,9 @@ class FormatOneGraphBuilder:
         """构建最终图谱结果。"""
         # 每次 build 都从切分器 warnings 开始，避免沿用上次构建状态。
         self.warnings = list(split_result.get("warnings") or [])
-        # raw 为空时进入纯规则 fallback 图谱构建。
+        # 每次 build 重置 errors，避免沿用上次构建状态。
+        self.errors = []
+        # raw 为空时无法构建 Article 级 LLM 知识，只保留文件级节点并记录错误。
         raw = raw_llm_result or {}
         # 构建法规文件节点和文件级依据节点。
         doc_node, _lookup, file_nodes, file_edges = self._build_document_node(
@@ -772,7 +873,7 @@ class FormatOneGraphBuilder:
             "nodes": len(nodes),
             "edges": len(edges),
             "warnings": self.warnings,
-            "errors": raw.get("errors", []),
+            "errors": list(raw.get("errors", []) or []) + self.errors,
         }
         # 返回完整图谱、切分结果和 raw LLM 结果，方便审查全链路。
         return {

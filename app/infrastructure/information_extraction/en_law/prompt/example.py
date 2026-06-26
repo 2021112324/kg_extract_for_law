@@ -44,38 +44,76 @@ example_for_file_info = [
 example_for_article = [
     {
         "text": (
-            '{"article_number": "Article 1", "article_heading": "Subject matter", '
-            '"text": "This Regulation lays down rules for economic operators placing '
-            'products on the Union market. It applies without prejudice to Regulation '
-            '(EU) 2019/1020."}'
+            '{"article_number": "Article 99", "article_heading": "Synthetic example", '
+            '"classification_context": {"title": "TITLE EXAMPLE", "chapter": "CHAPTER EXAMPLE"}, '
+            '"text": "1. The ExampleOnly operator shall keep the ExampleOnly record for '
+            '30 days. 2. For the purposes of paragraph 1, the ExampleOnly authority may '
+            'request the ExampleOnly record."}'
         ),
         "extractions": [
             {
-                "name": "Article 1",
+                "name": "Article 99",
                 "type": "LegalProvision",
                 "attributes": {
-                    "article_number": "Article 1",
-                    "article_heading": "Subject matter",
-                    "topic": "rules for economic operators placing products on the Union market",
+                    "provision_number": "Article 99",
+                    "provision_heading": "Synthetic example",
+                    "core_topic": "synthetic example record keeping",
+                    "scope_of_effect": "synthetic example only",
+                    "applicable_industry": "General",
+                    "compliance_domains": ["example compliance"],
+                    "economic_industries": ["General"],
                     "is_amendment_article": False,
+                    "amendment_target": "",
+                    "amendment_action": "",
                 },
             },
             {
-                "name": "Article 1 sentence 1",
+                "name": "Article 99(1)",
                 "type": "ProvisionUnit",
                 "attributes": {
-                    "unit_number": "sentence 1",
-                    "subject": "This Regulation",
-                    "conduct": "lays down rules",
-                    "object": "economic operators placing products on the Union market",
+                    "unit_number": "Article 99(1)",
+                    "unit_level": "paragraph",
+                    "unit_content": "The ExampleOnly operator shall keep the ExampleOnly record for 30 days.",
+                    "unit_purpose": "synthetic record keeping obligation",
+                    "applicable_industry": "General",
+                    "compliance_domains": ["example compliance"],
+                    "economic_industries": ["General"],
+                    "function_type": "mandatory",
+                    "quantitative_feature": "Quantitative",
+                    "quantitative_indicator": {
+                        "raw_text": "30 days",
+                        "value_type": "deadline",
+                        "min": 30,
+                        "max": 30,
+                        "unit": "days",
+                        "relation": "duration",
+                    },
+                    "applicable_subject": "ExampleOnly operator",
+                    "conduct_description": "keep the ExampleOnly record",
+                    "condition": "",
+                    "legal_consequence": "",
+                    "exception": "",
                 },
             },
             {
-                "name": "Regulation (EU) 2019/1020",
-                "type": "Citation",
+                "name": "Article 99(2)",
+                "type": "ProvisionUnit",
                 "attributes": {
-                    "citation_text": "Regulation (EU) 2019/1020",
-                    "cited_instrument": "Regulation (EU) 2019/1020",
+                    "unit_number": "Article 99(2)",
+                    "unit_level": "paragraph",
+                    "unit_content": "For the purposes of paragraph 1, the ExampleOnly authority may request the ExampleOnly record.",
+                    "unit_purpose": "synthetic authority permission",
+                    "applicable_industry": "General",
+                    "compliance_domains": ["example compliance"],
+                    "economic_industries": ["General"],
+                    "function_type": "optional",
+                    "quantitative_feature": "Qualitative",
+                    "quantitative_indicator": None,
+                    "applicable_subject": "ExampleOnly authority",
+                    "conduct_description": "request the ExampleOnly record",
+                    "condition": "For the purposes of paragraph 1",
+                    "legal_consequence": "",
+                    "exception": "",
                 },
             },
         ],

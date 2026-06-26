@@ -82,15 +82,16 @@ def test_graph_builder_uses_english_schema_and_chinese_risk_property():
     article = next(node for node in kg["nodes"] if node["node_type"] == "LegalProvision")
 
     assert doc["properties"]["合规风险类型"] == "产品法律风险"
+    assert doc["properties"]["risk_types"] == ["产品法律风险"]
     assert "document_number" in doc["properties"]
-    assert article["properties"]["classification_context"] == {
-        "title": "TITLE I",
-        "chapter": "CHAPTER 1",
-        "section": "Section 1",
-    }
     assert article["properties"]["title"] == "TITLE I"
-    assert article["properties"]["classification_title"] == "TITLE I"
-    assert article["properties"]["classification_context_text"] == "TITLE I / CHAPTER 1 / Section 1"
+    assert article["properties"]["chapter"] == "CHAPTER 1"
+    assert article["properties"]["section"] == "Section 1"
+    assert article["properties"]["provision_content"] == "1. Operators shall comply."
+    assert "classification_context" not in article["properties"]
+    assert "classification_title" not in article["properties"]
+    assert "line_start" not in article["properties"]
+    assert "line_end" not in article["properties"]
     assert any(edge["relation_type"] == "CONTAINS" for edge in kg["edges"])
 
 
@@ -330,11 +331,22 @@ def test_provision_unit_properties_are_normalized_for_kg_and_neo4j():
                                 "unit_number": "Article 1(1)",
                                 "function_type": "qualitative condition",
                                 "quantitative_feature": "quantitative",
-                                "quantitative_condition": {
+                                "quantitative_indicator": {
                                     "raw_text": "within 30 days",
-                                    "maximum_value": 30,
+                                    "max": 30,
                                     "unit": "days",
+                                    "value_type": "Time Limit",
+                                    "relation": "Upper Bound",
                                 },
+                            },
+                        },
+                        {
+                            "name": "Article 1(2)",
+                            "entity_type": "ProvisionUnit",
+                            "properties": {
+                                "unit_number": "Article 1(2)",
+                                "function_type": "",
+                                "quantitative_feature": "Qualitative",
                             },
                         },
                     ],
@@ -346,16 +358,19 @@ def test_provision_unit_properties_are_normalized_for_kg_and_neo4j():
     }
 
     kg = FormatOneGraphBuilder().build("sample.md", split_result, raw)
-    unit = next(node for node in kg["nodes"] if node["node_type"] == "ProvisionUnit")
+    units = [node for node in kg["nodes"] if node["node_type"] == "ProvisionUnit"]
+    unit = next(node for node in units if node["properties"].get("unit_number") == "Article 1(1)")
+    empty_function_type_unit = next(node for node in units if node["properties"].get("unit_number") == "Article 1(2)")
 
     assert unit["properties"]["function_type"] == "other"
     assert unit["properties"]["quantitative_feature"] == "Quantitative"
-    assert unit["properties"]["quantitative_condition"]["maximum_value"] == 30
-    assert '"maximum_value":30' in unit["properties"]["quantitative_condition_json"]
+    assert unit["properties"]["quantitative_indicator"]["max"] == 30
+    assert "quantitative_condition" not in unit["properties"]
+    assert empty_function_type_unit["properties"]["function_type"] == ""
 
 
-def test_strict_graph_builder_does_not_create_fallback_for_failed_article():
-    """验证严格模式下失败 Article 不会被 fallback 成 LegalProvision 节点。"""
+def test_strict_graph_builder_keeps_rule_article_for_failed_llm_extraction():
+    """验证严格模式下失败 Article 仍由一阶段生成 LegalProvision 节点。"""
     split_result = {
         "document_format": "format_one_eu_regulation_directive",
         "compliance_risk_type": "产品法律风险",
@@ -386,5 +401,211 @@ def test_strict_graph_builder_does_not_create_fallback_for_failed_article():
         ],
     }
 
-    with pytest.raises(ValueError, match="strict mode"):
-        FormatOneGraphBuilder(lenient_mode=False).build("sample.md", split_result, raw)
+    kg = FormatOneGraphBuilder(lenient_mode=False).build("sample.md", split_result, raw)
+
+    article = next(node for node in kg["nodes"] if node["node_type"] == "LegalProvision")
+    assert article["properties"]["provision_number"] == "Article 1"
+    assert article["properties"]["provision_content"] == "1. Operators shall comply."
+    assert article["properties"]["provision_heading"] == "Scope"
+    assert "llm_extraction_status" not in article["properties"]
+    assert any("LegalProvision kept from splitter" in item for item in kg["metadata"]["errors"])
+
+
+def test_lenient_graph_builder_records_failed_article_and_keeps_rule_node():
+    """验证宽松模式下失败 Article 记录错误，并保留一阶段 LegalProvision 节点。"""
+    split_result = {
+        "document_format": "format_one_eu_regulation_directive",
+        "compliance_risk_type": "产品法律风险",
+        "fallback_metadata": {"document_name": "Sample Regulation"},
+        "recitals": [],
+        "annexes_metadata": [],
+        "warnings": [],
+        "clauses": [
+            {
+                "article_number": "Article 1",
+                "article_heading": "Scope",
+                "classification_context": {},
+                "content": "1. Operators shall comply.",
+                "line_start": 1,
+                "line_end": 2,
+                "is_amendment_article": False,
+            }
+        ],
+    }
+    raw = {
+        "file_info_extraction": {
+            "entities": [{"name": "Sample Regulation", "entity_type": "LegalDocument", "properties": {}}],
+            "relations": [],
+        },
+        "article_extractions": [],
+        "failed_article_extractions": [
+            {"article_number": "Article 1", "error": "mock article failure"},
+        ],
+    }
+
+    kg = FormatOneGraphBuilder(lenient_mode=True).build("sample.md", split_result, raw)
+
+    article = next(node for node in kg["nodes"] if node["node_type"] == "LegalProvision")
+    assert article["properties"]["provision_number"] == "Article 1"
+    assert article["properties"]["provision_content"] == "1. Operators shall comply."
+    assert "llm_extraction_status" not in article["properties"]
+    assert any("LegalProvision kept from splitter" in item for item in kg["metadata"]["errors"])
+
+
+def test_provision_unit_number_is_normalized_to_parent_article():
+    """验证 ProvisionUnit 编号会被锚定到父级 Article。"""
+    split_result = {
+        "document_format": "format_one_eu_regulation_directive",
+        "fallback_metadata": {"document_name": "Sample Regulation"},
+        "recitals": [],
+        "annexes_metadata": [],
+        "warnings": [],
+        "clauses": [
+            {
+                "article_number": "Article 20",
+                "article_heading": "Transfer",
+                "classification_context": {},
+                "content": "1. The Commission shall adopt implementing acts specifying the details.",
+                "is_amendment_article": False,
+            }
+        ],
+    }
+    raw = {
+        "file_info_extraction": {
+            "entities": [{"name": "Sample Regulation", "entity_type": "LegalDocument", "properties": {}}],
+            "relations": [],
+        },
+        "article_extractions": [
+            {
+                "article_number": "Article 20",
+                "extraction": {
+                    "entities": [
+                        {
+                            "name": "Article 7(1)",
+                            "entity_type": "ProvisionUnit",
+                            "properties": {
+                                "unit_number": "Article 7(1)",
+                                "unit_content": "The Commission shall adopt implementing acts specifying the details.",
+                            },
+                        }
+                    ],
+                    "relations": [],
+                },
+            }
+        ],
+        "failed_article_extractions": [],
+    }
+
+    kg = FormatOneGraphBuilder().build("sample.md", split_result, raw)
+
+    unit = next(node for node in kg["nodes"] if node["node_type"] == "ProvisionUnit")
+    assert unit["node_name"] == "Article 20(1)"
+    assert unit["properties"]["unit_number"] == "Article 20(1)"
+    assert any("Normalized ProvisionUnit.unit_number" in item for item in kg["metadata"]["warnings"])
+
+
+def test_common_regulation_phrase_is_not_treated_as_example_leakage():
+    """验证法规常见句式只要受当前 Article 原文支撑，就不应被关键词误判为示例泄漏。"""
+    split_result = {
+        "document_format": "format_one_eu_regulation_directive",
+        "fallback_metadata": {"document_name": "Sample Regulation"},
+        "recitals": [],
+        "annexes_metadata": [],
+        "warnings": [],
+        "clauses": [
+            {
+                "article_number": "Article 1",
+                "article_heading": "Scope",
+                "classification_context": {},
+                "content": (
+                    "1. This Regulation lays down rules for economic operators "
+                    "placing products on the Union market."
+                ),
+                "is_amendment_article": False,
+            }
+        ],
+    }
+    raw = {
+        "file_info_extraction": {
+            "entities": [{"name": "Sample Regulation", "entity_type": "LegalDocument", "properties": {}}],
+            "relations": [],
+        },
+        "article_extractions": [
+            {
+                "article_number": "Article 1",
+                "extraction": {
+                    "entities": [
+                        {
+                            "name": "Article 1(2)",
+                            "entity_type": "ProvisionUnit",
+                            "properties": {
+                                "unit_number": "Article 1(2)",
+                                "unit_content": (
+                                    "This Regulation lays down rules for economic operators "
+                                    "placing products on the Union market."
+                                ),
+                            },
+                        },
+                    ],
+                    "relations": [],
+                },
+            }
+        ],
+        "failed_article_extractions": [],
+    }
+
+    kg = FormatOneGraphBuilder().build("sample.md", split_result, raw)
+    assert any(
+        node.get("node_type") == "ProvisionUnit"
+        and node.get("properties", {}).get("unit_content")
+        == "This Regulation lays down rules for economic operators placing products on the Union market."
+        for node in kg["nodes"]
+    )
+
+
+def test_unsupported_unit_content_raises_error():
+    """验证非当前 Article 原文支撑的 ProvisionUnit 内容会直接报错。"""
+    split_result = {
+        "document_format": "format_one_eu_regulation_directive",
+        "fallback_metadata": {"document_name": "Sample Regulation"},
+        "recitals": [],
+        "annexes_metadata": [],
+        "warnings": [],
+        "clauses": [
+            {
+                "article_number": "Article 1",
+                "article_heading": "Scope",
+                "classification_context": {},
+                "content": "1. Operators shall comply with this Regulation.",
+                "is_amendment_article": False,
+            }
+        ],
+    }
+    raw = {
+        "file_info_extraction": {
+            "entities": [{"name": "Sample Regulation", "entity_type": "LegalDocument", "properties": {}}],
+            "relations": [],
+        },
+        "article_extractions": [
+            {
+                "article_number": "Article 1",
+                "extraction": {
+                    "entities": [
+                        {
+                            "name": "Article 1(3)",
+                            "entity_type": "ProvisionUnit",
+                            "properties": {
+                                "unit_number": "Article 1(3)",
+                                "unit_content": "Completely unrelated hallucinated content about another law.",
+                            },
+                        },
+                    ],
+                    "relations": [],
+                },
+            }
+        ],
+        "failed_article_extractions": [],
+    }
+
+    with pytest.raises(ValueError, match="not supported by current Article text"):
+        FormatOneGraphBuilder().build("sample.md", split_result, raw)
