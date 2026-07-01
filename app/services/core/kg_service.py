@@ -30,10 +30,10 @@ from app.infrastructure.information_extraction.en_law.neo4j_export import (
     discover_en_law_files,
     prepare_en_law_kg_for_neo4j,
 )
-from app.infrastructure.information_extraction.en_law_v2 import (
+from app.infrastructure.information_extraction.en_law_v1 import (
     FormatOneEnLawExtractor as FormatOneEnLawV2Extractor,
 )
-from app.infrastructure.information_extraction.en_law_v2.neo4j_export import (
+from app.infrastructure.information_extraction.en_law_v1.neo4j_export import (
     EnLawNeo4jRunStats as EnLawV2Neo4jRunStats,
     discover_en_law_files as discover_en_law_v2_files,
     prepare_en_law_kg_for_neo4j as prepare_en_law_v2_kg_for_neo4j,
