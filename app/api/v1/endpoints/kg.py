@@ -1105,6 +1105,64 @@ Returns:
             data=None
         )
 
+@router.post("/kgs/{kg_id}/clause_en_v2_extract_by_dir")
+async def clause_en_v2_extract_by_dir(
+        background_tasks: BackgroundTasks,  # 后台任务管理器
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),  # 数据库会话依赖注入
+):
+    """
+基于单门英文法律法条文件的 v2 知识图谱抽取接口。
+
+功能：对指定目录下的格式一英文法律、法规、法典、行政命令等文本进行 v2 英文知识图谱抽取。
+流程与 /clause_en_extract_by_dir 类似，但底层使用：
+app/infrastructure/information_extraction/en_law_v2/FormatOneEnLawExtractor
+
+v2 抽取逻辑：
+1. Article / LegalProvision 抽取与 ProvisionClause 抽取分离。
+2. Article 阶段只抽取 LegalProvision 属性，不抽取 ProvisionClause 或 ProvisionTextParagraph。
+3. ProvisionClause 由代码按 Article 正文行首 `1. `、`2. `、`3. ` 等一级编号切分。
+4. 不使用 `(1)`、`(a)`、`(i)` 等编号切分 ProvisionClause。
+5. 每个 ProvisionClause 独立调用大模型抽取 ProvisionClause 属性和 ProvisionTextParagraph。
+
+输出图谱要求：
+1. 节点类型为英文，例如 LegalDocument、LegalProvision、ProvisionClause、ProvisionTextParagraph、Citation。
+2. 关系类型为英文，例如 CONTAINS、CITES、BASED_ON。
+3. 图谱主链路为 LegalDocument -> LegalProvision -> ProvisionClause -> ProvisionTextParagraph。
+4. 正式入库前会去除行号、原文兜底全文、嵌套审查字段等不适合 Neo4j 的属性。
+
+以此，json请求格式为：
+{
+    "data_dir": "英文法条文件目录"
+}
+
+Args:
+    background_tasks (BackgroundTasks): FastAPI后台任务管理器
+    data_dir (str): 本次抽取的英文法条文件目录位置
+    if_del_task (bool): 合并子图到总图谱时是否删除 task 子图，默认为False
+    db (Session): 数据库会话对象，通过依赖注入自动获取
+
+Returns:
+    dict: 任务创建结果的响应
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_en_v2_extract_by_local_dir,
+            {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="英文法条 v2 抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行英文法条 v2 抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
 @router.post("/kgs/{kg_id}/guide_clause_extract_by_dir")
 async def guide_clause_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器

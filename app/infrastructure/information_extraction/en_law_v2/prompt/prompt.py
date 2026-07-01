@@ -1,4 +1,4 @@
-"""格式一英文法规 LLM 抽取提示词。
+﻿"""格式一英文法规 LLM 抽取提示词。
 
 重要约定：
 1. `prompt_for_file_info` 和 `prompt_for_article` 是实际传给 LLM 的字符串。
@@ -7,7 +7,7 @@
 """
 
 # 从 schema 中引入关系兼容字段，确保 prompt 与 schema 使用同一套键名。
-from app.infrastructure.information_extraction.en_law.prompt.schema import (
+from app.infrastructure.information_extraction.en_law_v2.prompt.schema import (
     OBJECT_KEY,
     PREDICATE_KEY,
     RELATION_CLASS,
@@ -191,3 +191,75 @@ For relation records only, use extraction class exactly "{RELATION_CLASS}" and
 attribute keys exactly "{SUBJECT_KEY}", "{PREDICATE_KEY}" and "{OBJECT_KEY}".
 Their values must still be English.
 """
+
+
+# =============================================================================
+# v2 prompt overrides
+# =============================================================================
+prompt_for_article = f"""
+# Role
+You are an expert in EU Regulation and Directive Article analysis.
+
+# Task
+Extract attributes for exactly one Article-level LegalProvision. This step is
+only for the Article itself.
+
+# Mandatory Rules
+1. Extract exactly one LegalProvision entity.
+2. Do not split the Article into ProvisionClause.
+3. Do not extract ProvisionTextParagraph, ProvisionUnit or Citation.
+4. Do not output CONTAINS or CITES relations.
+5. Use only facts explicitly present in the current Article input.
+6. Do not copy text, names or attributes from examples.
+7. Do not infer unstated dates, industries, compliance domains or amendment
+   targets.
+"""
+
+prompt_for_provision_clause = f"""
+# Role
+You are an expert in EU Regulation and Directive clause analysis.
+
+# Task
+Extract knowledge graph information from one code-split ProvisionClause only.
+The parent Article and the current ProvisionClause are already provided by
+deterministic code.
+
+# Mandatory Rules
+1. Extract exactly one ProvisionClause entity for the current clause.
+2. Do not change ProvisionClause.unit_number or ProvisionClause.unit_content.
+3. Extract ProvisionTextParagraph entities only from the current
+   ProvisionClause.unit_content.
+4. ProvisionTextParagraph.unit_content must be copied from the current clause.
+   Do not paraphrase, summarize, translate or invent text.
+5. ProvisionTextParagraph.unit_number must start with the parent
+   ProvisionClause unit_number.
+6. Preserve required lead-in context. Do not output isolated (1), (a), (i) or
+   dash items when they cannot be understood without the lead-in.
+7. Do not cross into another Article or another ProvisionClause.
+8. Extract Citation entities only when explicitly cited by a
+   ProvisionTextParagraph.
+9. Never copy text, names or attributes from examples.
+10. The ProvisionTextParagraph entity name must be exactly the same as
+    ProvisionTextParagraph.unit_number.
+11. When several continuous source-text fragments under the same parent
+    ProvisionClause share the same structural locator, use deterministic
+    fallback locators such as "Article 14(5) paragraph 1" and
+    "Article 14(5) paragraph 2". Do not use "first subparagraph" or
+    "second subparagraph" naming.
+12. legal_function may only be mandatory, prohibition or optional. Use
+    mandatory for must/shall/is required/is obliged; prohibition for shall not,
+    must not, is prohibited, or no ... shall; optional for may/can/is entitled
+    or is allowed. If unknown, leave it empty and do not output other.
+13. quantitative_indicator must use lower-case enum values only:
+    value_type = amount/ratio/time_limit/count/multiple/other and relation =
+    range/lower_bound/upper_bound/equal/other. Do not treat legal references
+    or vague phrases such as "in accordance with Article ...", "Part 5 of
+    Annex VI", "Articles 85 to 89", "reasonable duration" or "the period" as
+    quantitative indicators.
+
+# Parser Compatibility Rule
+For relation records only, use extraction class exactly "{RELATION_CLASS}" and
+attribute keys exactly "{SUBJECT_KEY}", "{PREDICATE_KEY}" and "{OBJECT_KEY}".
+Their values must still be English.
+"""
+

@@ -22,8 +22,8 @@ if __name__ == "__main__":
 
 
     # 定义多个源图谱标签和一个目标图谱标签
-    source_graph_tags = ['e6_格式一_kg_593078724698570752']
-    target_graph_tag = "e6_英文法规格式一1_kg_593078724698570752"
+    source_graph_tags = ['e6_英文法规格式一1_v2_kg_594794364266348544','e6_英文法规格式一2_v2_kg_594850803441729536']
+    target_graph_tag = "e6_英文法规格式一_v2_kg_594525404715286528"
 
     print(f"开始导入数据，共 {len(source_graph_tags)} 个源图谱...")
     for source_tag in source_graph_tags:

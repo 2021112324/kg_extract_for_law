@@ -135,7 +135,10 @@ def test_internal_citation_resolves_to_later_article_node():
                         {
                             "name": "Article 1(1)",
                             "entity_type": "ProvisionUnit",
-                            "properties": {"unit_number": "Article 1(1)"},
+                            "properties": {
+                                "unit_number": "Article 1(1)",
+                                "unit_content": "This Article refers to Article 2.",
+                            },
                         },
                         {
                             "name": "Article 2",
@@ -329,6 +332,7 @@ def test_provision_unit_properties_are_normalized_for_kg_and_neo4j():
                             "entity_type": "ProvisionUnit",
                             "properties": {
                                 "unit_number": "Article 1(1)",
+                                "unit_content": "Operators shall comply within 30 days.",
                                 "function_type": "qualitative condition",
                                 "quantitative_feature": "quantitative",
                                 "quantitative_indicator": {
@@ -345,6 +349,7 @@ def test_provision_unit_properties_are_normalized_for_kg_and_neo4j():
                             "entity_type": "ProvisionUnit",
                             "properties": {
                                 "unit_number": "Article 1(2)",
+                                "unit_content": "Operators shall comply within 30 days.",
                                 "function_type": "",
                                 "quantitative_feature": "Qualitative",
                             },
@@ -502,6 +507,57 @@ def test_provision_unit_number_is_normalized_to_parent_article():
     assert unit["node_name"] == "Article 20(1)"
     assert unit["properties"]["unit_number"] == "Article 20(1)"
     assert any("Normalized ProvisionUnit.unit_number" in item for item in kg["metadata"]["warnings"])
+
+
+def test_provision_unit_node_name_is_forced_to_unit_number():
+    """验证 ProvisionUnit 节点名必须等于归一化后的 unit_number。"""
+    split_result = {
+        "document_format": "format_one_eu_regulation_directive",
+        "fallback_metadata": {"document_name": "Sample Regulation"},
+        "recitals": [],
+        "annexes_metadata": [],
+        "warnings": [],
+        "clauses": [
+            {
+                "article_number": "Article 20",
+                "article_heading": "Transfer",
+                "classification_context": {},
+                "content": "1. The Commission shall adopt implementing acts specifying the details.",
+                "is_amendment_article": False,
+            }
+        ],
+    }
+    raw = {
+        "file_info_extraction": {
+            "entities": [{"name": "Sample Regulation", "entity_type": "LegalDocument", "properties": {}}],
+            "relations": [],
+        },
+        "article_extractions": [
+            {
+                "article_number": "Article 20",
+                "extraction": {
+                    "entities": [
+                        {
+                            "name": "Wrong model name",
+                            "entity_type": "ProvisionUnit",
+                            "properties": {
+                                "unit_number": "1",
+                                "unit_content": "The Commission shall adopt implementing acts specifying the details.",
+                            },
+                        }
+                    ],
+                    "relations": [],
+                },
+            }
+        ],
+        "failed_article_extractions": [],
+    }
+
+    kg = FormatOneGraphBuilder().build("sample.md", split_result, raw)
+
+    unit = next(node for node in kg["nodes"] if node["node_type"] == "ProvisionUnit")
+    assert unit["node_name"] == "Article 20(1)"
+    assert unit["properties"]["unit_number"] == "Article 20(1)"
 
 
 def test_common_regulation_phrase_is_not_treated_as_example_leakage():

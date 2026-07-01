@@ -1,4 +1,4 @@
-"""格式一英文法规 LLM 抽取 Schema。
+﻿"""格式一英文法规 LLM 抽取 Schema。
 
 重要约定：
 1. `schema_for_file_info` 和 `schema_for_article` 是实际传给 LLM 的 ontology 字符串。
@@ -248,3 +248,112 @@ Relations must be emitted as extraction class "{RELATION_CLASS}" with
 attributes "{SUBJECT_KEY}", "{PREDICATE_KEY}" and "{OBJECT_KEY}". Predicate
 values must be English relation names, such as "CONTAINS" or "CITES".
 """
+
+
+# =============================================================================
+# v2 schema overrides
+# =============================================================================
+# v2 中 Article/LegalProvision 抽取与 ProvisionClause 抽取必须分离：
+# - Article schema 只允许产出 LegalProvision。
+# - ProvisionClause schema 才允许产出 ProvisionClause、ProvisionTextParagraph、Citation 和关系。
+schema_for_article = f"""
+# Entities
+
+## LegalProvision
+### Description
+The Article-level legal provision being processed. Extract exactly one
+LegalProvision entity for the input Article. Do not extract ProvisionClause,
+ProvisionTextParagraph, ProvisionUnit or Citation in this Article step.
+### Properties
+- provision_number: Article number, such as Article 7
+- provision_heading: Article heading
+- core_topic: central topic of the Article
+- scope_of_effect: stated application scope of the Article
+- applicable_industry: choose one from [Manufacturing, Electronic Information Industry, General, Other]
+- compliance_domains: string array of explicit compliance domains
+- economic_industries: string array. Use ["General"] when generally applicable
+- is_amendment_article: true or false
+- amendment_target: amended document/provision if explicitly stated
+- amendment_action: amend, replace, insert, delete, repeal or empty if not stated
+
+# Forbidden Output
+Do not output ProvisionClause, ProvisionTextParagraph, ProvisionUnit or Citation
+entities. Do not output CONTAINS or CITES relations in this Article step.
+"""
+
+schema_for_provision_clause = f"""
+# Entities
+
+## ProvisionClause
+### Description
+The current code-split ProvisionClause under one Article. Extract exactly one
+ProvisionClause entity for the provided clause. The fields unit_number and
+unit_content are locked by code and must not be changed.
+### Properties
+- unit_level: normally paragraph
+- clause_summary: concise summary of this clause
+- clause_purpose: explicit purpose if stated
+- main_subject: main regulated subject if stated
+- main_action: main required, prohibited or permitted action if stated
+- main_object: object of the main action if stated
+- legal_function: choose one from [prohibition, mandatory, optional], or leave empty if unknown. mandatory means must/shall/is required/is obliged; prohibition means shall not/must not/is prohibited/no ... shall; optional means may/can/is entitled/is allowed. Do not output other, definition, scope, procedure, exception or exclusion.
+- has_quantitative_detail: true if concrete numbers, thresholds, amounts, ratios, periods or formulae are present
+- has_exception: true if an exception or carve-out is present
+- has_condition: true if a condition is present
+- applicable_industry: choose one from [Manufacturing, Electronic Information Industry, General, Other]
+- compliance_domains: string array of explicit compliance domains
+- economic_industries: string array. Use ["General"] when generally applicable
+
+## ProvisionTextParagraph
+### Description
+A fine-grained continuous source-text fragment inside the current
+ProvisionClause. It must come only from the current ProvisionClause text and
+must keep required lead-in context.
+### Properties
+- unit_number: structural locator. It must start with the parent ProvisionClause unit_number
+- unit_content: exact source text from the current ProvisionClause only. Do not paraphrase or invent
+- unit_level: point, subpoint, dash_item, paragraph_fragment or other
+- unit_purpose: explicit purpose or topic if stated
+- quantitative_feature: choose one from [Qualitative, Quantitative]
+- quantitative_indicator: structured object or null for concrete and verifiable numbers, amounts, ratios, time limits, counts, multiples or thresholds. Use exactly {{"raw_text":"original phrase or sentence","value_type":"amount/ratio/time_limit/count/multiple/other","min":number or null,"max":number or null,"unit":"explicit unit or empty","relation":"range/lower_bound/upper_bound/equal/other"}}. Do not output Reference, Formula, Time Limit, Deadline, Amount, Ratio, Upper Bound or other open enum values. References such as "in accordance with Article ...", "Part 5 of Annex VI", "Articles 85 to 89", and vague phrases such as "reasonable duration" or "the period" are not quantitative indicators; output null and set quantitative_feature to Qualitative.
+- applicable_subject: subject directly governed by this text fragment
+- responsibility_role: role of the subject if stated
+- conduct_description: required, permitted or prohibited conduct
+- condition: condition under which this fragment applies
+- legal_consequence: consequence if stated
+- exception: exception or carve-out if stated
+- time_element: dates, deadlines, periods or timing requirements if stated
+- other_information: other explicit information that cannot be placed above
+
+## Citation
+### Description
+A legal document, treaty, Article, Regulation, Directive or instrument
+explicitly cited by a ProvisionTextParagraph. Do not invent citations.
+### Properties
+- citation_type: Document or Provision
+- official_title: full or best explicit title of the cited instrument if stated
+- alias: common short title or abbreviation if stated
+- document_type: Regulation, Directive, Treaty, Article, Decision or other
+- citation_text: exact citation text
+- provision_number: cited Article or provision number if any
+- is_internal_reference: Yes if the citation points to the current document, otherwise No
+- citation_relation: pursuant to, under, subject to, defined in, reference, supplement, interpretation, exclusion or other explicit relation
+- citation_purpose: main purpose of the citation if explicit
+
+# Relations
+
+## CONTAINS
+### Triple
+ProvisionClause - CONTAINS - ProvisionTextParagraph
+ProvisionTextParagraph - CONTAINS - ProvisionTextParagraph
+
+## CITES
+### Triple
+ProvisionTextParagraph - CITES - Citation
+
+# Parser Compatibility Note
+Relations must be emitted as extraction class "{RELATION_CLASS}" with
+attributes "{SUBJECT_KEY}", "{PREDICATE_KEY}" and "{OBJECT_KEY}". Predicate
+values must be English relation names, such as "CONTAINS" or "CITES".
+"""
+
