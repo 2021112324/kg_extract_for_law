@@ -25,7 +25,7 @@ from app.infrastructure.string_utils.id_tool import generate_hex_uuid
 # 项目公共 Neo4j 清洗工具，用于避免节点 ID 中出现特殊控制字符。
 from app.infrastructure.string_utils.str_clean import clean_string_for_neo4j_extended
 # 合规风险类型枚举，用于把文首中文风险类型拆成稳定数组。
-from app.infrastructure.information_extraction.en_law_v2.config import RISK_TYPE_VALUES
+from app.infrastructure.information_extraction.en_law_v1.config import RISK_TYPE_VALUES
 
 
 # Langextract 兼容关系实体类名；schema/prompt 中也使用同一个值。
@@ -958,14 +958,14 @@ class FormatOneGraphBuilder:
         return nodes, edges
 
     def _article_node_name(self, article: dict[str, Any], provision_entity: dict[str, Any] | None = None) -> str:
-        """生成 v2 LegalProvision 节点名。"""
+        """生成 v1 LegalProvision 节点名。"""
         article_number = str(article.get("article_number") or "").strip()
         heading = str(article.get("article_heading") or "").strip()
         if provision_entity and provision_entity.get("name"):
             return str(provision_entity.get("name"))
         return f"{article_number} - {heading}" if heading else article_number
 
-    def _build_v2_article_contexts(
+    def _build_v1_article_contexts(
         self,
         filename: str,
         split_result: dict[str, Any],
@@ -973,7 +973,7 @@ class FormatOneGraphBuilder:
         failed_articles: list[dict[str, Any]],
         global_lookup: dict[str, str],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """构建 v2 Article/LegalProvision 节点，Article 阶段不处理 Clause。"""
+        """构建 v1 Article/LegalProvision 节点，Article 阶段不处理 Clause。"""
         nodes: list[dict[str, Any]] = []
         contexts: list[dict[str, Any]] = []
         article_result_map = {
@@ -1042,21 +1042,21 @@ class FormatOneGraphBuilder:
             })
         return nodes, contexts
 
-    def _build_v2_article_nodes(
+    def _build_v1_article_nodes(
         self,
         filename: str,
         doc_node: dict[str, Any],
         split_result: dict[str, Any],
         raw: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """构建 v2 Article、ProvisionClause、ProvisionTextParagraph 和 Citation。"""
+        """构建 v1 Article、ProvisionClause、ProvisionTextParagraph 和 Citation。"""
         global_lookup: dict[str, str] = {}
         _register_many(global_lookup, doc_node["node_id"], [doc_node["node_name"], LEGAL_DOCUMENT, "Legal Document"])
         external_citation_lookup: dict[str, dict[str, Any]] = {}
         edge_seen: set[tuple[str, str, str]] = set()
         edges: list[dict[str, Any]] = []
 
-        article_nodes, contexts = self._build_v2_article_contexts(
+        article_nodes, contexts = self._build_v1_article_contexts(
             filename,
             split_result,
             raw.get("article_extractions") or [],
@@ -1241,8 +1241,8 @@ class FormatOneGraphBuilder:
             split_result,
             raw.get("file_info_extraction"),
         )
-        # v2 构建 Article、ProvisionClause、ProvisionTextParagraph、Citation。
-        article_nodes, article_edges = self._build_v2_article_nodes(filename, doc_node, split_result, raw)
+        # v1 构建 Article、ProvisionClause、ProvisionTextParagraph、Citation。
+        article_nodes, article_edges = self._build_v1_article_nodes(filename, doc_node, split_result, raw)
         # 最终节点列表由文件级节点和 Article 级节点拼接得到。
         nodes = file_nodes + article_nodes
         # 最终关系列表再做一次整体去重。

@@ -7,7 +7,7 @@
 """
 
 # 从 schema 中引入关系兼容字段，确保 prompt 与 schema 使用同一套键名。
-from app.infrastructure.information_extraction.en_law_v2.prompt.schema import (
+from app.infrastructure.information_extraction.en_law_v1.prompt.schema import (
     OBJECT_KEY,
     PREDICATE_KEY,
     RELATION_CLASS,
@@ -194,7 +194,7 @@ Their values must still be English.
 
 
 # =============================================================================
-# v2 prompt overrides
+# v1 prompt overrides
 # =============================================================================
 prompt_for_article = f"""
 # Role

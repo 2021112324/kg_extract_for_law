@@ -23,7 +23,7 @@ from copy import deepcopy
 from typing import Any
 
 # 合规风险类型允许值来自配置文件，用于校验文首业务分类。
-from app.infrastructure.information_extraction.en_law_v2.config import RISK_TYPE_VALUES
+from app.infrastructure.information_extraction.en_law_v1.config import RISK_TYPE_VALUES
 
 
 # Article 标题正则：匹配 `Article 1`、`## Article 1`、`Article 1a` 等格式。
@@ -65,7 +65,7 @@ STRUCTURAL_UNIT_PATTERNS = [
     ("dash_item", re.compile(r"^\s*[-–]\s+(?P<content>.+)$")),
 ]
 
-# v2 ProvisionClause 边界：只允许 Article 正文行首一级数字编号，如 `1. ...`。
+# v1 ProvisionClause 边界：只允许 Article 正文行首一级数字编号，如 `1. ...`。
 # `(1)`、`(a)`、`(i)` 等编号不得作为 ProvisionClause 边界。
 PROVISION_CLAUSE_RE = re.compile(r"^\s*(?P<number>\d+)\.\s+(?P<content>.+)$")
 
@@ -427,7 +427,7 @@ def _extract_article_units(article: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def extract_provision_clauses(article: dict[str, Any]) -> list[dict[str, Any]]:
-    """从单个 Article 正文中抽取 v2 ProvisionClause。
+    """从单个 Article 正文中抽取 v1 ProvisionClause。
 
     显式 ProvisionClause 只由行首 `1. `、`2. `、`3. ` 等一级编号生成。
     若 Article 正文不存在该类一级编号，则整个 Article 正文作为隐式 ProvisionClause。
@@ -674,7 +674,7 @@ def split_format_one_document(
         current_article["is_amendment_article"] = bool(AMENDMENT_RE.search(content))
         # 抽取 Article 内部 paragraph/point/subpoint 等结构单元。
         current_article["structural_units"] = _extract_article_units(current_article)
-        # v2: Article 下一级条款单元由代码确定，供后续独立 ProvisionClause 抽取使用。
+        # v1: Article 下一级条款单元由代码确定，供后续独立 ProvisionClause 抽取使用。
         current_article["provision_clauses"] = extract_provision_clauses(current_article)
         # 加入最终 Article 列表。
         articles.append(current_article)

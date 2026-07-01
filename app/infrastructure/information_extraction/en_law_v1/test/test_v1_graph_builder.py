@@ -1,11 +1,11 @@
-"""en_law_v2 图谱装配测试。"""
+"""en_law_v1 图谱装配测试。"""
 
-from app.infrastructure.information_extraction.en_law_v2.graph_builder import FormatOneGraphBuilder
+from app.infrastructure.information_extraction.en_law_v1.graph_builder import FormatOneGraphBuilder
 
 
 def test_graph_builder_separates_article_clause_and_text_paragraph():
     split_result = {
-        "document_format": "format_one_eu_regulation_directive_v2",
+        "document_format": "format_one_eu_regulation_directive",
         "fallback_metadata": {"document_name": "Sample Regulation"},
         "recitals": [],
         "annexes_metadata": [],
@@ -116,7 +116,7 @@ def test_graph_builder_separates_article_clause_and_text_paragraph():
 
 def test_graph_builder_dedupes_text_paragraph_unit_number_and_node_name():
     split_result = {
-        "document_format": "format_one_eu_regulation_directive_v2",
+        "document_format": "format_one_eu_regulation_directive",
         "fallback_metadata": {"document_name": "Sample Regulation"},
         "recitals": [],
         "annexes_metadata": [],
@@ -185,7 +185,7 @@ def test_graph_builder_dedupes_text_paragraph_unit_number_and_node_name():
 
 def test_graph_builder_normalizes_legal_function_and_quantitative_indicator():
     split_result = {
-        "document_format": "format_one_eu_regulation_directive_v2",
+        "document_format": "format_one_eu_regulation_directive",
         "fallback_metadata": {"document_name": "Sample Regulation"},
         "recitals": [],
         "annexes_metadata": [],

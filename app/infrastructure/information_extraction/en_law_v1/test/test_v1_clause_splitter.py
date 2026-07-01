@@ -1,6 +1,6 @@
-"""en_law_v2 ProvisionClause 切分测试。"""
+"""en_law_v1 ProvisionClause 切分测试。"""
 
-from app.infrastructure.information_extraction.en_law_v2.splitter import split_format_one_document
+from app.infrastructure.information_extraction.en_law_v1.splitter import split_format_one_document
 
 
 def test_explicit_provision_clause_uses_only_line_start_number_dot():

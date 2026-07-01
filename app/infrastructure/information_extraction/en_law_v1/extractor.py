@@ -29,7 +29,7 @@ import os
 from typing import Any
 
 # 引入英文法规抽取的模型、并发、超时和宽松模式配置。
-from app.infrastructure.information_extraction.en_law_v2.config import (
+from app.infrastructure.information_extraction.en_law_v1.config import (
     EN_LAW_BATCH_LENGTH,
     EN_LAW_MAX_CHAR_BUFFER,
     EN_LAW_MAX_CONCURRENT,
@@ -44,9 +44,9 @@ from app.infrastructure.information_extraction.en_law_v2.config import (
     EN_LAW_MAX_RETRIES,
 )
 # 引入图谱构建器和 LLM 输出标准化工具。
-from app.infrastructure.information_extraction.en_law_v2.graph_builder import FormatOneGraphBuilder, normalize_extraction_result, to_plain
+from app.infrastructure.information_extraction.en_law_v1.graph_builder import FormatOneGraphBuilder, normalize_extraction_result, to_plain
 # 引入文件级和 Article 级抽取所需的 prompt、schema、example。
-from app.infrastructure.information_extraction.en_law_v2.prompt import (
+from app.infrastructure.information_extraction.en_law_v1.prompt import (
     example_for_article,
     example_for_file_info,
     example_for_provision_clause,
@@ -58,7 +58,7 @@ from app.infrastructure.information_extraction.en_law_v2.prompt import (
     schema_for_provision_clause,
 )
 # 引入规则切分入口和文本清理函数。
-from app.infrastructure.information_extraction.en_law_v2.splitter import clean_text, split_format_one_document
+from app.infrastructure.information_extraction.en_law_v1.splitter import clean_text, split_format_one_document
 
 
 def save_json(data: dict[str, Any], output_path: str) -> str:

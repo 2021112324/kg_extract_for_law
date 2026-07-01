@@ -251,9 +251,9 @@ values must be English relation names, such as "CONTAINS" or "CITES".
 
 
 # =============================================================================
-# v2 schema overrides
+# v1 schema overrides
 # =============================================================================
-# v2 中 Article/LegalProvision 抽取与 ProvisionClause 抽取必须分离：
+# v1 中 Article/LegalProvision 抽取与 ProvisionClause 抽取必须分离：
 # - Article schema 只允许产出 LegalProvision。
 # - ProvisionClause schema 才允许产出 ProvisionClause、ProvisionTextParagraph、Citation 和关系。
 schema_for_article = f"""

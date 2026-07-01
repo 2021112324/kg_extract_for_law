@@ -120,7 +120,7 @@ example_for_article = [
     }
 ]
 
-# v2 覆盖 Article 示例：Article 抽取只产出 LegalProvision，避免示例污染到 Clause 阶段。
+# v1 覆盖 Article 示例：Article 抽取只产出 LegalProvision，避免示例污染到 Clause 阶段。
 example_for_article = [
     {
         "text": (

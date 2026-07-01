@@ -1117,7 +1117,7 @@ async def clause_en_v2_extract_by_dir(
 
 功能：对指定目录下的格式一英文法律、法规、法典、行政命令等文本进行 v2 英文知识图谱抽取。
 流程与 /clause_en_extract_by_dir 类似，但底层使用：
-app/infrastructure/information_extraction/en_law_v2/FormatOneEnLawExtractor
+app/infrastructure/information_extraction/en_law_v1/FormatOneEnLawExtractor
 
 v2 抽取逻辑：
 1. Article / LegalProvision 抽取与 ProvisionClause 抽取分离。

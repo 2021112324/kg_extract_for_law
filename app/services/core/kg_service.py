@@ -31,12 +31,12 @@ from app.infrastructure.information_extraction.en_law.neo4j_export import (
     prepare_en_law_kg_for_neo4j,
 )
 from app.infrastructure.information_extraction.en_law_v1 import (
-    FormatOneEnLawExtractor as FormatOneEnLawV2Extractor,
+    FormatOneEnLawExtractor as FormatOneEnLawV1Extractor,
 )
 from app.infrastructure.information_extraction.en_law_v1.neo4j_export import (
-    EnLawNeo4jRunStats as EnLawV2Neo4jRunStats,
-    discover_en_law_files as discover_en_law_v2_files,
-    prepare_en_law_kg_for_neo4j as prepare_en_law_v2_kg_for_neo4j,
+    EnLawNeo4jRunStats as EnLawV1Neo4jRunStats,
+    discover_en_law_files as discover_en_law_v1_files,
+    prepare_en_law_kg_for_neo4j as prepare_en_law_v1_kg_for_neo4j,
 )
 from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
@@ -103,7 +103,7 @@ class KGService:
             max_concurrent=50,
             lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
         )
-        self.format_one_en_law_v2_extractor = FormatOneEnLawV2Extractor(
+        self.format_one_en_law_v1_extractor = FormatOneEnLawV1Extractor(
             max_concurrent=50,
             lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
         )
@@ -2267,7 +2267,7 @@ class KGService:
         从本地目录提取格式一英文法规 v2 知识图谱，并保存至 Neo4j。
 
         v2 与旧英文抽取流程一致，但底层使用
-        app.infrastructure.information_extraction.en_law_v2.FormatOneEnLawExtractor。
+        app.infrastructure.information_extraction.en_law_v1.FormatOneEnLawExtractor。
         核心差异：
         1. Article / LegalProvision 抽取只负责 Article 属性；
         2. ProvisionClause 由代码按 Article 正文行首一级数字编号切分；
@@ -2286,7 +2286,7 @@ class KGService:
             raise Exception(f"文件目录不是目录: {clause_file_dir}")
 
         input_root = Path(clause_file_dir)
-        input_files = discover_en_law_v2_files(input_root)
+        input_files = discover_en_law_v1_files(input_root)
         if not input_files:
             raise Exception(f"未发现可抽取的英文法规文件，目录下需包含 .md 或 .txt: {clause_file_dir}")
 
@@ -2298,13 +2298,13 @@ class KGService:
         kg_id = kg_result.get("data").get("id")
         kg_graph_name = kg_result.get("data").get("graph_name")
 
-        run_stats = EnLawV2Neo4jRunStats(total_files=len(input_files))
+        run_stats = EnLawV1Neo4jRunStats(total_files=len(input_files))
         error_files = []
         success_count = 0
 
         for input_file in input_files:
             relative_name = input_file.relative_to(input_root).as_posix()
-            graph_name = generate_unique_name("en_law_v2_task")
+            graph_name = generate_unique_name("en_law_v1_task")
             new_task = KGExtractionTask(
                 kg_id=kg_id,
                 name=input_file.stem,
@@ -2313,7 +2313,7 @@ class KGService:
                 parameters={
                     "input_path": str(input_file),
                     "relative_path": relative_name,
-                    "extractor_version": "en_law_v2",
+                    "extractor_version": "en_law_v1",
                 },
                 graph_name=graph_name,
                 status=1,
@@ -2326,7 +2326,7 @@ class KGService:
             try:
                 logging.info(f"格式一英文法规 v2 图谱抽取开始: {relative_name}")
                 try:
-                    clause_kg = await self.format_one_en_law_v2_extractor.extract_file_to_kg(
+                    clause_kg = await self.format_one_en_law_v1_extractor.extract_file_to_kg(
                         str(input_file),
                         run_llm=True,
                         output_dir=None,
@@ -2336,7 +2336,7 @@ class KGService:
                     raise Exception(f"{relative_name}英文法规 v2 图谱抽取时出现问题，请检查！{str(e)}")
 
                 run_stats.add_kg_warnings(relative_name, clause_kg)
-                neo4j_kg = prepare_en_law_v2_kg_for_neo4j(clause_kg)
+                neo4j_kg = prepare_en_law_v1_kg_for_neo4j(clause_kg)
                 if not neo4j_kg.get("nodes"):
                     raise Exception("英文法规 v2 图谱节点为空")
 
@@ -2412,7 +2412,7 @@ class KGService:
         logging.info(f"英文法规 v2 文件处理错误数: {run_stats.file_processing_error}")
         logging.info(f"英文法规 v2 弱警告数: {run_stats.warning}")
         logging.info(f"英文法规 v2 强警告数: {run_stats.strong_warning}")
-        await self.format_one_en_law_v2_extractor.logging_result_stats()
+        await self.format_one_en_law_v1_extractor.logging_result_stats()
         if success_count == 0:
             raise Exception("英文法规 v2 目录下没有成功入库的图谱")
         return {
