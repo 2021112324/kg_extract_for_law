@@ -1105,21 +1105,21 @@ Returns:
             data=None
         )
 
-@router.post("/kgs/{kg_id}/clause_en_v2_extract_by_dir")
-async def clause_en_v2_extract_by_dir(
+@router.post("/kgs/{kg_id}/clause_en_v1_extract_by_dir")
+async def clause_en_v1_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器
         data_dir: str,
         if_del_task: bool = False,
         db: Session = Depends(get_db),  # 数据库会话依赖注入
 ):
     """
-基于单门英文法律法条文件的 v2 知识图谱抽取接口。
+基于单门英文法律法条文件的 v1 知识图谱抽取接口。
 
-功能：对指定目录下的格式一英文法律、法规、法典、行政命令等文本进行 v2 英文知识图谱抽取。
+功能：对指定目录下的格式一英文法律、法规、法典、行政命令等文本进行 v1 英文知识图谱抽取。
 流程与 /clause_en_extract_by_dir 类似，但底层使用：
 app/infrastructure/information_extraction/en_law_v1/FormatOneEnLawExtractor
 
-v2 抽取逻辑：
+v1 抽取逻辑：
 1. Article / LegalProvision 抽取与 ProvisionClause 抽取分离。
 2. Article 阶段只抽取 LegalProvision 属性，不抽取 ProvisionClause 或 ProvisionTextParagraph。
 3. ProvisionClause 由代码按 Article 正文行首 `1. `、`2. `、`3. ` 等一级编号切分。
@@ -1149,16 +1149,66 @@ Returns:
     try:
         background_tasks.add_task(
             kg_task_manager.run_async_function,
-            kg_service.clause_en_v2_extract_by_local_dir,
+            kg_service.clause_en_v1_extract_by_local_dir,
             {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
         )
         return success_response(
-            msg="英文法条 v2 抽取任务开始执行",
+            msg="英文法条 v1 抽取任务开始执行",
             data=None
         )
     except Exception as e:
         return error_response(
-            msg=f"执行英文法条 v2 抽取任务失败: {str(e)}",
+            msg=f"执行英文法条 v1 抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
+@router.post("/kgs/{kg_id}/clause_en_v2_extract_by_dir")
+async def clause_en_v2_extract_by_dir(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),
+):
+    """
+    Format-two English law knowledge graph extraction API.
+
+    Function:
+    Extract knowledge graphs from format-two English law files under the given
+    local directory. Format two targets United States act / statutory
+    compilation texts whose main provision boundaries are SECTION / SEC. / Sec.
+
+    Implementation:
+    app.infrastructure.information_extraction.en_law_v2.FormatTwoEnLawExtractor
+
+    Extraction logic:
+    1. LegalProvision is created by deterministic SECTION / SEC. / Sec. splitting.
+    2. ProvisionClause is created by deterministic subsection splitting, normally
+       based on (a), (b), (c).
+    3. The LLM only enriches LegalProvision / ProvisionClause attributes and
+       extracts ProvisionTextParagraph / Citation where applicable.
+    4. Table-of-contents Sec. items are excluded from body LegalProvision nodes.
+    5. Amendment sections, empty Sec. candidates and U.S.C. codified insertions
+       are recorded as validation/warning information.
+
+    Request JSON:
+    {
+        "data_dir": "format-two English law directory"
+    }
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_en_v2_extract_by_local_dir,
+            {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="英文法规格式二抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行英文法规格式二抽取任务失败: {str(e)}",
             code=500,
             data=None
         )
