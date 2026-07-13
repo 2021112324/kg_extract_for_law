@@ -1,4 +1,4 @@
-"""格式一英文法规知识图谱抽取器入口。
+﻿"""格式一英文法规知识图谱抽取器入口。
 
 本文件是 `en_law` 模块对外最主要的调用入口，负责把以下步骤串起来：
 1. 使用 `splitter.py` 对英文法规 Markdown 做一阶段结构切分。
@@ -25,11 +25,13 @@ import json
 import logging
 # os 用于处理路径和文件名。
 import os
+# re 用于统计英文词数和定位修订关键词。
+import re
 # Any 用于描述 LLM 结果这类结构较灵活的数据。
 from typing import Any
 
 # 引入英文法规抽取的模型、并发、超时和宽松模式配置。
-from app.infrastructure.information_extraction.en_law.config import (
+from app.infrastructure.information_extraction.en_law_v3.config import (
     EN_LAW_BATCH_LENGTH,
     EN_LAW_MAX_CHAR_BUFFER,
     EN_LAW_MAX_CONCURRENT,
@@ -42,20 +44,27 @@ from app.infrastructure.information_extraction.en_law.config import (
     EN_LAW_TIMEOUT,
     EN_LAW_LENIENT_MODE,
     EN_LAW_MAX_RETRIES,
+    SECTION_AMENDMENT_KEYWORD_WINDOW_CHARS,
+    SECTION_LIGHT_INPUT_CHAR_THRESHOLD,
+    SECTION_LIGHT_INPUT_HEAD_CHARS,
+    SECTION_LIGHT_INPUT_TAIL_CHARS,
 )
 # 引入图谱构建器和 LLM 输出标准化工具。
-from app.infrastructure.information_extraction.en_law.graph_builder import FormatOneGraphBuilder, normalize_extraction_result, to_plain
+from app.infrastructure.information_extraction.en_law_v3.graph_builder import FormatThreeGraphBuilder, normalize_extraction_result, to_plain
 # 引入文件级和 Article 级抽取所需的 prompt、schema、example。
-from app.infrastructure.information_extraction.en_law.prompt import (
+from app.infrastructure.information_extraction.en_law_v3.prompt import (
     example_for_article,
     example_for_file_info,
+    example_for_provision_clause,
     prompt_for_article,
     prompt_for_file_info,
+    prompt_for_provision_clause,
     schema_for_article,
     schema_for_file_info,
+    schema_for_provision_clause,
 )
 # 引入规则切分入口和文本清理函数。
-from app.infrastructure.information_extraction.en_law.splitter import clean_text, split_format_one_document
+from app.infrastructure.information_extraction.en_law_v3.splitter import clean_text, split_v3_document
 
 
 def save_json(data: dict[str, Any], output_path: str) -> str:
@@ -87,6 +96,84 @@ def _base_output_path(input_path_or_filename: str, output_dir: str, suffix: str)
 def _has_extraction_content(extraction: dict[str, Any]) -> bool:
     """判断标准化 LLM 抽取结果中是否真的包含实体或关系。"""
     return bool((extraction.get("entities") or []) or (extraction.get("relations") or []))
+
+
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
+AMENDMENT_KEYWORD_RE = re.compile(
+    r"\b(amend|amends|amended|amending|repeal|repeals|repealed|repealing|"
+    r"insert|inserts|inserted|inserting|strike|strikes|struck|striking|"
+    r"replace|replaces|replaced|replacing)\b",
+    re.IGNORECASE,
+)
+
+
+def _word_count(text: str) -> int:
+    """按英文法规文本粗略统计词数。"""
+    return len(WORD_RE.findall(str(text or "")))
+
+
+def _collect_keyword_windows(text: str, window_chars: int) -> list[dict[str, Any]]:
+    """收集修订关键词附近文本窗口，供 Section 级轻量输入判断修订属性。"""
+    if window_chars <= 0:
+        return []
+    value = str(text or "")
+    windows: list[dict[str, Any]] = []
+    seen_ranges: set[tuple[int, int]] = set()
+    half_window = max(window_chars // 2, 1)
+    for match in AMENDMENT_KEYWORD_RE.finditer(value):
+        start = max(match.start() - half_window, 0)
+        end = min(match.end() + half_window, len(value))
+        range_key = (start, end)
+        if range_key in seen_ranges:
+            continue
+        seen_ranges.add(range_key)
+        windows.append({
+            "keyword": match.group(0),
+            "start_char": start,
+            "end_char": end,
+            "text": clean_text(value[start:end]),
+        })
+    return windows
+
+
+def _build_section_llm_text(section_text: str) -> tuple[str, dict[str, Any]]:
+    """为 Section 级 LegalProvision 属性抽取构造全文或轻量正文输入。"""
+    value = str(section_text or "")
+    words = _word_count(value)
+    chars = len(value)
+    metadata = {
+        "section_input_mode": "full_text",
+        "section_original_word_count": words,
+        "section_original_char_count": chars,
+        "section_llm_input_truncated": False,
+    }
+    if chars <= SECTION_LIGHT_INPUT_CHAR_THRESHOLD:
+        return value, metadata
+
+    head = value[:SECTION_LIGHT_INPUT_HEAD_CHARS]
+    tail = value[-SECTION_LIGHT_INPUT_TAIL_CHARS:] if SECTION_LIGHT_INPUT_TAIL_CHARS > 0 else ""
+    keyword_windows = _collect_keyword_windows(value, SECTION_AMENDMENT_KEYWORD_WINDOW_CHARS)
+    light_payload = {
+        "input_note": (
+            "The original Section is very long. This is a shortened text for "
+            "Section-level LegalProvision property extraction only."
+        ),
+        "original_word_count": words,
+        "original_char_count": chars,
+        "head_text": clean_text(head),
+        "tail_text": clean_text(tail),
+        "amendment_keyword_windows": keyword_windows,
+    }
+    metadata.update({
+        "section_input_mode": "light_text",
+        "section_llm_input_truncated": True,
+        "section_light_char_threshold": SECTION_LIGHT_INPUT_CHAR_THRESHOLD,
+        "section_light_head_chars": SECTION_LIGHT_INPUT_HEAD_CHARS,
+        "section_light_tail_chars": SECTION_LIGHT_INPUT_TAIL_CHARS,
+        "section_amendment_keyword_window_chars": SECTION_AMENDMENT_KEYWORD_WINDOW_CHARS,
+        "section_amendment_keyword_window_count": len(keyword_windows),
+    })
+    return json.dumps(light_payload, ensure_ascii=False, indent=2), metadata
 
 
 @dataclass
@@ -137,7 +224,7 @@ class ExtractionRunStats:
         }
 
 
-class FormatOneEnLawExtractor:
+class FormatThreeEnLawExtractor:
     """格式一英文法规抽取器。
 
     该类对外提供切分、LLM 抽取、图谱构建和文件保存能力。
@@ -202,7 +289,7 @@ class FormatOneEnLawExtractor:
     ) -> dict[str, Any]:
         """对传入的法规文本做一阶段结构切分。"""
         # 直接委托给规则切分器；该方法适合单测或内存文本调用。
-        return split_format_one_document(text, filename=filename, include_annex_content=include_annex_content)
+        return split_v3_document(text, filename=filename)
 
     def split_file(
         self,
@@ -256,6 +343,11 @@ class FormatOneEnLawExtractor:
 
     def build_article_llm_input(self, filename: str, article: dict[str, Any]) -> str:
         """构造单个 Article 的 LLM 输入文本。"""
+        # Section 级 schema 只补充 LegalProvision 少量属性；超长 Section 使用轻量正文输入即可。
+        section_source_text = article.get("content_clean")
+        if section_source_text is None:
+            section_source_text = article.get("content", "")
+        section_text, section_input_metadata = _build_section_llm_text(section_source_text)
         # 使用 JSON 作为输入载体，让模型能明确看到 Article 编号、标题、层级和正文。
         payload = {
             "filename": filename,
@@ -264,9 +356,33 @@ class FormatOneEnLawExtractor:
             "classification_context": article.get("classification_context") or {},
             "is_amendment_article": article.get("is_amendment_article", False),
             "structural_units": article.get("structural_units", []),
-            "text": article.get("content", ""),
+            "section_input_metadata": section_input_metadata,
+            "text": section_text,
         }
         # ensure_ascii=False 保留法规文本中的特殊符号和中文业务字段。
+        return clean_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def build_provision_clause_llm_input(
+        self,
+        filename: str,
+        article: dict[str, Any],
+        provision_clause: dict[str, Any],
+    ) -> str:
+        """构造单个 ProvisionClause 的 LLM 输入文本。"""
+        payload = {
+            "filename": filename,
+            "article_number": article.get("article_number"),
+            "article_heading": article.get("article_heading"),
+            "classification_context": article.get("classification_context") or {},
+            "provision_clause": {
+                "unit_number": provision_clause.get("unit_number"),
+                "unit_content": provision_clause.get("unit_content_clean") or provision_clause.get("unit_content"),
+                "unit_level": provision_clause.get("unit_level"),
+                "line_start": provision_clause.get("line_start"),
+                "line_end": provision_clause.get("line_end"),
+                "explicit_boundary": provision_clause.get("explicit_boundary"),
+            },
+        }
         return clean_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
     async def llm_extract_file_info(self, filename: str, split_result: dict[str, Any]) -> dict[str, Any]:
@@ -318,6 +434,39 @@ class FormatOneEnLawExtractor:
                 "raw": to_plain(result),
             }
 
+    async def llm_extract_provision_clause(
+        self,
+        filename: str,
+        article: dict[str, Any],
+        provision_clause: dict[str, Any],
+    ) -> dict[str, Any]:
+        """调用 LLM 抽取单个 ProvisionClause 的条款属性和文本片段。"""
+        async with self.semaphore:
+            input_text = self.build_provision_clause_llm_input(filename, article, provision_clause)
+            result = await self._get_llm_extractor().entity_and_relationship_extract(
+                user_prompt=prompt_for_provision_clause,
+                schema=schema_for_provision_clause,
+                input_text=input_text,
+                examples=example_for_provision_clause,
+            )
+            normalized = normalize_extraction_result(result)
+            if not _has_extraction_content(normalized):
+                raise ValueError(
+                    f"ProvisionClause LLM extraction returned empty result for "
+                    f"{provision_clause.get('unit_number')}"
+                )
+            return {
+                "article_number": article.get("article_number"),
+                "article_heading": article.get("article_heading"),
+                "provision_clause": provision_clause,
+                "unit_number": provision_clause.get("unit_number"),
+                "line_start": provision_clause.get("line_start"),
+                "line_end": provision_clause.get("line_end"),
+                "input_text": input_text,
+                "extraction": normalized,
+                "raw": to_plain(result),
+            }
+
     async def llm_extract_from_split_result(
         self,
         filename: str,
@@ -335,7 +484,7 @@ class FormatOneEnLawExtractor:
             self.result_stats.add_error(f"File-info extraction failed for {filename}: {exc}")
             raise
 
-        # 为每个 Article 创建一个异步任务；具体并发由 llm_extract_article 内部信号量控制。
+        # 为每个 Article 创建一个异步任务；Article 阶段只抽 LegalProvision 属性。
         tasks = [self.llm_extract_article(filename, article) for article in split_result.get("clauses", [])]
         # return_exceptions=True 允许单条 Article 失败后继续收集其他结果。
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -377,17 +526,59 @@ class FormatOneEnLawExtractor:
             self.result_stats.add_strong_warning(message)
             raise ValueError(message)
 
+        clause_jobs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for article in split_result.get("clauses", []):
+            for provision_clause in article.get("provision_clauses") or []:
+                clause_jobs.append((article, provision_clause))
+        clause_tasks = [
+            self.llm_extract_provision_clause(filename, article, provision_clause)
+            for article, provision_clause in clause_jobs
+        ]
+        clause_results_raw = await asyncio.gather(*clause_tasks, return_exceptions=True) if clause_tasks else []
+        provision_clause_results = []
+        failed_provision_clause_results = []
+        for (article, provision_clause), result in zip(clause_jobs, clause_results_raw):
+            if isinstance(result, Exception):
+                failed_provision_clause_results.append(
+                    {
+                        "article_number": article.get("article_number"),
+                        "unit_number": provision_clause.get("unit_number"),
+                        "provision_clause": provision_clause,
+                        "error": str(result),
+                    }
+                )
+                self.result_stats.add_error(
+                    f"ProvisionClause extraction failed for {filename} "
+                    f"{provision_clause.get('unit_number')}: {result}"
+                )
+            else:
+                provision_clause_results.append(result)
+
+        if failed_provision_clause_results and not self.lenient_mode:
+            failed_numbers = ", ".join(str(item.get("unit_number") or "unknown") for item in failed_provision_clause_results)
+            message = (
+                f"{len(failed_provision_clause_results)} ProvisionClause extractions failed in strict mode "
+                f"for {filename}: {failed_numbers}"
+            )
+            self.result_stats.add_strong_warning(message)
+            raise ValueError(message)
+
         # raw_result 是 LLM 阶段的完整审查材料，不等同于最终图谱。
         raw_result = {
             "source_filename": filename,
             "file_info_extraction": file_info_result,
             "article_extractions": article_results,
+            "provision_clause_extractions": provision_clause_results,
             "failed_article_extractions": failed_article_results,
+            "failed_provision_clause_extractions": failed_provision_clause_results,
             "skipped_annexes": split_result.get("annexes_metadata", []),
             "stats": {
                 "article_total": len(split_result.get("clauses", [])),
                 "article_success": len(article_results),
                 "article_failed": len(failed_article_results),
+                "provision_clause_total": len(clause_jobs),
+                "provision_clause_success": len(provision_clause_results),
+                "provision_clause_failed": len(failed_provision_clause_results),
                 "annex_skipped": len(split_result.get("annexes_metadata", [])),
             },
             "run_stats": self.result_stats.to_dict(),
@@ -406,7 +597,7 @@ class FormatOneEnLawExtractor:
     ) -> dict[str, Any]:
         """把切分结果和 LLM 结果组装为最终图谱。"""
         # 每次构建图谱都创建新的 builder，避免 warnings 在多次调用间残留。
-        builder = FormatOneGraphBuilder(lenient_mode=self.lenient_mode)
+        builder = FormatThreeGraphBuilder(lenient_mode=self.lenient_mode)
         return builder.build(filename, split_result, raw_llm_result)
 
     async def extract_text_to_kg(
@@ -452,3 +643,6 @@ class FormatOneEnLawExtractor:
         logging.info("errors: %s", self.result_stats.error)
         logging.info("warnings: %s", self.result_stats.warning)
         logging.info("strong warnings: %s", self.result_stats.strong_warning)
+
+
+

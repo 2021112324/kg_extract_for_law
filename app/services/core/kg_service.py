@@ -30,6 +30,30 @@ from app.infrastructure.information_extraction.en_law.neo4j_export import (
     discover_en_law_files,
     prepare_en_law_kg_for_neo4j,
 )
+from app.infrastructure.information_extraction.en_law_v1 import (
+    FormatOneEnLawExtractor as FormatOneEnLawV1Extractor,
+)
+from app.infrastructure.information_extraction.en_law_v1.neo4j_export import (
+    EnLawNeo4jRunStats as EnLawV1Neo4jRunStats,
+    discover_en_law_files as discover_en_law_v1_files,
+    prepare_en_law_kg_for_neo4j as prepare_en_law_v1_kg_for_neo4j,
+)
+from app.infrastructure.information_extraction.en_law_v2 import (
+    FormatTwoEnLawExtractor,
+)
+from app.infrastructure.information_extraction.en_law_v2.neo4j_export import (
+    EnLawNeo4jRunStats as EnLawV2Neo4jRunStats,
+    discover_en_law_files as discover_en_law_v2_files,
+    prepare_en_law_kg_for_neo4j as prepare_en_law_v2_kg_for_neo4j,
+)
+from app.infrastructure.information_extraction.en_law_v3 import (
+    FormatThreeEnLawExtractor,
+)
+from app.infrastructure.information_extraction.en_law_v3.neo4j_export import (
+    EnLawNeo4jRunStats as EnLawV3Neo4jRunStats,
+    discover_en_law_files as discover_en_law_v3_files,
+    prepare_en_law_kg_for_neo4j as prepare_en_law_v3_kg_for_neo4j,
+)
 from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
 from app.infrastructure.information_extraction.national_standard.graph_extract import NationalStandardGraphExtractor
@@ -92,7 +116,19 @@ class KGService:
             max_concurrent=50
         )
         self.format_one_en_law_extractor = FormatOneEnLawExtractor(
-            max_concurrent=int(os.getenv("EN_LAW_SERVICE_MAX_CONCURRENT", "1")),
+            max_concurrent=50,
+            lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
+        )
+        self.format_one_en_law_v1_extractor = FormatOneEnLawV1Extractor(
+            max_concurrent=50,
+            lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
+        )
+        self.v2_en_law_extractor = FormatTwoEnLawExtractor(
+            max_concurrent=50,
+            lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
+        )
+        self.v3_en_law_extractor = FormatThreeEnLawExtractor(
+            max_concurrent=50,
             lenient_mode=os.getenv("EN_LAW_SERVICE_LENIENT_MODE", "true").lower() in {"1", "true", "yes"},
         )
         self.litigation_extractor = CaseExtractor(
@@ -2245,6 +2281,524 @@ class KGService:
             "stats": run_stats.to_dict(),
         }
 
+    async def clause_en_v2_extract_by_local_dir(
+            self,
+            clause_file_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        从本地目录提取格式一英文法规 v2 知识图谱，并保存至 Neo4j。
+
+        v2 与旧英文抽取流程一致，但底层使用
+        app.infrastructure.information_extraction.en_law_v1.FormatOneEnLawExtractor。
+        核心差异：
+        1. Article / LegalProvision 抽取只负责 Article 属性；
+        2. ProvisionClause 由代码按 Article 正文行首一级数字编号切分；
+        3. 每个 ProvisionClause 独立抽取 ProvisionClause 属性和 ProvisionTextParagraph；
+        4. 图谱结构为 LegalDocument -> LegalProvision -> ProvisionClause -> ProvisionTextParagraph。
+
+        :param clause_file_dir: 英文法条文件夹路径
+        :param if_del_task: 合并子图后是否删除 task 子图
+        :param db: 数据库会话
+        :return:
+        """
+        clause_file_dir = str(clause_file_dir).replace('\\', '/')
+        if not os.path.exists(clause_file_dir):
+            raise Exception(f"文件目录不存在: {clause_file_dir}")
+        if not os.path.isdir(clause_file_dir):
+            raise Exception(f"文件目录不是目录: {clause_file_dir}")
+
+        input_root = Path(clause_file_dir)
+        input_files = discover_en_law_v1_files(input_root)
+        if not input_files:
+            raise Exception(f"未发现可抽取的英文法规文件，目录下需包含 .md 或 .txt: {clause_file_dir}")
+
+        new_kg = KGCreate(
+            name=f"{input_root.name}_v2",
+            description="格式一英文法规 v2 知识图谱",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+
+        run_stats = EnLawV1Neo4jRunStats(total_files=len(input_files))
+        error_files = []
+        success_count = 0
+
+        for input_file in input_files:
+            relative_name = input_file.relative_to(input_root).as_posix()
+            graph_name = generate_unique_name("en_law_v1_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=input_file.stem,
+                description="格式一英文法规 v2 知识图谱抽取任务",
+                prompt="",
+                parameters={
+                    "input_path": str(input_file),
+                    "relative_path": relative_name,
+                    "extractor_version": "en_law_v1",
+                },
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            try:
+                logging.info(f"格式一英文法规 v2 图谱抽取开始: {relative_name}")
+                try:
+                    clause_kg = await self.format_one_en_law_v1_extractor.extract_file_to_kg(
+                        str(input_file),
+                        run_llm=True,
+                        output_dir=None,
+                    )
+                except Exception as e:
+                    run_stats.add_extraction_error(relative_name, str(e))
+                    raise Exception(f"{relative_name}英文法规 v2 图谱抽取时出现问题，请检查！{str(e)}")
+
+                run_stats.add_kg_warnings(relative_name, clause_kg)
+                neo4j_kg = prepare_en_law_v1_kg_for_neo4j(clause_kg)
+                if not neo4j_kg.get("nodes"):
+                    raise Exception("英文法规 v2 图谱节点为空")
+
+                try:
+                    self.graph_storage.connect()
+                    saved = self.graph_storage.add_subgraph_with_merge(
+                        neo4j_kg,
+                        graph_name,
+                        "DomainLevel",
+                        filename=relative_name,
+                    )
+                    self.graph_storage.disconnect()
+                    if not saved:
+                        raise Exception("英文法规 v2 图谱保存到 Neo4j 失败")
+                except Exception as e:
+                    try:
+                        self.graph_storage.disconnect()
+                    except Exception:
+                        pass
+                    run_stats.add_storage_error(relative_name, str(e))
+                    raise Exception(f"{relative_name}英文法规 v2 图谱保存时出现问题，请检查！{str(e)}")
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                run_stats.success_files += 1
+                success_count += 1
+                logging.info(
+                    "格式一英文法规 v2 图谱抽取完成: %s, nodes=%s, edges=%s",
+                    relative_name,
+                    len(neo4j_kg.get("nodes") or []),
+                    len(neo4j_kg.get("edges") or []),
+                )
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                if "图谱抽取时出现问题" not in str(e) and "图谱保存时出现问题" not in str(e):
+                    run_stats.add_file_processing_error(relative_name, str(e))
+                logging.error(f"{relative_name}英文法规 v2 文件处理出现问题，请检查！{str(e)}")
+                error_files.append((relative_name, str(e)))
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在合并格式一英文法规 v2 图谱 {graph_name} -> {kg_graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info(f"格式一英文法规 v2 图谱 {graph_name} 合并完成")
+                self.graph_storage.disconnect()
+            logging.info("所有格式一英文法规 v2 图谱处理完成")
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error(f"格式一英文法规 v2 图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"格式一英文法规 v2 图谱合并时出现问题，请检查！" + str(e))
+
+        for file, error in error_files:
+            logging.error(f"{file}英文法规 v2 文件处理出现问题，请检查！" + error)
+        logging.info(f"英文法规 v2 错误数: {run_stats.error}")
+        logging.info(f"英文法规 v2 抽取错误数: {run_stats.extraction_error}")
+        logging.info(f"英文法规 v2 入库错误数: {run_stats.storage_error}")
+        logging.info(f"英文法规 v2 文件处理错误数: {run_stats.file_processing_error}")
+        logging.info(f"英文法规 v2 弱警告数: {run_stats.warning}")
+        logging.info(f"英文法规 v2 强警告数: {run_stats.strong_warning}")
+        await self.format_one_en_law_v1_extractor.logging_result_stats()
+        if success_count == 0:
+            raise Exception("英文法规 v2 目录下没有成功入库的图谱")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(input_files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+            "stats": run_stats.to_dict(),
+        }
+
+    async def clause_en_v2_extract_by_local_dir(
+            self,
+            clause_file_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        Extract format-two English law knowledge graphs from a local directory and save them to Neo4j.
+
+        Format two targets United States act / statutory compilation files whose
+        main provision boundary is SECTION / SEC. / Sec. The extraction chain is:
+
+        LegalDocument -> LegalProvision -> ProvisionClause -> ProvisionTextParagraph
+
+        The first-stage splitter creates LegalProvision and ProvisionClause nodes
+        deterministically. LLM calls only enrich semantic properties and fine-grained
+        ProvisionTextParagraph/Citation data.
+        """
+        clause_file_dir = str(clause_file_dir).replace('\\', '/')
+        if not os.path.exists(clause_file_dir):
+            raise Exception(f"format-two English law directory does not exist: {clause_file_dir}")
+        if not os.path.isdir(clause_file_dir):
+            raise Exception(f"format-two English law path is not a directory: {clause_file_dir}")
+
+        input_root = Path(clause_file_dir)
+        input_files = discover_en_law_v2_files(input_root)
+        if not input_files:
+            raise Exception(
+                f"No extractable format-two English law files found. "
+                f"The directory must contain .md or .txt files: {clause_file_dir}"
+            )
+
+        new_kg = KGCreate(
+            name=f"{input_root.name}_v2",
+            description="Format-two English law knowledge graph",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+
+        run_stats = EnLawV2Neo4jRunStats(total_files=len(input_files))
+        error_files = []
+        success_count = 0
+
+        for input_file in input_files:
+            relative_name = input_file.relative_to(input_root).as_posix()
+            graph_name = generate_unique_name("en_law_v2_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=input_file.stem,
+                description="Format-two English law knowledge graph extraction task",
+                prompt="",
+                parameters={
+                    "input_path": str(input_file),
+                    "relative_path": relative_name,
+                    "extractor_version": "en_law_v2",
+                },
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            try:
+                logging.info("Format-two English law KG extraction started: %s", relative_name)
+                try:
+                    clause_kg = await self.v2_en_law_extractor.extract_file_to_kg(
+                        str(input_file),
+                        run_llm=True,
+                        output_dir=None,
+                    )
+                except Exception as e:
+                    run_stats.add_extraction_error(relative_name, str(e))
+                    raise Exception(
+                        f"{relative_name} format-two English law KG extraction failed: {str(e)}"
+                    )
+
+                run_stats.add_kg_warnings(relative_name, clause_kg)
+                neo4j_kg = prepare_en_law_v2_kg_for_neo4j(clause_kg)
+                if not neo4j_kg.get("nodes"):
+                    raise Exception("format-two English law KG has no nodes")
+
+                try:
+                    self.graph_storage.connect()
+                    saved = self.graph_storage.add_subgraph_with_merge(
+                        neo4j_kg,
+                        graph_name,
+                        "DomainLevel",
+                        filename=relative_name,
+                    )
+                    self.graph_storage.disconnect()
+                    if not saved:
+                        raise Exception("failed to save format-two English law KG to Neo4j")
+                except Exception as e:
+                    try:
+                        self.graph_storage.disconnect()
+                    except Exception:
+                        pass
+                    run_stats.add_storage_error(relative_name, str(e))
+                    raise Exception(
+                        f"{relative_name} format-two English law KG storage failed: {str(e)}"
+                    )
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                run_stats.success_files += 1
+                success_count += 1
+                logging.info(
+                    "Format-two English law KG extraction completed: %s, nodes=%s, edges=%s",
+                    relative_name,
+                    len(neo4j_kg.get("nodes") or []),
+                    len(neo4j_kg.get("edges") or []),
+                )
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                if "KG extraction failed" not in str(e) and "KG storage failed" not in str(e):
+                    run_stats.add_file_processing_error(relative_name, str(e))
+                logging.error(
+                    "%s format-two English law file processing failed: %s",
+                    relative_name,
+                    str(e),
+                )
+                error_files.append((relative_name, str(e)))
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info("Merging format-two English law KG %s -> %s", graph_name, kg_graph_name)
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info("Format-two English law KG %s merged", graph_name)
+                self.graph_storage.disconnect()
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error("Format-two English law KG merge failed: %s", str(e))
+            raise Exception(f"Format-two English law KG merge failed: {str(e)}")
+
+        for file, error in error_files:
+            logging.error("%s format-two English law file processing failed: %s", file, error)
+        logging.info("Format-two English law errors: %s", run_stats.error)
+        logging.info("Format-two English law extraction errors: %s", run_stats.extraction_error)
+        logging.info("Format-two English law storage errors: %s", run_stats.storage_error)
+        logging.info("Format-two English law file processing errors: %s", run_stats.file_processing_error)
+        logging.info("Format-two English law weak warnings: %s", run_stats.warning)
+        logging.info("Format-two English law strong warnings: %s", run_stats.strong_warning)
+        await self.v2_en_law_extractor.logging_result_stats()
+        if success_count == 0:
+            raise Exception("No format-two English law graph was successfully saved")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(input_files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+            "stats": run_stats.to_dict(),
+        }
+
+    async def clause_en_v3_extract_by_local_dir(
+            self,
+            clause_file_dir,
+            if_del_task,
+            db: Session,
+    ):
+        """
+        Extract format-three English law knowledge graphs from a local directory and save them to Neo4j.
+
+        Format three targets United States CFR / USC / ITAR / state-code files
+        whose main provision boundary is a legal section headed by `§`.
+
+        The extraction chain is:
+
+        LegalDocument -> LegalProvision -> ProvisionClause -> ProvisionTextParagraph
+
+        The first-stage splitter creates LegalProvision and ProvisionClause nodes
+        deterministically. LLM calls only enrich semantic properties and fine-grained
+        ProvisionTextParagraph/Citation data.
+        """
+        clause_file_dir = str(clause_file_dir).replace('\\', '/')
+        if not os.path.exists(clause_file_dir):
+            raise Exception(f"format-three English law directory does not exist: {clause_file_dir}")
+        if not os.path.isdir(clause_file_dir):
+            raise Exception(f"format-three English law path is not a directory: {clause_file_dir}")
+
+        input_root = Path(clause_file_dir)
+        input_files = discover_en_law_v3_files(input_root)
+        if not input_files:
+            raise Exception(
+                f"No extractable format-three English law files found. "
+                f"The directory must contain .md or .txt files: {clause_file_dir}"
+            )
+
+        new_kg = KGCreate(
+            name=f"{input_root.name}_v3",
+            description="Format-three English law knowledge graph",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+
+        run_stats = EnLawV3Neo4jRunStats(total_files=len(input_files))
+        error_files = []
+        success_count = 0
+
+        for input_file in input_files:
+            relative_name = input_file.relative_to(input_root).as_posix()
+            graph_name = generate_unique_name("en_law_v3_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=input_file.stem,
+                description="Format-three English law knowledge graph extraction task",
+                prompt="",
+                parameters={
+                    "input_path": str(input_file),
+                    "relative_path": relative_name,
+                    "extractor_version": "en_law_v3",
+                },
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            try:
+                logging.info("Format-three English law KG extraction started: %s", relative_name)
+                try:
+                    clause_kg = await self.v3_en_law_extractor.extract_file_to_kg(
+                        str(input_file),
+                        run_llm=True,
+                        output_dir=None,
+                    )
+                except Exception as e:
+                    run_stats.add_extraction_error(relative_name, str(e))
+                    raise Exception(
+                        f"{relative_name} format-three English law KG extraction failed: {str(e)}"
+                    )
+
+                run_stats.add_kg_warnings(relative_name, clause_kg)
+                neo4j_kg = prepare_en_law_v3_kg_for_neo4j(clause_kg)
+                if not neo4j_kg.get("nodes"):
+                    raise Exception("format-three English law KG has no nodes")
+
+                try:
+                    self.graph_storage.connect()
+                    saved = self.graph_storage.add_subgraph_with_merge(
+                        neo4j_kg,
+                        graph_name,
+                        "DomainLevel",
+                        filename=relative_name,
+                    )
+                    self.graph_storage.disconnect()
+                    if not saved:
+                        raise Exception("failed to save format-three English law KG to Neo4j")
+                except Exception as e:
+                    try:
+                        self.graph_storage.disconnect()
+                    except Exception:
+                        pass
+                    run_stats.add_storage_error(relative_name, str(e))
+                    raise Exception(
+                        f"{relative_name} format-three English law KG storage failed: {str(e)}"
+                    )
+
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                run_stats.success_files += 1
+                success_count += 1
+                logging.info(
+                    "Format-three English law KG extraction completed: %s, nodes=%s, edges=%s",
+                    relative_name,
+                    len(neo4j_kg.get("nodes") or []),
+                    len(neo4j_kg.get("edges") or []),
+                )
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                if "KG extraction failed" not in str(e) and "KG storage failed" not in str(e):
+                    run_stats.add_file_processing_error(relative_name, str(e))
+                logging.error(
+                    "%s format-three English law file processing failed: %s",
+                    relative_name,
+                    str(e),
+                )
+                error_files.append((relative_name, str(e)))
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info("Merging format-three English law KG %s -> %s", graph_name, kg_graph_name)
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                logging.info("Format-three English law KG %s merged", graph_name)
+                self.graph_storage.disconnect()
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            logging.error("Format-three English law KG merge failed: %s", str(e))
+            raise Exception(f"Format-three English law KG merge failed: {str(e)}")
+
+        for file, error in error_files:
+            logging.error("%s format-three English law file processing failed: %s", file, error)
+        logging.info("Format-three English law errors: %s", run_stats.error)
+        logging.info("Format-three English law extraction errors: %s", run_stats.extraction_error)
+        logging.info("Format-three English law storage errors: %s", run_stats.storage_error)
+        logging.info("Format-three English law file processing errors: %s", run_stats.file_processing_error)
+        logging.info("Format-three English law weak warnings: %s", run_stats.warning)
+        logging.info("Format-three English law strong warnings: %s", run_stats.strong_warning)
+        await self.v3_en_law_extractor.logging_result_stats()
+        if success_count == 0:
+            raise Exception("No format-three English law graph was successfully saved")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(input_files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+            "stats": run_stats.to_dict(),
+        }
+
     async def national_standard_extract_by_local_dir(
             self,
             standard_data_dir,
@@ -2878,7 +3432,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"e5_{source_name}_{generate_snowflake_string_id()}"
+    return f"e6_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

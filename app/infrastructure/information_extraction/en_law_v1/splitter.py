@@ -1,4 +1,4 @@
-"""格式一英文法规 Markdown 的规则切分器。
+﻿"""格式一英文法规 Markdown 的规则切分器。
 
 本文件负责“不依赖 LLM”的一阶段结构化切分，核心目标是把完整法规文件拆成：
 1. 文件头和法规基础信息候选文本。
@@ -23,7 +23,7 @@ from copy import deepcopy
 from typing import Any
 
 # 合规风险类型允许值来自配置文件，用于校验文首业务分类。
-from app.infrastructure.information_extraction.en_law.config import RISK_TYPE_VALUES
+from app.infrastructure.information_extraction.en_law_v1.config import RISK_TYPE_VALUES
 
 
 # Article 标题正则：匹配 `Article 1`、`## Article 1`、`Article 1a` 等格式。
@@ -64,6 +64,10 @@ STRUCTURAL_UNIT_PATTERNS = [
     # 破折号清单项；保留为 dash_item。
     ("dash_item", re.compile(r"^\s*[-–]\s+(?P<content>.+)$")),
 ]
+
+# v1 ProvisionClause 边界：只允许 Article 正文行首一级数字编号，如 `1. ...`。
+# `(1)`、`(a)`、`(i)` 等编号不得作为 ProvisionClause 边界。
+PROVISION_CLAUSE_RE = re.compile(r"^\s*(?P<number>\d+)\.\s+(?P<content>.+)$")
 
 # 修订型 Article 识别规则，用于给 Article 打 is_amendment_article 标记。
 AMENDMENT_RE = re.compile(
@@ -251,11 +255,40 @@ def _looks_like_article_title(line: str) -> bool:
     # `(a)`、`(i)` 等条文项不是标题。
     if re.match(r"^\([a-zivxlcdm]+\)\s+", stripped, re.IGNORECASE):
         return False
-    # 长句且以句号结尾时更像正文。
-    if stripped.endswith(".") and len(stripped.split()) > 8:
+    # Article 标题通常不以句号结束；句号结尾的单行更可能是正文。
+    if stripped.endswith("."):
         return False
     # 通过以上排除后，认为它可以作为 Article 标题。
     return True
+
+
+def _current_clause_ends_with_colon(current: dict[str, Any] | None) -> bool:
+    """判断当前 ProvisionClause 是否刚进入冒号引导清单。"""
+    if not current:
+        return False
+    for line in reversed(current.get("_lines") or []):
+        stripped = str(line or "").strip()
+        if stripped:
+            return stripped.endswith(":")
+    return False
+
+
+def _looks_like_numbered_list_item(content: str) -> bool:
+    """判断 `1. xxx` 是否更像冒号后的清单项，而非 Article 一级条款。"""
+    text = str(content or "").strip()
+    if not text:
+        return False
+    if text[:1].islower():
+        return True
+    words = text.split()
+    has_legal_verb = re.search(r"\b(shall|must|may|is|are|has|have|means|applies|apply)\b", text, re.IGNORECASE)
+    return len(words) <= 10 and text.endswith((";", ".")) and not has_legal_verb
+
+
+def _is_quoted_article_heading(line: str) -> bool:
+    """识别修订替换文本中被引用的 Article 标题行。"""
+    stripped = strip_markdown_heading(line).strip()
+    return bool(re.match(r"^['\"“‘]?Article\s+\d+[A-Za-z]?\b", stripped, re.IGNORECASE))
 
 
 def _line_number_map(lines: list[str]) -> list[int]:
@@ -391,6 +424,84 @@ def _extract_article_units(article: dict[str, Any]) -> list[dict[str, Any]]:
     # 扫描结束后收尾最后一个结构单元。
     flush(start_line + len(content_lines) - 1)
     return units
+
+
+def extract_provision_clauses(article: dict[str, Any]) -> list[dict[str, Any]]:
+    """从单个 Article 正文中抽取 v1 ProvisionClause。
+
+    显式 ProvisionClause 只由行首 `1. `、`2. `、`3. ` 等一级编号生成。
+    若 Article 正文不存在该类一级编号，则整个 Article 正文作为隐式 ProvisionClause。
+    """
+    article_number = str(article.get("article_number") or "").strip()
+    content = article.get("content") or ""
+    content_lines = content.splitlines()
+    start_line = int(article.get("content_line_start") or article.get("line_start") or 1)
+    clauses: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def flush(end_line: int) -> None:
+        nonlocal current
+        if not current:
+            return
+        current.pop("_inside_numbered_list", None)
+        current.pop("_inside_quoted_article", None)
+        current["unit_content"] = clean_text("\n".join(current.pop("_lines")))
+        current["line_end"] = max(int(current.get("line_start") or end_line), end_line)
+        clauses.append(current)
+        current = None
+
+    for offset, raw_line in enumerate(content_lines):
+        absolute_line = start_line + offset
+        match = PROVISION_CLAUSE_RE.match(raw_line)
+        if match:
+            if current and (
+                (_current_clause_ends_with_colon(current) and _looks_like_numbered_list_item(match.group("content")))
+                or (current.get("_inside_numbered_list") and _looks_like_numbered_list_item(match.group("content")))
+                or current.get("_inside_quoted_article")
+            ):
+                if _looks_like_numbered_list_item(match.group("content")):
+                    current["_inside_numbered_list"] = True
+                current["_lines"].append(raw_line)
+                current["line_end"] = absolute_line
+                continue
+            flush(max(start_line, absolute_line - 1))
+            local_number = match.group("number")
+            current = {
+                "unit_number": f"{article_number}({local_number})" if article_number else f"({local_number})",
+                "unit_level": "paragraph",
+                "source_article_number": article_number,
+                "clause_index": len(clauses) + 1,
+                "explicit_boundary": True,
+                "line_start": absolute_line,
+                "line_end": absolute_line,
+                "_lines": [match.group("content").strip()],
+            }
+        elif current:
+            if _is_quoted_article_heading(raw_line):
+                current["_inside_quoted_article"] = True
+            current["_lines"].append(raw_line)
+            current["line_end"] = absolute_line
+
+    flush(start_line + len(content_lines) - 1)
+
+    if clauses:
+        return clauses
+
+    stripped_content = clean_text(content)
+    if not stripped_content:
+        return []
+    return [
+        {
+            "unit_number": article_number,
+            "unit_level": "paragraph",
+            "unit_content": stripped_content,
+            "source_article_number": article_number,
+            "clause_index": 1,
+            "explicit_boundary": False,
+            "line_start": start_line,
+            "line_end": start_line + max(len(content_lines), 1) - 1,
+        }
+    ]
 
 
 def _infer_document_title(file_header: str, filename: str = "") -> str:
@@ -563,6 +674,8 @@ def split_format_one_document(
         current_article["is_amendment_article"] = bool(AMENDMENT_RE.search(content))
         # 抽取 Article 内部 paragraph/point/subpoint 等结构单元。
         current_article["structural_units"] = _extract_article_units(current_article)
+        # v1: Article 下一级条款单元由代码确定，供后续独立 ProvisionClause 抽取使用。
+        current_article["provision_clauses"] = extract_provision_clauses(current_article)
         # 加入最终 Article 列表。
         articles.append(current_article)
         # 清空当前 Article 状态。
@@ -725,3 +838,4 @@ def split_format_one_document(
         },
         "warnings": warnings,
     }
+

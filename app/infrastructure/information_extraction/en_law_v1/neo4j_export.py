@@ -1,4 +1,4 @@
-"""英文法规知识图谱 Neo4j 入库辅助工具。
+﻿"""英文法规知识图谱 Neo4j 入库辅助工具。
 
 本模块只处理“正式入库前”的轻量转换，不改变抽取阶段 `_kg.json` 的审查数据。
 设计目的：
@@ -173,3 +173,4 @@ def prepare_en_law_kg_for_neo4j(kg: dict[str, Any]) -> dict[str, Any]:
             "compliance_risk_type": (kg.get("metadata") or {}).get("compliance_risk_type"),
         },
     }
+

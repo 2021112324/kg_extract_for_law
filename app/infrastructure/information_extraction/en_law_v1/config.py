@@ -1,4 +1,4 @@
-"""格式一英文法规知识图谱抽取的配置文件。
+﻿"""格式一英文法规知识图谱抽取的配置文件。
 
 本文件集中维护英文法规抽取流程会用到的固定配置：
 1. 格式一文件的内部格式标识。
@@ -70,3 +70,4 @@ DEFAULT_REPORT_DIR = (
     r"D:\CogmAIT\en_law\kg_extract_for_law"
     r"\app\infrastructure\information_extraction\en_law\report"
 )
+

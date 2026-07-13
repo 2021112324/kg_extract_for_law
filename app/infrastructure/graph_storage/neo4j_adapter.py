@@ -98,7 +98,9 @@ class Neo4jAdapter(IGraphStorage):
         for prop_key, prop_value in properties.items():
             sanitized_key = self._sanitize_property_name(prop_key)
             # 处理属性值，确保为Neo4j支持的类型
-            if not prop_value:
+            # 注意：不能用 `not prop_value` 过滤，因为 `not False` 和 `not 0` 都是 True，
+            # 会误丢弃合法的布尔和数值零值。
+            if prop_value in (None, "", [], {}):
                 continue
             elif isinstance(prop_value, (str, int, float, bool)):
                 sanitized_properties[sanitized_key] = prop_value

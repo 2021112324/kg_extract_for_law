@@ -69,7 +69,7 @@ FIXED_MAX_ARTICLES: int | None = None
 # Article 级并发。先用 1，确认稳定后再调高。
 FIXED_MAX_CONCURRENT = 1
 
-# False 表示宽松模式：单条 Article 失败时保留 fallback 节点并继续。
+# False 表示宽松模式：单条 Article 失败时记录错误并继续，不生成 fallback 节点。
 FIXED_STRICT = False
 
 # True 表示覆盖同名输出，避免旧结果被跳过。
@@ -334,7 +334,7 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="测试 data-dir 下全部 Markdown 文件。")
     parser.add_argument("--max-articles", type=int, help="每个文件只抽取前 N 个 Article；不填则抽取整份文件。")
     parser.add_argument("--max-concurrent", type=int, default=1, help="Article 级 LLM 并发数；建议先用 1。")
-    parser.add_argument("--strict", action="store_true", help="关闭宽松模式；Article 失败时不再只作为 fallback 继续。")
+    parser.add_argument("--strict", action="store_true", help="关闭宽松模式；Article 失败时直接中断。")
     parser.add_argument("--overwrite", action="store_true", help="覆盖输出目录中已有 KG 文件。")
     parser.add_argument("--stop-on-error", action="store_true", help="遇到第一个文件失败即停止。")
     if USE_FIXED_PARAMETERS_WHEN_NO_ARGS and len(sys.argv) == 1:

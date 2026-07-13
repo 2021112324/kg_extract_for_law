@@ -20,7 +20,14 @@ def test_prepare_en_law_kg_for_neo4j_removes_review_only_properties():
                     "classification_context": {"title": "TITLE I"},
                     "classification_title": "TITLE I",
                     "quantitative_condition": {"raw_text": "within 30 days"},
-                    "quantitative_condition_json": '{"raw_text":"within 30 days"}',
+                    "quantitative_indicator": {
+                        "raw_text": "within 30 days",
+                        "value_type": "Time Limit",
+                        "min": None,
+                        "max": 30,
+                        "unit": "days",
+                        "relation": "Upper Bound",
+                    },
                 },
             }
         ],
@@ -53,7 +60,10 @@ def test_prepare_en_law_kg_for_neo4j_removes_review_only_properties():
     assert "classification_context" not in props
     assert "quantitative_condition" not in props
     assert props["classification_title"] == "TITLE I"
-    assert props["quantitative_condition_json"] == '{"raw_text":"within 30 days"}'
+    assert props["quantitative_indicator"] == (
+        '{"max":30,"min":null,"raw_text":"within 30 days",'
+        '"relation":"Upper Bound","unit":"days","value_type":"Time Limit"}'
+    )
     assert "source" not in edge_props
     assert edge_props["citation_relation"] == "under"
     assert "split_result" not in cleaned

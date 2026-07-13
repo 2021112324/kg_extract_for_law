@@ -1,4 +1,4 @@
-"""格式一英文法规图谱装配器。
+﻿"""格式一英文法规图谱装配器。
 
 本文件负责把两类输入合并成最终知识图谱：
 1. `splitter.py` 产生的确定性结构切分结果。
@@ -25,7 +25,7 @@ from app.infrastructure.string_utils.id_tool import generate_hex_uuid
 # 项目公共 Neo4j 清洗工具，用于避免节点 ID 中出现特殊控制字符。
 from app.infrastructure.string_utils.str_clean import clean_string_for_neo4j_extended
 # 合规风险类型枚举，用于把文首中文风险类型拆成稳定数组。
-from app.infrastructure.information_extraction.en_law.config import RISK_TYPE_VALUES
+from app.infrastructure.information_extraction.en_law_v2.config import RISK_TYPE_VALUES
 
 
 # Langextract 兼容关系实体类名；schema/prompt 中也使用同一个值。
@@ -42,6 +42,8 @@ LEGAL_DOCUMENT = "LegalDocument"
 LEGAL_BASIS = "LegalBasis"
 LEGAL_PROVISION = "LegalProvision"
 PROVISION_UNIT = "ProvisionUnit"
+PROVISION_CLAUSE = "ProvisionClause"
+PROVISION_TEXT_PARAGRAPH = "ProvisionTextParagraph"
 CITATION = "Citation"
 
 # Article 级确定性结构字段只能来自 splitter，不允许 LLM 覆盖。
@@ -68,12 +70,62 @@ SPLITTER_LOCKED_PROVISION_FIELDS = {
     "llm_extraction_status",
 }
 
-# ProvisionUnit.function_type 的 LLM 允许枚举。LLM 空值保持为空，越界值由后处理置为 other。
+# ProvisionUnit.function_type / ProvisionClause.legal_function 的 LLM 允许枚举。LLM 空值或越界值保持为空。
 LLM_FUNCTION_TYPES = {"prohibition", "mandatory", "optional"}
 
 ARTICLE_PREFIX_RE = re.compile(r"^Article\s+\d+[A-Za-z]?", re.IGNORECASE)
 LOCAL_UNIT_SEQUENCE_RE = re.compile(r"^(?:\(?[0-9]+[A-Za-z]?\)?|\(?[a-z]{1,3}\)?|\(?[ivxlcdm]+\)?)+$", re.IGNORECASE)
-FUNCTION_TYPE_FALLBACK = "other"
+FUNCTION_TYPE_FALLBACK = ""
+QUANTITATIVE_VALUE_TYPE_ALIASES = {
+    "amount": "amount",
+    "monetary_amount": "amount",
+    "monetary_value": "amount",
+    "money": "amount",
+    "fee": "amount",
+    "ratio": "ratio",
+    "percentage": "ratio",
+    "percent": "ratio",
+    "rate": "ratio",
+    "time_limit": "time_limit",
+    "deadline": "time_limit",
+    "date": "time_limit",
+    "time_period": "time_limit",
+    "period": "time_limit",
+    "duration": "time_limit",
+    "count": "count",
+    "frequency": "count",
+    "number": "count",
+    "multiple": "multiple",
+    "multiplier": "multiple",
+    "other": "other",
+}
+QUANTITATIVE_RELATION_ALIASES = {
+    "range": "range",
+    "between": "range",
+    "lower_bound": "lower_bound",
+    "minimum": "lower_bound",
+    "min": "lower_bound",
+    "at_least": "lower_bound",
+    "upper_bound": "upper_bound",
+    "maximum": "upper_bound",
+    "max": "upper_bound",
+    "no_more_than": "upper_bound",
+    "equal": "equal",
+    "equals": "equal",
+    "exact": "equal",
+    "exact_value": "equal",
+    "other": "other",
+}
+
+CITATION_RELATION_VALUES = {
+    "reference",
+    "definition",
+    "exception",
+    "amendment",
+    "authorization",
+    "compliance",
+    "other",
+}
 
 # 兼容历史结果和少量 LLM 可能输出的带空格类型。
 ENTITY_TYPE_ALIASES = {
@@ -85,6 +137,10 @@ ENTITY_TYPE_ALIASES = {
     "LegalProvision": LEGAL_PROVISION,
     "Provision Unit": PROVISION_UNIT,
     "ProvisionUnit": PROVISION_UNIT,
+    "Provision Clause": PROVISION_CLAUSE,
+    "ProvisionClause": PROVISION_CLAUSE,
+    "Provision Text Paragraph": PROVISION_TEXT_PARAGRAPH,
+    "ProvisionTextParagraph": PROVISION_TEXT_PARAGRAPH,
     "Citation": CITATION,
 }
 
@@ -231,7 +287,7 @@ def _add_classification_flat_fields(props: dict[str, Any], article: dict[str, An
 
 
 def _normalize_function_type(value: Any) -> str:
-    """把 ProvisionUnit.function_type 收敛到 KG 枚举。"""
+    """把 function_type / legal_function 收敛到 KG 枚举。"""
     if value in (None, ""):
         return ""
     normalized = str(value).strip().lower().replace(" ", "_")
@@ -242,12 +298,62 @@ def _normalize_function_type(value: Any) -> str:
     return FUNCTION_TYPE_FALLBACK
 
 
+def _normalize_legal_function(value: Any) -> str:
+    """规范化 ProvisionClause.legal_function，无法判断时保持为空。"""
+    return _normalize_function_type(value)
+
+
+def _normalize_citation_relation(value: Any) -> str:
+    """校验 Citation.citation_relation 是否为 schema 允许枚举。"""
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    if not normalized:
+        return ""
+    return normalized if normalized in CITATION_RELATION_VALUES else "other"
+
+
 def _normalize_quantitative_feature(value: Any) -> str:
     """统一 quantitative_feature 大小写。"""
     normalized = str(value or "").strip().lower()
     if normalized == "quantitative":
         return "Quantitative"
     return "Qualitative"
+
+
+def _normalize_quantitative_enum(value: Any, aliases: dict[str, str]) -> str:
+    """把量化枚举值规范为小写下划线枚举。"""
+    normalized = str(value or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return aliases.get(normalized, "other")
+
+
+def _has_concrete_quantity(raw_text: Any, indicator: dict[str, Any]) -> bool:
+    """判断量化描述是否包含可校验数值、范围或单位。"""
+    text = str(raw_text or "").strip().lower()
+    if re.search(r"\d", text):
+        return True
+    if re.search(
+        r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+        r"twenty|thirty|forty|fifty|hundred|thousand|million|billion)\b",
+        text,
+    ):
+        return True
+    return any(indicator.get(key) not in (None, "") for key in ("min", "minimum_value", "max", "maximum_value"))
+
+
+def _is_reference_like_quantity(raw_text: Any, value_type: str) -> bool:
+    """识别不应作为 quantitative_indicator 的引用型或模糊型表达。"""
+    text = str(raw_text or "").strip().lower()
+    if value_type in {"reference", "reference_to_annex", "reference_to_provisions"}:
+        return True
+    if re.search(r"\b(in accordance with|pursuant to|referred to in|within the meaning of)\b", text):
+        return True
+    if re.search(r"\barticles?\s+\d", text) or re.search(r"\b(annex|part|chapter|section)\s+[ivxlcdm0-9]", text):
+        return True
+    if re.fullmatch(r"(the|that|such)?\s*(period|duration|time limit)", text):
+        return True
+    if "reasonable duration" in text:
+        return True
+    return False
 
 
 def _normalize_quantitative_indicator(props: dict[str, Any]) -> dict[str, Any] | None:
@@ -258,20 +364,31 @@ def _normalize_quantitative_indicator(props: dict[str, Any]) -> dict[str, Any] |
     if not isinstance(indicator, dict) or not indicator:
         return None
 
+    raw_value_type = indicator.get("value_type") or indicator.get("quantitative_value_type")
+    raw_relation = indicator.get("relation") or indicator.get("constraint_relation")
+    raw_text = indicator.get("raw_text")
+    if _is_reference_like_quantity(raw_text, str(raw_value_type or "")):
+        return None
+    if not _has_concrete_quantity(raw_text, indicator):
+        return None
+
     return {
-        "raw_text": indicator.get("raw_text"),
-        "value_type": indicator.get("value_type") or indicator.get("quantitative_value_type"),
+        "raw_text": raw_text,
+        "value_type": _normalize_quantitative_enum(raw_value_type, QUANTITATIVE_VALUE_TYPE_ALIASES),
         "min": indicator.get("min", indicator.get("minimum_value")),
         "max": indicator.get("max", indicator.get("maximum_value")),
         "unit": indicator.get("unit"),
-        "relation": indicator.get("relation") or indicator.get("constraint_relation"),
+        "relation": _normalize_quantitative_enum(raw_relation, QUANTITATIVE_RELATION_ALIASES),
     }
 
 
 def _normalize_provision_unit_props(props: dict[str, Any]) -> dict[str, Any]:
     """规范化 ProvisionUnit 属性，减少 KG 枚举和 Neo4j 入库问题。"""
     result = dict(props)
-    result["function_type"] = _normalize_function_type(result.get("function_type"))
+    if "function_type" in result:
+        result["function_type"] = _normalize_function_type(result.get("function_type"))
+    if "legal_function" in result:
+        result["legal_function"] = _normalize_legal_function(result.get("legal_function"))
     result["quantitative_feature"] = _normalize_quantitative_feature(result.get("quantitative_feature"))
     quantitative_indicator = _normalize_quantitative_indicator(result)
     result.pop("quantitative_condition", None)
@@ -354,13 +471,28 @@ def _unit_content_supported_by_article(unit_content: Any, article_content: str) 
     return len(unit_tokens & article_tokens) / len(unit_tokens) >= 0.65
 
 
+def _final_text_paragraph_unit_number(base_unit_number: str, duplicate_count: int, index: int) -> str:
+    """生成 ProvisionTextParagraph 最终唯一编号。"""
+    base = str(base_unit_number or "").strip()
+    if duplicate_count <= 1:
+        return base
+    if re.search(r"\s+paragraph\s+\d+\s*$", base, re.IGNORECASE):
+        return base
+    return f"{base} paragraph {index}"
+
+
 def _normalize_citation_props(props: dict[str, Any]) -> dict[str, Any]:
     """规范化 Citation 属性，尤其是内部引用布尔值。"""
     result = dict(props)
-    if any(key in result for key in ("is_internal_reference", "internal_reference", "is_internal")):
-        result["is_internal_reference"] = _normalize_bool(
-            result.get("is_internal_reference") or result.get("internal_reference") or result.get("is_internal")
-        )
+    result["is_internal_reference"] = _normalize_bool(
+        result.get("is_internal_reference") or result.get("internal_reference") or result.get("is_internal")
+    )
+    raw_relation = result.get("citation_relation")
+    normalized_relation = _normalize_citation_relation(raw_relation)
+    if raw_relation not in (None, ""):
+        result["citation_relation_raw"] = raw_relation
+    if normalized_relation:
+        result["citation_relation"] = normalized_relation
     return result
 
 
@@ -499,7 +631,7 @@ def _resolve_internal_citation(name: Any, props: dict[str, Any], lookup: dict[st
     return None
 
 
-class FormatOneGraphBuilder:
+class FormatTwoGraphBuilder:
     """格式一英文法规图谱装配类。"""
 
     def __init__(self, lenient_mode: bool = True):
@@ -848,6 +980,271 @@ class FormatOneGraphBuilder:
 
         return nodes, edges
 
+    def _article_node_name(self, article: dict[str, Any], provision_entity: dict[str, Any] | None = None) -> str:
+        """生成 v1 LegalProvision 节点名。"""
+        article_number = str(article.get("article_number") or "").strip()
+        heading = str(article.get("article_heading") or "").strip()
+        if provision_entity and provision_entity.get("name"):
+            return str(provision_entity.get("name"))
+        return f"{article_number} - {heading}" if heading else article_number
+
+    def _build_v1_article_contexts(
+        self,
+        filename: str,
+        split_result: dict[str, Any],
+        article_results: list[dict[str, Any]],
+        failed_articles: list[dict[str, Any]],
+        global_lookup: dict[str, str],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """构建 v1 Article/LegalProvision 节点，Article 阶段不处理 Clause。"""
+        nodes: list[dict[str, Any]] = []
+        contexts: list[dict[str, Any]] = []
+        article_result_map = {
+            (result.get("article_number") or result.get("section_number") or ""): result
+            for result in article_results
+        }
+        failed_map = {
+            failed.get("article_number") or failed.get("section_number") or "": failed
+            for failed in failed_articles
+        }
+
+        for article in split_result.get("clauses", []):
+            article_number = article.get("article_number") or ""
+            result = article_result_map.get(article_number)
+            normalized = normalize_extraction_result(result)
+            provision_entities = [
+                entity for entity in normalized["entities"]
+                if entity.get("entity_type") == LEGAL_PROVISION
+            ]
+            provision_entity = provision_entities[0] if provision_entities else None
+            props: dict[str, Any] = {}
+            if provision_entity:
+                props.update(provision_entity.get("properties") or {})
+                for key in SPLITTER_LOCKED_PROVISION_FIELDS:
+                    props.pop(key, None)
+            elif article_number in failed_map:
+                failed = failed_map.get(article_number) or {}
+                self.errors.append(
+                    f"Article extraction failed; LegalProvision kept from splitter: "
+                    f"{filename} {article_number}: {failed.get('error') or 'unknown error'}"
+                )
+            elif not result:
+                self.errors.append(
+                    f"Article extraction missing; LegalProvision kept from splitter: {filename} {article_number}"
+                )
+            elif normalized["entities"]:
+                self.errors.append(
+                    f"Article extraction has no LegalProvision; LegalProvision kept from splitter: "
+                    f"{filename} {article_number}"
+                )
+
+            props.update({
+                "provision_number": article_number,
+                "provision_heading": article.get("article_heading"),
+                "provision_content": article.get("content", ""),
+                "is_amendment_article": article.get("is_amendment_article", False),
+            })
+            _add_classification_flat_fields(props, article)
+            article_node = make_node(self._article_node_name(article, provision_entity), LEGAL_PROVISION, props, filename)
+            nodes.append(article_node)
+
+            local_lookup: dict[str, str] = {}
+            aliases = [
+                article_node["node_name"],
+                article_number,
+                article_node["properties"].get("provision_number"),
+                LEGAL_PROVISION,
+                "Legal Provision",
+            ]
+            _register_many(local_lookup, article_node["node_id"], aliases)
+            _register_many(global_lookup, article_node["node_id"], aliases[:-1])
+            contexts.append({
+                "article": article,
+                "article_node": article_node,
+                "local_lookup": local_lookup,
+            })
+        return nodes, contexts
+
+    def _build_v1_article_nodes(
+        self,
+        filename: str,
+        doc_node: dict[str, Any],
+        split_result: dict[str, Any],
+        raw: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """构建 v1 Article、ProvisionClause、ProvisionTextParagraph 和 Citation。"""
+        global_lookup: dict[str, str] = {}
+        _register_many(global_lookup, doc_node["node_id"], [doc_node["node_name"], LEGAL_DOCUMENT, "Legal Document"])
+        external_citation_lookup: dict[str, dict[str, Any]] = {}
+        edge_seen: set[tuple[str, str, str]] = set()
+        edges: list[dict[str, Any]] = []
+
+        article_nodes, contexts = self._build_v1_article_contexts(
+            filename,
+            split_result,
+            raw.get("article_extractions") or [],
+            raw.get("failed_article_extractions") or [],
+            global_lookup,
+        )
+        nodes = list(article_nodes)
+        clause_result_map = {
+            str(result.get("unit_number") or ""): result
+            for result in raw.get("provision_clause_extractions") or []
+        }
+        failed_clause_map = {
+            str(result.get("unit_number") or ""): result
+            for result in raw.get("failed_provision_clause_extractions") or []
+        }
+
+        for context in contexts:
+            article = context["article"]
+            article_node = context["article_node"]
+            article_number = article.get("article_number") or ""
+            node_lookup = dict(context["local_lookup"])
+            _append_edge(edges, edge_seen, make_edge(doc_node["node_id"], article_node["node_id"], "CONTAINS", filename))
+
+            for provision_clause in article.get("provision_clauses") or []:
+                clause_number = str(provision_clause.get("unit_number") or "").strip()
+                clause_content = provision_clause.get("unit_content") or ""
+                result = clause_result_map.get(clause_number)
+                normalized = normalize_extraction_result(result)
+                clause_entities = [
+                    entity for entity in normalized["entities"]
+                    if entity.get("entity_type") == PROVISION_CLAUSE
+                ]
+                clause_props: dict[str, Any] = {}
+                if clause_entities:
+                    clause_props.update(clause_entities[0].get("properties") or {})
+                elif clause_number in failed_clause_map:
+                    failed = failed_clause_map.get(clause_number) or {}
+                    self.errors.append(
+                        f"ProvisionClause extraction failed; code clause kept: "
+                        f"{filename} {clause_number}: {failed.get('error') or 'unknown error'}"
+                    )
+                elif not result:
+                    self.errors.append(
+                        f"ProvisionClause extraction missing; code clause kept: {filename} {clause_number}"
+                    )
+
+                if "legal_function" in clause_props:
+                    clause_props["legal_function"] = _normalize_legal_function(clause_props.get("legal_function"))
+                # 代码锁定字段不得由 LLM 覆盖。
+                clause_props.update({
+                    "unit_number": clause_number,
+                    "unit_level": provision_clause.get("unit_level") or "paragraph",
+                    "unit_content": clause_content,
+                    "source_article_number": article_number,
+                    "clause_index": provision_clause.get("clause_index"),
+                    "explicit_boundary": provision_clause.get("explicit_boundary"),
+                    "line_start": provision_clause.get("line_start"),
+                    "line_end": provision_clause.get("line_end"),
+                })
+                clause_node = make_node(clause_number, PROVISION_CLAUSE, clause_props, filename)
+                nodes.append(clause_node)
+                _register_many(node_lookup, clause_node["node_id"], [clause_number, clause_node["node_name"], PROVISION_CLAUSE])
+                _register_many(global_lookup, clause_node["node_id"], [clause_number, clause_node["node_name"]])
+                _append_edge(edges, edge_seen, make_edge(article_node["node_id"], clause_node["node_id"], "CONTAINS", filename))
+
+                text_paragraph_nodes: list[dict[str, Any]] = []
+                text_paragraph_candidates: list[tuple[dict[str, Any], str]] = []
+                text_paragraph_base_counts: dict[str, int] = {}
+                citation_candidates: list[tuple[Any, dict[str, Any]]] = []
+                for entity in normalized["entities"]:
+                    entity_type = entity.get("entity_type")
+                    if entity_type in {LEGAL_PROVISION, PROVISION_CLAUSE}:
+                        continue
+                    props = entity.get("properties") or {}
+                    name = entity.get("name") or props.get("unit_number") or props.get("citation_text") or entity_type
+
+                    if entity_type == PROVISION_TEXT_PARAGRAPH:
+                        props = _normalize_provision_unit_props(props)
+                        if not props.get("unit_number") and name:
+                            props["unit_number"] = name
+                        unit_number = str(props.get("unit_number") or "").strip()
+                        if not unit_number.startswith(clause_number):
+                            self.warnings.append(
+                                f"Skipped ProvisionTextParagraph outside parent clause: "
+                                f"{filename} {clause_number} {unit_number or name}"
+                            )
+                            continue
+                        if not _unit_content_supported_by_article(props.get("unit_content"), clause_content):
+                            self.warnings.append(
+                                f"Skipped ProvisionTextParagraph not supported by clause text: "
+                                f"{filename} {clause_number} {unit_number or name}"
+                            )
+                            continue
+                        text_paragraph_candidates.append((props, unit_number))
+                        text_paragraph_base_counts[unit_number] = text_paragraph_base_counts.get(unit_number, 0) + 1
+                        continue
+
+                    if entity_type == CITATION:
+                        citation_candidates.append((name, props))
+                        continue
+
+                    if entity_type:
+                        self.warnings.append(f"Unsupported entity type in {clause_number}: {entity_type}")
+
+                text_paragraph_seen: dict[str, int] = {}
+                for props, base_unit_number in text_paragraph_candidates:
+                    text_paragraph_seen[base_unit_number] = text_paragraph_seen.get(base_unit_number, 0) + 1
+                    final_unit_number = _final_text_paragraph_unit_number(
+                        base_unit_number,
+                        text_paragraph_base_counts.get(base_unit_number, 1),
+                        text_paragraph_seen[base_unit_number],
+                    )
+                    props["unit_number"] = final_unit_number
+                    text_node = make_node(final_unit_number, PROVISION_TEXT_PARAGRAPH, props, filename)
+                    nodes.append(text_node)
+                    text_paragraph_nodes.append(text_node)
+                    aliases = [text_node["node_name"], final_unit_number]
+                    if text_paragraph_base_counts.get(base_unit_number, 1) == 1:
+                        aliases.append(base_unit_number)
+                    _register_many(node_lookup, text_node["node_id"], aliases)
+                    _register_many(global_lookup, text_node["node_id"], aliases)
+                    _append_edge(edges, edge_seen, make_edge(clause_node["node_id"], text_node["node_id"], "CONTAINS", filename))
+
+                for name, props in citation_candidates:
+                    target_id = None
+                    if _is_internal_citation(props):
+                        target_id = _resolve_internal_citation(name, props, global_lookup)
+                        if not target_id:
+                            self.warnings.append(f"Unresolved internal citation in {clause_number}: {name}")
+                    if target_id:
+                        _register_many(node_lookup, target_id, _citation_aliases(name, props))
+                        continue
+                    citation_key = _citation_key(name, props)
+                    node = external_citation_lookup.get(citation_key)
+                    if node is None:
+                        citation_props = _normalize_citation_props(props)
+                        if _is_internal_citation(props):
+                            citation_props["resolution_status"] = "unresolved_internal_reference"
+                        node = make_node(name, CITATION, citation_props, filename)
+                        external_citation_lookup[citation_key] = node
+                        nodes.append(node)
+                    _register_many(node_lookup, node["node_id"], _citation_aliases(name, props))
+                    if text_paragraph_nodes:
+                        _append_edge(
+                            edges,
+                            edge_seen,
+                            make_edge(text_paragraph_nodes[0]["node_id"], node["node_id"], "CITES", filename, {"source": "citation_entity_fallback"}),
+                        )
+
+                for relation in normalized["relations"]:
+                    relation_type = _normalize_relation_type(relation.get("type"))
+                    source_id = node_lookup.get(_entity_key(relation.get("source"))) or global_lookup.get(_entity_key(relation.get("source")))
+                    target_id = node_lookup.get(_entity_key(relation.get("target"))) or global_lookup.get(_entity_key(relation.get("target")))
+                    if not target_id:
+                        target_id = _resolve_internal_citation(relation.get("target"), relation.get("properties") or {}, global_lookup)
+                    if not source_id or not target_id:
+                        self.warnings.append(
+                            f"Unresolved relation in {clause_number}: "
+                            f"{relation.get('source')} - {relation_type} - {relation.get('target')}"
+                        )
+                        continue
+                    _append_edge(edges, edge_seen, make_edge(source_id, target_id, relation_type, filename, relation.get("properties")))
+
+        return nodes, edges
+
     def build(
         self,
         filename: str,
@@ -867,14 +1264,8 @@ class FormatOneGraphBuilder:
             split_result,
             raw.get("file_info_extraction"),
         )
-        # 构建 Article、ProvisionUnit、Citation 以及 Article 相关关系。
-        article_nodes, article_edges = self._build_article_nodes(
-            filename,
-            doc_node,
-            split_result,
-            raw.get("article_extractions") or raw.get("clause_extractions") or [],
-            raw.get("failed_article_extractions") or raw.get("failed_clause_extractions") or [],
-        )
+        # v1 构建 Article、ProvisionClause、ProvisionTextParagraph、Citation。
+        article_nodes, article_edges = self._build_v1_article_nodes(filename, doc_node, split_result, raw)
         # 最终节点列表由文件级节点和 Article 级节点拼接得到。
         nodes = file_nodes + article_nodes
         # 最终关系列表再做一次整体去重。
@@ -888,8 +1279,11 @@ class FormatOneGraphBuilder:
             "annex_count": len(split_result.get("annexes_metadata", [])),
             "skipped_annex_count": len(split_result.get("annexes_metadata", [])),
             "recital_count": len(split_result.get("recitals", [])),
-            "success_clause_count": len(raw.get("article_extractions") or raw.get("clause_extractions") or []),
-            "failed_clause_count": len(raw.get("failed_article_extractions") or raw.get("failed_clause_extractions") or []),
+            "success_article_count": len(raw.get("article_extractions") or []),
+            "failed_article_count": len(raw.get("failed_article_extractions") or []),
+            "provision_clause_count": sum(len(article.get("provision_clauses") or []) for article in split_result.get("clauses", [])),
+            "success_clause_count": len(raw.get("provision_clause_extractions") or []),
+            "failed_clause_count": len(raw.get("failed_provision_clause_extractions") or []),
             "nodes": len(nodes),
             "edges": len(edges),
             "warnings": self.warnings,
@@ -906,3 +1300,5 @@ class FormatOneGraphBuilder:
             },
             "raw_llm_result": raw,
         }
+
+
