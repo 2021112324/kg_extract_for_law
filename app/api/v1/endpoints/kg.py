@@ -1213,6 +1213,58 @@ async def clause_en_v2_extract_by_dir(
             data=None
         )
 
+@router.post("/kgs/{kg_id}/clause_en_v3_extract_by_dir")
+async def clause_en_v3_extract_by_dir(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),
+):
+    """
+    Format-three English law knowledge graph extraction API.
+
+    Function:
+    Extract knowledge graphs from format-three English law files under the given
+    local directory. Format three targets United States CFR / USC / ITAR /
+    state-code texts whose main provision boundary is a legal section headed by
+    `§`.
+
+    Implementation:
+    app.infrastructure.information_extraction.en_law_v3.FormatThreeEnLawExtractor
+
+    Extraction logic:
+    1. LegalProvision is created by deterministic `§` section splitting.
+    2. ProvisionClause is created by deterministic first-level subsection
+       splitting, normally based on (a), (b), (c).
+    3. The LLM only enriches LegalProvision / ProvisionClause attributes and
+       extracts ProvisionTextParagraph / Citation where applicable.
+    4. Reserved sections and editorial/statutory-note blocks are excluded from
+       body LegalProvision nodes.
+    5. Supplements and appendix-like structures are recorded as validation or
+       warning metadata, not mixed into section body extraction.
+
+    Request JSON:
+    {
+        "data_dir": "format-three English law directory"
+    }
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_en_v3_extract_by_local_dir,
+            {"clause_file_dir": data_dir, "if_del_task": if_del_task, "db": db}
+        )
+        return success_response(
+            msg="英文法规格式三抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行英文法规格式三抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
 @router.post("/kgs/{kg_id}/guide_clause_extract_by_dir")
 async def guide_clause_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器

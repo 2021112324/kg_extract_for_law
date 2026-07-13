@@ -705,7 +705,7 @@ class LangextractAdapter(IInformationExtraction):
                         'debug': config.debug,
                         'model_url': config.api_url,
                         'extraction_passes': config.extraction_passes,
-                        'language_model_params': config.config
+                        'language_model_params': {**config.config, 'max_output_tokens': config.max_output_tokens} if config.max_output_tokens else config.config
                     },
                     timeout=3600  # 30分钟超时
                 )

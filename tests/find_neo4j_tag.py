@@ -16,7 +16,7 @@ if __name__ == "__main__":
     neo4j_adapter.connect()
 
     # 查询所有以 "e1_compliance_case_v1_task_" 为前缀的图谱标签
-    query = "CALL db.labels() YIELD label WHERE label STARTS WITH 'e5_en_law_task' RETURN label"
+    query = "CALL db.labels() YIELD label WHERE label STARTS WITH 'e6_en_law_v3_task' RETURN label"
     records = neo4j_adapter.run_query(query)
 
     tags = [record["label"] for record in records]
