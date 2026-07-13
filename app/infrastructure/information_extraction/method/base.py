@@ -31,6 +31,7 @@ class LangextractConfig(ModelConfig):
     max_workers: int = 10  # 用于并发处理的最大并行工作线程数
     additional_context: str | None = None  # 推理期间添加到提示中的额外上下文
     resolver_params: dict | None = None  # 解析器参数，用于解析原始语言模型输出
+    # language_model_params: dict | None = None  # 语言模型的额外参数
     max_output_tokens: int | None = None  # 最大输出token数，None表示使用模型默认值（通常较小，复杂抽取建议设大）
     debug: bool = True  # 是否填充调试字段
     extraction_passes: int = 1  # 顺序提取尝试次数，用于提高召回率
