@@ -1160,8 +1160,8 @@ class ClauseExtractor:
                 )
 
             # 引用依据映射
-            inner_reference_mapping = {}
-            outer_reference_mapping = {}
+            inner_reference_mapping: dict[str, list[dict]] = {}
+            outer_reference_mapping: dict[str, list[dict]] = {}
             inner_reference_id_mapping = {}
             outer_reference_id_mapping = {}
             # 条款单元到法条的映射
@@ -1253,13 +1253,21 @@ class ClauseExtractor:
                     # 添加内部引用依据和外部引用依据
                     inner_reference = unit.get("内部引用依据", [])
                     for ref in inner_reference:
-                        inner_reference_mapping[unit_node_id] = ref
+                        inner_reference_mapping.setdefault(
+                            unit_node_id, []
+                        ).append(ref)
                     outer_reference = unit.get("外部引用依据", [])
                     for ref in outer_reference:
-                        outer_reference_mapping[unit_node_id] = ref
+                        outer_reference_mapping.setdefault(
+                            unit_node_id, []
+                        ).append(ref)
 
             # 处理内部引用依据
-            for unit_node_id, inner_ref in inner_reference_mapping.items():
+            for unit_node_id, inner_ref in (
+                (source_id, reference)
+                for source_id, references in inner_reference_mapping.items()
+                for reference in references
+            ):
                 ref_node_id = inner_ref.get("node_id")
                 ref_node_name = inner_ref.get("node_name")
                 ref_node_type = inner_ref.get("node_type")
@@ -1340,7 +1348,11 @@ class ClauseExtractor:
                         )
 
             # 处理外部引用依据
-            for unit_node_id, outer_ref in outer_reference_mapping.items():
+            for unit_node_id, outer_ref in (
+                (source_id, reference)
+                for source_id, references in outer_reference_mapping.items()
+                for reference in references
+            ):
                 ref_node_id = outer_ref.get("node_id")
                 ref_node_name = outer_ref.get("node_name")
                 ref_node_type = outer_ref.get("node_type")
@@ -1372,7 +1384,7 @@ class ClauseExtractor:
                             "filename": filename
                         }
                     )
-                    outer_reference_id_mapping[clean_string_with_only_words(ref_node_name)] = ref_unit_node_id
+                    outer_reference_id_mapping[clean_string_with_only_words(ref_node_name)] = ref_node_id
                 elif ref_unit_node_id == unit_node_id:
                     logging.warning(f"📄🔧：引用依据款项编号与当前条款单元编号一致{outer_ref}")
                     self.result_stats.week_warning += 1

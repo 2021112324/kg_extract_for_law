@@ -3,12 +3,14 @@ import csv
 import os
 
 # ========== 1. 连接配置 ==========
-URI = "bolt://60.205.171.106:7687"   # 改成你的 Neo4j 地址
-AUTH = ("neo4j", "hit-wE8sR9wQ3pG1")   # 改成你的用户名密码
+# URI = "bolt://60.205.171.106:7687"   # 改成你的 Neo4j 地址
+# AUTH = ("neo4j", "hit-wE8sR9wQ3pG1")   # 改成你的用户名密码
+URI = "bolt://39.96.198.93:7687"   # 改成你的 Neo4j 地址
+AUTH = ("neo4j", "ug4GMLnArVaKz8z")   # 改成你的用户名密码
 
 # ========== 2. 导出配置 ==========
 BATCH_SIZE = 10000
-OUTPUT_DIR = r"F:\企业大脑知识库系统\8.1项目\抽取代码\kg_extract_for_law\neo4j_data"
+OUTPUT_DIR = r"D:\CogmAIT\neo4j数据备份\7月22日"
 
 NODES_FILE = os.path.join(OUTPUT_DIR, "nodes.csv")
 RELS_FILE = os.path.join(OUTPUT_DIR, "rels.csv")

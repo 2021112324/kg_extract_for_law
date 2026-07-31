@@ -2281,16 +2281,16 @@ class KGService:
             "stats": run_stats.to_dict(),
         }
 
-    async def clause_en_v2_extract_by_local_dir(
+    async def clause_en_v1_extract_by_local_dir(
             self,
             clause_file_dir,
             if_del_task,
             db: Session,
     ):
         """
-        从本地目录提取格式一英文法规 v2 知识图谱，并保存至 Neo4j。
+        从本地目录提取格式一英文法规 v1 知识图谱，并保存至 Neo4j。
 
-        v2 与旧英文抽取流程一致，但底层使用
+        v1 与旧英文抽取流程一致，但底层使用
         app.infrastructure.information_extraction.en_law_v1.FormatOneEnLawExtractor。
         核心差异：
         1. Article / LegalProvision 抽取只负责 Article 属性；
@@ -2315,8 +2315,8 @@ class KGService:
             raise Exception(f"未发现可抽取的英文法规文件，目录下需包含 .md 或 .txt: {clause_file_dir}")
 
         new_kg = KGCreate(
-            name=f"{input_root.name}_v2",
-            description="格式一英文法规 v2 知识图谱",
+            name=f"{input_root.name}_v1",
+            description="格式一英文法规 v1 知识图谱",
         )
         kg_result = await self.create_kg(new_kg, db)
         kg_id = kg_result.get("data").get("id")
@@ -2332,7 +2332,7 @@ class KGService:
             new_task = KGExtractionTask(
                 kg_id=kg_id,
                 name=input_file.stem,
-                description="格式一英文法规 v2 知识图谱抽取任务",
+                description="格式一英文法规 v1 知识图谱抽取任务",
                 prompt="",
                 parameters={
                     "input_path": str(input_file),
@@ -2348,7 +2348,7 @@ class KGService:
             db.refresh(new_task)
 
             try:
-                logging.info(f"格式一英文法规 v2 图谱抽取开始: {relative_name}")
+                logging.info(f"格式一英文法规 v1 图谱抽取开始: {relative_name}")
                 try:
                     clause_kg = await self.format_one_en_law_v1_extractor.extract_file_to_kg(
                         str(input_file),
@@ -2357,12 +2357,12 @@ class KGService:
                     )
                 except Exception as e:
                     run_stats.add_extraction_error(relative_name, str(e))
-                    raise Exception(f"{relative_name}英文法规 v2 图谱抽取时出现问题，请检查！{str(e)}")
+                    raise Exception(f"{relative_name}英文法规 v1 图谱抽取时出现问题，请检查！{str(e)}")
 
                 run_stats.add_kg_warnings(relative_name, clause_kg)
                 neo4j_kg = prepare_en_law_v1_kg_for_neo4j(clause_kg)
                 if not neo4j_kg.get("nodes"):
-                    raise Exception("英文法规 v2 图谱节点为空")
+                    raise Exception("英文法规 v1 图谱节点为空")
 
                 try:
                     self.graph_storage.connect()
@@ -2374,14 +2374,14 @@ class KGService:
                     )
                     self.graph_storage.disconnect()
                     if not saved:
-                        raise Exception("英文法规 v2 图谱保存到 Neo4j 失败")
+                        raise Exception("英文法规 v1 图谱保存到 Neo4j 失败")
                 except Exception as e:
                     try:
                         self.graph_storage.disconnect()
                     except Exception:
                         pass
                     run_stats.add_storage_error(relative_name, str(e))
-                    raise Exception(f"{relative_name}英文法规 v2 图谱保存时出现问题，请检查！{str(e)}")
+                    raise Exception(f"{relative_name}英文法规 v1 图谱保存时出现问题，请检查！{str(e)}")
 
                 new_task.status = 2
                 db.add(new_task)
@@ -2390,7 +2390,7 @@ class KGService:
                 run_stats.success_files += 1
                 success_count += 1
                 logging.info(
-                    "格式一英文法规 v2 图谱抽取完成: %s, nodes=%s, edges=%s",
+                    "格式一英文法规 v1 图谱抽取完成: %s, nodes=%s, edges=%s",
                     relative_name,
                     len(neo4j_kg.get("nodes") or []),
                     len(neo4j_kg.get("edges") or []),
@@ -2405,7 +2405,7 @@ class KGService:
                 db.commit()
                 if "图谱抽取时出现问题" not in str(e) and "图谱保存时出现问题" not in str(e):
                     run_stats.add_file_processing_error(relative_name, str(e))
-                logging.error(f"{relative_name}英文法规 v2 文件处理出现问题，请检查！{str(e)}")
+                logging.error(f"{relative_name}英文法规 v1 文件处理出现问题，请检查！{str(e)}")
                 error_files.append((relative_name, str(e)))
 
         tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
@@ -2413,32 +2413,32 @@ class KGService:
         try:
             for graph_name in graph_names:
                 self.graph_storage.connect()
-                logging.info(f"正在合并格式一英文法规 v2 图谱 {graph_name} -> {kg_graph_name}")
+                logging.info(f"正在合并格式一英文法规 v1 图谱 {graph_name} -> {kg_graph_name}")
                 self.graph_storage.merge_graphs(graph_name, kg_graph_name)
                 if if_del_task:
                     self.graph_storage.delete_subgraph(graph_name)
-                logging.info(f"格式一英文法规 v2 图谱 {graph_name} 合并完成")
+                logging.info(f"格式一英文法规 v1 图谱 {graph_name} 合并完成")
                 self.graph_storage.disconnect()
-            logging.info("所有格式一英文法规 v2 图谱处理完成")
+            logging.info("所有格式一英文法规 v1 图谱处理完成")
         except Exception as e:
             try:
                 self.graph_storage.disconnect()
             except Exception:
                 pass
-            logging.error(f"格式一英文法规 v2 图谱合并时出现问题，请检查！" + str(e))
-            raise Exception(f"格式一英文法规 v2 图谱合并时出现问题，请检查！" + str(e))
+            logging.error(f"格式一英文法规 v1 图谱合并时出现问题，请检查！" + str(e))
+            raise Exception(f"格式一英文法规 v1 图谱合并时出现问题，请检查！" + str(e))
 
         for file, error in error_files:
-            logging.error(f"{file}英文法规 v2 文件处理出现问题，请检查！" + error)
-        logging.info(f"英文法规 v2 错误数: {run_stats.error}")
-        logging.info(f"英文法规 v2 抽取错误数: {run_stats.extraction_error}")
-        logging.info(f"英文法规 v2 入库错误数: {run_stats.storage_error}")
-        logging.info(f"英文法规 v2 文件处理错误数: {run_stats.file_processing_error}")
-        logging.info(f"英文法规 v2 弱警告数: {run_stats.warning}")
-        logging.info(f"英文法规 v2 强警告数: {run_stats.strong_warning}")
+            logging.error(f"{file}英文法规 v1 文件处理出现问题，请检查！" + error)
+        logging.info(f"英文法规 v1 错误数: {run_stats.error}")
+        logging.info(f"英文法规 v1 抽取错误数: {run_stats.extraction_error}")
+        logging.info(f"英文法规 v1 入库错误数: {run_stats.storage_error}")
+        logging.info(f"英文法规 v1 文件处理错误数: {run_stats.file_processing_error}")
+        logging.info(f"英文法规 v1 弱警告数: {run_stats.warning}")
+        logging.info(f"英文法规 v1 强警告数: {run_stats.strong_warning}")
         await self.format_one_en_law_v1_extractor.logging_result_stats()
         if success_count == 0:
-            raise Exception("英文法规 v2 目录下没有成功入库的图谱")
+            raise Exception("英文法规 v1 目录下没有成功入库的图谱")
         return {
             "kg_id": kg_id,
             "kg_graph_name": kg_graph_name,
