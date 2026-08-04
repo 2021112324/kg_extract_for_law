@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -57,6 +58,13 @@ from app.infrastructure.information_extraction.en_law_v3.neo4j_export import (
 from app.infrastructure.information_extraction.law_en_extract_cp.clause_extract import ClauseEnExtractor
 from app.infrastructure.information_extraction.law_extract.clause_extract import ClauseExtractor
 from app.infrastructure.information_extraction.national_standard.graph_extract import NationalStandardGraphExtractor
+from app.infrastructure.information_extraction.other_language_law import OtherLanguageLawExtractor, LocalLLMTranslator
+from app.infrastructure.information_extraction.other_language_law.config import (
+    DEFAULT_CACHE_PATH as OTHER_LANGUAGE_DEFAULT_CACHE_PATH,
+    DEFAULT_REPORT_DIR as OTHER_LANGUAGE_DEFAULT_REPORT_DIR,
+    DEFAULT_TRANSLATED_DIR as OTHER_LANGUAGE_DEFAULT_TRANSLATED_DIR,
+    TRANSLATION_OVERWRITE as OTHER_LANGUAGE_TRANSLATION_OVERWRITE,
+)
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.models.kg import KG as KGModel, KGExtractionTask, KGFile
@@ -142,6 +150,9 @@ class KGService:
         )
         self.compliance_case_v1_extractor = ComplianceCaseGraphExtractor(
             enable_llm=os.getenv("COMPLIANCE_CASE_V1_ENABLE_LLM", "true").lower() not in {"0", "false", "no"}
+        )
+        self.other_language_law_extractor = OtherLanguageLawExtractor(
+            clause_extractor=self.clause_extractor
         )
 
     @staticmethod
@@ -2118,6 +2129,152 @@ class KGService:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
         await self.clause_extractor.logging_result_stats()
         return True
+
+    async def other_language_law_extract_by_local_dir(
+            self,
+            clause_file_dir,
+            if_del_task,
+            db: Session,
+            translated_dir: str | None = None,
+            output_dir: str | None = None,
+            cache_path: str | None = None,
+            source_lang: str = "auto",
+            overwrite: bool = OTHER_LANGUAGE_TRANSLATION_OVERWRITE,
+            limit: int = 0,
+    ):
+        """
+        从本地目录抽取其他语种法规知识图谱。
+
+        流程：
+        1. 将其他语种法规逐行翻译为结构保持型中文临时文件；
+        2. 生成中文法规抽取专用归一化文件；
+        3. 复用中文 ClauseExtractor 抽取知识图谱；
+        4. 保存到 Neo4j 并合并到总图谱。
+        """
+        clause_file_dir = str(clause_file_dir).replace('\\', '/')
+        if not os.path.exists(clause_file_dir):
+            raise Exception(f"文件目录不存在: {clause_file_dir}")
+        if not os.path.isdir(clause_file_dir):
+            raise Exception(f"文件目录不是目录: {clause_file_dir}")
+
+        source_root = Path(clause_file_dir)
+        translated_root = Path(translated_dir) if translated_dir else Path(OTHER_LANGUAGE_DEFAULT_TRANSLATED_DIR)
+        report_root = Path(output_dir) if output_dir else Path(OTHER_LANGUAGE_DEFAULT_REPORT_DIR)
+        cache_file = Path(cache_path) if cache_path else Path(OTHER_LANGUAGE_DEFAULT_CACHE_PATH)
+
+        self.other_language_law_extractor.translator = LocalLLMTranslator(source_lang=source_lang)
+        extraction_result = await self.other_language_law_extractor.extract_directory(
+            source_dir=source_root,
+            translated_dir=translated_root,
+            cache_path=cache_file,
+            output_dir=report_root,
+            overwrite=overwrite,
+            limit=limit,
+            run_extraction=True,
+        )
+
+        new_kg = KGCreate(
+            name=f"{source_root.name}_其他语种法规",
+            description=f"其他语种法规中文知识图谱，source_lang={source_lang}",
+        )
+        kg_result = await self.create_kg(new_kg, db)
+        kg_id = kg_result.get("data").get("id")
+        kg_graph_name = kg_result.get("data").get("graph_name")
+
+        error_files = []
+        success_count = 0
+        for file_result in extraction_result.files:
+            relative_name = Path(file_result.translated_path).name
+            graph_name = generate_unique_name("other_language_law_task")
+            new_task = KGExtractionTask(
+                kg_id=kg_id,
+                name=Path(file_result.translated_path).stem,
+                description="其他语种法规翻译后中文知识图谱抽取任务",
+                prompt="",
+                parameters={
+                    "source_path": file_result.source_path,
+                    "translated_path": file_result.translated_path,
+                    "chinese_input_path": file_result.chinese_input_path,
+                    "result_path": file_result.result_path,
+                    "source_lang": source_lang,
+                    "extractor_version": "other_language_law",
+                },
+                graph_name=graph_name,
+                status=1,
+            )
+            db.add(new_task)
+            db.flush()
+            db.commit()
+            db.refresh(new_task)
+
+            if file_result.status != "success":
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                error_files.append((relative_name, file_result.error))
+                continue
+
+            try:
+                with open(file_result.result_path, "r", encoding="utf-8") as file:
+                    clause_kg = json.load(file)
+                if not clause_kg.get("nodes"):
+                    raise Exception("其他语种法规图谱节点为空")
+                self.graph_storage.connect()
+                saved = self.graph_storage.add_subgraph_with_merge(
+                    clause_kg,
+                    graph_name,
+                    "DomainLevel",
+                    filename=relative_name,
+                )
+                self.graph_storage.disconnect()
+                if not saved:
+                    raise Exception("其他语种法规图谱保存到 Neo4j 失败")
+                new_task.status = 2
+                db.add(new_task)
+                db.commit()
+                db.refresh(new_task)
+                success_count += 1
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                new_task.status = 4
+                db.add(new_task)
+                db.commit()
+                error_files.append((relative_name, str(e)))
+                logging.error(f"{relative_name}其他语种法规文件处理出现问题，请检查！{str(e)}")
+
+        tasks = db.query(KGExtractionTask).filter(KGExtractionTask.kg_id == kg_id, KGExtractionTask.status == 2).all()
+        graph_names = [task.graph_name for task in tasks]
+        try:
+            for graph_name in graph_names:
+                self.graph_storage.connect()
+                logging.info(f"正在合并其他语种法规图谱 {graph_name} -> {kg_graph_name}")
+                self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                if if_del_task:
+                    self.graph_storage.delete_subgraph(graph_name)
+                self.graph_storage.disconnect()
+        except Exception as e:
+            try:
+                self.graph_storage.disconnect()
+            except Exception:
+                pass
+            raise Exception(f"其他语种法规图谱合并时出现问题，请检查！{str(e)}")
+
+        if success_count == 0:
+            raise Exception("其他语种法规目录下没有成功入库的图谱")
+        return {
+            "kg_id": kg_id,
+            "kg_graph_name": kg_graph_name,
+            "total": len(extraction_result.files),
+            "success": success_count,
+            "failed": len(error_files),
+            "errors": error_files,
+            "report_dir": str(report_root),
+            "translation": extraction_result.translation,
+            "quality": extraction_result.quality,
+        }
 
     async def clause_en_extract_by_local_dir(
             self,

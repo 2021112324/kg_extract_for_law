@@ -1265,6 +1265,66 @@ async def clause_en_v3_extract_by_dir(
             data=None
         )
 
+@router.post("/kgs/{kg_id}/clause_other_language_extract_by_dir")
+async def clause_other_language_extract_by_dir(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        translated_dir: str | None = None,
+        output_dir: str | None = None,
+        cache_path: str | None = None,
+        source_lang: str = "auto",
+        overwrite: bool = False,
+        limit: int = 0,
+        if_del_task: bool = False,
+        db: Session = Depends(get_db),
+):
+    """
+    其他语种法规知识图谱抽取接口。
+
+    功能：
+    1. 将指定目录下的其他语种法规逐行翻译为结构保持型中文临时文件。
+    2. 对译文进行中文法规抽取输入归一化。
+    3. 复用 app.infrastructure.information_extraction.law_extract.ClauseExtractor
+       生成中文法规知识图谱。
+    4. 保存翻译报告、质量报告、抽取报告，并将成功图谱入库。
+
+    请求示例：
+    {
+        "data_dir": "其他语种法规文件目录",
+        "translated_dir": "译文临时目录，可选",
+        "output_dir": "结果报告目录，可选",
+        "source_lang": "German",
+        "overwrite": false,
+        "limit": 0
+    }
+    """
+    try:
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.other_language_law_extract_by_local_dir,
+            {
+                "clause_file_dir": data_dir,
+                "if_del_task": if_del_task,
+                "db": db,
+                "translated_dir": translated_dir,
+                "output_dir": output_dir,
+                "cache_path": cache_path,
+                "source_lang": source_lang,
+                "overwrite": overwrite,
+                "limit": limit,
+            }
+        )
+        return success_response(
+            msg="其他语种法规抽取任务开始执行",
+            data=None
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行其他语种法规抽取任务失败: {str(e)}",
+            code=500,
+            data=None
+        )
+
 @router.post("/kgs/{kg_id}/guide_clause_extract_by_dir")
 async def guide_clause_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器
