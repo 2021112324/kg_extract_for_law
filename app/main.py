@@ -169,12 +169,15 @@ async def startup_db_client():
         logger.warning("应用将继续启动，但数据库功能可能不可用")
 
     # 初始化MinIO存储桶
-    try:
-        logger.info("初始化MinIO存储...")
-        initialize_minio()
-        logger.info("MinIO初始化完成")
-    except Exception as e:
-        logger.error(f"MinIO初始化失败: {str(e)}")
+    if settings.MINIO_SKIP_INIT:
+        logger.info("MINIO_SKIP_INIT=true，跳过MinIO初始化")
+    else:
+        try:
+            logger.info("初始化MinIO存储...")
+            initialize_minio()
+            logger.info("MinIO初始化完成")
+        except Exception as e:
+            logger.error(f"MinIO初始化失败: {str(e)}")
 
 @app.get("/")
 async def root():

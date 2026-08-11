@@ -1,6 +1,17 @@
 {
   "permissions": {
     "allow": [
+      "Bash(curl:*)",
+      "Bash(python:*)",
+      "Bash(npm:*)",
+      "Bash(git:*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebSearch(*)",
+      "WebFetch(*)",
       "Bash(python -c \":*)",
       "Bash(python -c \"from app.infrastructure.information_extraction.law_en_extract.prompt.schema import schema_for_file_info, schema_for_clause; print\\(''source_text in file_info:'', ''source_text'' in schema_for_file_info\\); print\\(''source_text in clause:'', ''source_text'' in schema_for_clause\\); print\\(''OK''\\)\")",
       "Read(//e/Program Files \\(x86\\)/MinerU/data/危险废物贮存污染控制标准.pdf-03ded800-e506-41f0-8e5d-69f58b8d35e0/**)",
@@ -8,7 +19,17 @@
       "Bash(python -c \"import sys; from pathlib import Path; sys.path.insert\\(0, str\\(Path\\(''tests/t_neo4j.py''\\).resolve\\(\\).parent.parent\\)\\); from app.infrastructure.graph_storage.neo4j_adapter import Neo4jAdapter; print\\(''Import OK''\\)\")",
       "Bash(git reset --soft HEAD~1)",
       "Bash(python -c \"from app.infrastructure.information_extraction.langextract_adapter import LangextractAdapter; print\\(''Import succeeded''\\)\")",
-      "Bash(pip install langfuse absl-py)"
+      "Bash(pip install langfuse absl-py)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/data_code/code/kg_to_natural_language/**)",
+      "Bash(openspec new change \"kg-to-natural-language\")",
+      "Bash(openspec status --change \"kg-to-natural-language\" --json)",
+      "Bash(openspec instructions proposal --change \"kg-to-natural-language\" --json)",
+      "Bash(openspec instructions design --change \"kg-to-natural-language\" --json)",
+      "Bash(openspec instructions specs --change \"kg-to-natural-language\" --json)",
+      "Bash(openspec instructions tasks --change \"kg-to-natural-language\" --json)",
+      "Bash(openspec status --change \"kg-to-natural-language\")",
+      "Bash(openspec instructions apply --change \"kg-to-natural-language\" --json)",
+      "Bash(E:/Anaconda3/envs/cogmait312/python.exe -c \":*)"
     ]
   }
 }

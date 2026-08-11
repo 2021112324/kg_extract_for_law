@@ -78,6 +78,7 @@ class OtherLanguageExtractionResult:
     success_files: int
     failed_files: int
     files: list[ExtractionFileResult] = field(default_factory=list)
+    extraction_stats: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +91,7 @@ class OtherLanguageExtractionResult:
             "success_files": self.success_files,
             "failed_files": self.failed_files,
             "files": [item.to_dict() for item in self.files],
+            "extraction_stats": self.extraction_stats,
         }
 
 
@@ -100,6 +102,65 @@ def save_json(data: dict[str, Any], output_path: Path | str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
+
+
+def _remove_stale_outputs(
+    output_dir: Path,
+    allowed_kg_relatives: set[Path],
+    allowed_chinese_input_relatives: set[Path],
+) -> None:
+    """删除不属于本轮源文件列表的旧中间结果。"""
+
+    stale_roots = (
+        (output_dir / "kg", allowed_kg_relatives),
+        (output_dir / "translated_for_chinese_extraction", allowed_chinese_input_relatives),
+    )
+    for root, allowed_relatives in stale_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if relative not in allowed_relatives:
+                path.unlink()
+
+
+def _reset_clause_result_stats(clause_extractor: Any) -> None:
+    """Reset the reused Chinese ClauseExtractor statistics before one run."""
+
+    stats = getattr(clause_extractor, "result_stats", None)
+    if stats is None:
+        return
+    for field_name in ("error", "week_warning", "strong_warning"):
+        if hasattr(stats, field_name):
+            setattr(stats, field_name, 0)
+    for field_name in ("error_msg", "week_warning_msg", "strong_warning_msg"):
+        if hasattr(stats, field_name):
+            setattr(stats, field_name, "")
+
+
+def _snapshot_clause_result_stats(clause_extractor: Any) -> dict[str, Any]:
+    """Read real extraction errors and warnings from Chinese ClauseExtractor."""
+
+    stats = getattr(clause_extractor, "result_stats", None)
+    if stats is None:
+        return {
+            "error": 0,
+            "error_msg": "",
+            "weak_warning": 0,
+            "weak_warning_msg": "",
+            "strong_warning": 0,
+            "strong_warning_msg": "",
+        }
+    return {
+        "error": int(getattr(stats, "error", 0) or 0),
+        "error_msg": str(getattr(stats, "error_msg", "") or ""),
+        "weak_warning": int(getattr(stats, "week_warning", 0) or 0),
+        "weak_warning_msg": str(getattr(stats, "week_warning_msg", "") or ""),
+        "strong_warning": int(getattr(stats, "strong_warning", 0) or 0),
+        "strong_warning_msg": str(getattr(stats, "strong_warning_msg", "") or ""),
+    }
 
 
 class OtherLanguageLawExtractor:
@@ -158,17 +219,30 @@ class OtherLanguageLawExtractor:
         output = Path(output_dir)
         kg_output_dir = output / "kg"
         chinese_input_dir = output / "translated_for_chinese_extraction"
-        files = discover_law_files(translated_root)
+        source_files = discover_law_files(source_root)
         if limit and limit > 0:
-            files = files[:limit]
+            source_files = source_files[:limit]
+        _reset_clause_result_stats(self.clause_extractor)
+
+        allowed_chinese_input_relatives = {
+            source_path.relative_to(source_root)
+            for source_path in source_files
+        }
+        allowed_kg_relatives = {
+            relative.with_suffix(".kg.json")
+            for relative in allowed_chinese_input_relatives
+        }
+        _remove_stale_outputs(output, allowed_kg_relatives, allowed_chinese_input_relatives)
 
         results: list[ExtractionFileResult] = []
-        for translated_path in files:
-            relative = translated_path.relative_to(translated_root)
-            source_path = source_root / relative
+        for source_path in source_files:
+            relative = source_path.relative_to(source_root)
+            translated_path = translated_root / relative
             chinese_input_path = chinese_input_dir / relative
             result_path = kg_output_dir / relative.with_suffix(".kg.json")
             try:
+                if not translated_path.exists():
+                    raise FileNotFoundError(f"translated file does not exist: {translated_path}")
                 normalize_translated_file_for_chinese_extraction(translated_path, chinese_input_path)
                 text = chinese_input_path.read_text(encoding="utf-8", errors="ignore")
                 kg = await self.clause_extractor.extract_clauses(
@@ -234,6 +308,7 @@ class OtherLanguageLawExtractor:
         )
 
         extraction_results: list[ExtractionFileResult] = []
+        extraction_stats: dict[str, Any] = {}
         if run_extraction:
             extraction_results = await self.extract_from_translated_dir(
                 source_dir=source_dir,
@@ -241,6 +316,7 @@ class OtherLanguageLawExtractor:
                 output_dir=output,
                 limit=limit,
             )
+            extraction_stats = _snapshot_clause_result_stats(self.clause_extractor)
 
         result = OtherLanguageExtractionResult(
             source_dir=str(source_dir),
@@ -252,6 +328,7 @@ class OtherLanguageLawExtractor:
             success_files=sum(1 for item in extraction_results if item.status == "success") if run_extraction else 0,
             failed_files=sum(1 for item in extraction_results if item.status == "failed") if run_extraction else 0,
             files=extraction_results,
+            extraction_stats=extraction_stats,
         )
         self.write_extraction_report(result, output)
         return result

@@ -94,7 +94,8 @@ class Settings(BaseSettings):
     MINIO_ENDPOINT: str = os.getenv("MINIO_ENDPOINT", "localhost:9000")
     MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
     MINIO_SECRET_KEY: str = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", False)
+    MINIO_SECURE: bool = os.getenv("MINIO_SECURE", "False").lower() == "true"
+    MINIO_SKIP_INIT: bool = os.getenv("MINIO_SKIP_INIT", "false").lower() == "true"
     
     # 添加KG_EXTRACT配置
     KG_EXTRACT_METHOD: str = os.getenv("KG_EXTRACT_METHOD", "langextract")  # 图谱抽取采取的方法框架

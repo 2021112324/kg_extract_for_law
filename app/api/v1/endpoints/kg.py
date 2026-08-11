@@ -1275,6 +1275,7 @@ async def clause_other_language_extract_by_dir(
         source_lang: str = "auto",
         overwrite: bool = False,
         limit: int = 0,
+        use_mysql: bool = False,
         if_del_task: bool = False,
         db: Session = Depends(get_db),
 ):
@@ -1312,6 +1313,7 @@ async def clause_other_language_extract_by_dir(
                 "source_lang": source_lang,
                 "overwrite": overwrite,
                 "limit": limit,
+                "use_mysql": use_mysql,
             }
         )
         return success_response(

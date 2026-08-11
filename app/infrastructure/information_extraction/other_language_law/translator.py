@@ -132,8 +132,6 @@ def is_probably_non_translatable(text: str) -> bool:
         return True
     if not re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", stripped):
         return True
-    if re.fullmatch(r"[A-Z0-9]{2,20}", stripped):
-        return True
     if re.fullmatch(r"[-*_=`~#\[\]().,;:/$\\|<>{}\s0-9A-Za-zÀ-ÖØ-öø-ÿ]+", stripped):
         words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{3,}", stripped)
         if len(words) == 0:
@@ -169,7 +167,7 @@ def split_format_prefix(text: str) -> LineParts:
             break
 
     for pattern in (
-        r"^((?:Article|ARTICLE|Art\.|Art|Artikel|SECTION|SEC\.|Sec\.|Section|Abschnitt|Chapitre|Capitulo|Capítulo|§)\s*[0-9A-Za-zÀ-ÖØ-öø-ÿ_.-]*\.?\s*)",
+        r"^(§\s*[0-9A-Za-zÀ-ÖØ-öø-ÿ_.-]*\.?\s*)",
         r"^((?:第[零一二三四五六七八九十百千万\d]+\s*[编章节条款项]\s*)+)",
         r"^((?:\[[^\]]+\]\s*)+)",
         r"^((?:\([A-Za-z0-9ivxlcdmIVXLCDM]+\)\s*)+)",

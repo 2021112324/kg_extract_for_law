@@ -11,12 +11,16 @@ import io
 from typing import Dict, List, Optional, BinaryIO, Union
 from datetime import datetime, timedelta
 
+import urllib3
 from minio import Minio
 from minio.error import S3Error
 
 from .base import ObjectStorageInterface, StorageConfig, FileMetadata
 
 logger = logging.getLogger(__name__)
+
+# MinIO HTTP客户端超时配置（秒），避免MinIO不可达时长时间阻塞
+_MINIO_HTTP_TIMEOUT = urllib3.Timeout(connect=10.0, read=30.0, total=None)
 
 
 class MinIOAdapter(ObjectStorageInterface):
@@ -28,11 +32,13 @@ class MinIOAdapter(ObjectStorageInterface):
     
     def __init__(self, config: StorageConfig):
         super().__init__(config)
+        http_client = urllib3.PoolManager(timeout=_MINIO_HTTP_TIMEOUT)
         self.client = Minio(
             endpoint=config.endpoint,
             access_key=config.access_key,
             secret_key=config.secret_key,
-            secure=config.secure
+            secure=config.secure,
+            http_client=http_client,
         )
     
     def ensure_bucket_exists(self, bucket_name: str) -> bool:

@@ -85,7 +85,8 @@ class KGExtractService():
             )
         )
         self.file_storage = StorageFactory.get_default_storage()
-        self.file_storage.initialize()
+        if os.getenv("MINIO_SKIP_INIT", "false").lower() != "true":
+            self.file_storage.initialize()
         # 知识图谱抽取任务管理
         self.kgExtractionTaskManager = KGExtractionTaskManager(
             # db数据库存储抽取任务数据表

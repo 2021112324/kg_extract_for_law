@@ -112,7 +112,8 @@ class KGService:
             }
         )
         self.file_storage = StorageFactory.get_default_storage()
-        self.file_storage.initialize()
+        if os.getenv("MINIO_SKIP_INIT", "false").lower() != "true":
+            self.file_storage.initialize()
         self.kg_extract_service = kg_extract_service
         """
         改进的针对法律知识图谱单门设计抽取流程的对象
@@ -2141,6 +2142,7 @@ class KGService:
             source_lang: str = "auto",
             overwrite: bool = OTHER_LANGUAGE_TRANSLATION_OVERWRITE,
             limit: int = 0,
+            use_mysql: bool = False,
     ):
         """
         从本地目录抽取其他语种法规知识图谱。
@@ -2172,6 +2174,147 @@ class KGService:
             limit=limit,
             run_extraction=True,
         )
+        quality_files = (extraction_result.quality or {}).get("files") or []
+        warning_count = sum(
+            len(item.get("missing_prefix_lines") or []) + len(item.get("suspicious_untranslated_lines") or [])
+            for item in quality_files
+        )
+        strong_warning_count = sum(1 for item in quality_files if not item.get("line_count_match", True))
+        run_stats = {
+            "total_files": len(extraction_result.files),
+            "success_files": 0,
+            "error": 0,
+            "extraction_error": 0,
+            "storage_error": 0,
+            "file_processing_error": 0,
+            "warning": warning_count,
+            "strong_warning": strong_warning_count,
+            "error_messages": [],
+            "warning_messages": [],
+            "strong_warning_messages": [],
+        }
+        for item in quality_files:
+            translated_path = item.get("translated_path") or item.get("source_path") or "unknown"
+            for line_no in item.get("missing_prefix_lines") or []:
+                run_stats["warning_messages"].append(f"{translated_path}: missing structural prefix line {line_no}")
+            for line_no in item.get("suspicious_untranslated_lines") or []:
+                run_stats["warning_messages"].append(f"{translated_path}: suspicious untranslated line {line_no}")
+            if not item.get("line_count_match", True):
+                run_stats["strong_warning_messages"].append(f"{translated_path}: line count mismatch")
+
+        clause_extraction_stats = extraction_result.extraction_stats or {}
+
+        def add_clause_stat_message(target_key: str, message: str) -> None:
+            message = (message or "").strip()
+            if message:
+                run_stats[target_key].append(message)
+
+        def merge_clause_extraction_stats() -> None:
+            extraction_error_count = int(clause_extraction_stats.get("error") or 0)
+            weak_warning_count = int(clause_extraction_stats.get("weak_warning") or 0)
+            strong_warning_count = int(clause_extraction_stats.get("strong_warning") or 0)
+            run_stats["error"] += extraction_error_count
+            run_stats["extraction_error"] += extraction_error_count
+            run_stats["warning"] += weak_warning_count
+            run_stats["strong_warning"] += strong_warning_count
+            add_clause_stat_message("error_messages", clause_extraction_stats.get("error_msg", ""))
+            add_clause_stat_message("warning_messages", clause_extraction_stats.get("weak_warning_msg", ""))
+            add_clause_stat_message("strong_warning_messages", clause_extraction_stats.get("strong_warning_msg", ""))
+
+        merge_clause_extraction_stats()
+
+        def add_other_language_error(error_type: str, filename: str, message: str) -> None:
+            run_stats["error"] += 1
+            run_stats[error_type] += 1
+            run_stats["error_messages"].append(f"{filename}: {message}")
+
+        def log_other_language_stats() -> None:
+            logging.info("所有其他语种法规图谱处理完成")
+            logging.info(f"其他语种法规错误数: {run_stats['error']}")
+            logging.info(f"其他语种法规抽取错误数: {run_stats['extraction_error']}")
+            logging.info(f"其他语种法规入库错误数: {run_stats['storage_error']}")
+            logging.info(f"其他语种法规文件处理错误数: {run_stats['file_processing_error']}")
+            logging.info(f"其他语种法规弱警告数: {run_stats['warning']}")
+            logging.info(f"其他语种法规强警告数: {run_stats['strong_warning']}")
+            logging.info("Other-language law extraction stats")
+            logging.info("errors: %s", run_stats["error"])
+            logging.info("warnings: %s", run_stats["warning"])
+            logging.info("strong warnings: %s", run_stats["strong_warning"])
+
+        if not use_mysql:
+            kg_graph_name = generate_unique_name(f"{source_root.name}_other_language_law_kg")
+            error_files = []
+            success_count = 0
+            graph_names = []
+
+            for file_result in extraction_result.files:
+                relative_name = Path(file_result.translated_path).name
+                if file_result.status != "success":
+                    add_other_language_error("extraction_error", relative_name, file_result.error)
+                    error_files.append((relative_name, file_result.error))
+                    continue
+
+                graph_name = generate_unique_name("other_language_law_task")
+                try:
+                    with open(file_result.result_path, "r", encoding="utf-8") as file:
+                        clause_kg = json.load(file)
+                    if not clause_kg.get("nodes"):
+                        raise Exception("其他语种法规图谱节点为空")
+                    self.graph_storage.connect()
+                    saved = self.graph_storage.add_subgraph_with_merge(
+                        clause_kg,
+                        graph_name,
+                        "DomainLevel",
+                        filename=relative_name,
+                    )
+                    self.graph_storage.disconnect()
+                    if not saved:
+                        raise Exception("其他语种法规图谱保存到 Neo4j 失败")
+                    graph_names.append(graph_name)
+                    success_count += 1
+                    run_stats["success_files"] += 1
+                except Exception as e:
+                    try:
+                        self.graph_storage.disconnect()
+                    except Exception:
+                        pass
+                    add_other_language_error("storage_error", relative_name, str(e))
+                    error_files.append((relative_name, str(e)))
+                    logging.error(f"{relative_name}其他语种法规文件处理出现问题，请检查！{str(e)}")
+
+            try:
+                for graph_name in graph_names:
+                    self.graph_storage.connect()
+                    logging.info(f"正在合并其他语种法规图谱 {graph_name} -> {kg_graph_name}")
+                    self.graph_storage.merge_graphs(graph_name, kg_graph_name)
+                    if if_del_task:
+                        self.graph_storage.delete_subgraph(graph_name)
+                    self.graph_storage.disconnect()
+            except Exception as e:
+                try:
+                    self.graph_storage.disconnect()
+                except Exception:
+                    pass
+                add_other_language_error("storage_error", kg_graph_name, str(e))
+                log_other_language_stats()
+                raise Exception(f"其他语种法规图谱合并时出现问题，请检查！{str(e)}")
+
+            log_other_language_stats()
+            if success_count == 0:
+                raise Exception("其他语种法规目录下没有成功入库的图谱")
+            return {
+                "kg_id": None,
+                "kg_graph_name": kg_graph_name,
+                "use_mysql": False,
+                "total": len(extraction_result.files),
+                "success": success_count,
+                "failed": len(error_files),
+                "errors": error_files,
+                "report_dir": str(report_root),
+                "translation": extraction_result.translation,
+                "quality": extraction_result.quality,
+                "stats": run_stats,
+            }
 
         new_kg = KGCreate(
             name=f"{source_root.name}_其他语种法规",
@@ -2208,6 +2351,7 @@ class KGService:
             db.refresh(new_task)
 
             if file_result.status != "success":
+                add_other_language_error("extraction_error", relative_name, file_result.error)
                 new_task.status = 4
                 db.add(new_task)
                 db.commit()
@@ -2234,11 +2378,13 @@ class KGService:
                 db.commit()
                 db.refresh(new_task)
                 success_count += 1
+                run_stats["success_files"] += 1
             except Exception as e:
                 try:
                     self.graph_storage.disconnect()
                 except Exception:
                     pass
+                add_other_language_error("storage_error", relative_name, str(e))
                 new_task.status = 4
                 db.add(new_task)
                 db.commit()
@@ -2260,8 +2406,11 @@ class KGService:
                 self.graph_storage.disconnect()
             except Exception:
                 pass
+            add_other_language_error("storage_error", kg_graph_name, str(e))
+            log_other_language_stats()
             raise Exception(f"其他语种法规图谱合并时出现问题，请检查！{str(e)}")
 
+        log_other_language_stats()
         if success_count == 0:
             raise Exception("其他语种法规目录下没有成功入库的图谱")
         return {
@@ -2274,6 +2423,7 @@ class KGService:
             "report_dir": str(report_root),
             "translation": extraction_result.translation,
             "quality": extraction_result.quality,
+            "stats": run_stats,
         }
 
     async def clause_en_extract_by_local_dir(
