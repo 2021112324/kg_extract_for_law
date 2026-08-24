@@ -21,15 +21,15 @@ if __name__ == "__main__":
     neo4j_adapter.connect()
 
 
-    # 定义多个源图谱标签和一个目标图谱标签
-    source_graph_tags = ['e6_temp_law_v3_kg_602870332113551360']
-    target_graph_tag = "e6_英文法规格式三_v3_kg_595443569158782976"
+    # 定义多个源图谱标签和一个目标图谱标签 e1_法律法规条款_kg_586483027182354432
+    source_graph_tags = ['e6_英文法规格式三_v3_kg_595443569158782976']
+    target_graph_tag = "英文法规"
 
     print(f"开始导入数据，共 {len(source_graph_tags)} 个源图谱...")
     for source_tag in source_graph_tags:
         print(f"  正在合并: {source_tag} -> {target_graph_tag}")
         neo4j_adapter.merge_graphs(source_tag, target_graph_tag)
-        neo4j_adapter.delete_subgraph(source_tag)
+        # neo4j_adapter.delete_subgraph(source_tag)
     print("数据导入完成！")
     neo4j_adapter.disconnect()
     # result = neo4j_adapter.get_visualization_data("law_top_graph")

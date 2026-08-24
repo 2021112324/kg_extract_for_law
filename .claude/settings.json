@@ -29,7 +29,17 @@
       "Bash(openspec instructions tasks --change \"kg-to-natural-language\" --json)",
       "Bash(openspec status --change \"kg-to-natural-language\")",
       "Bash(openspec instructions apply --change \"kg-to-natural-language\" --json)",
-      "Bash(E:/Anaconda3/envs/cogmait312/python.exe -c \":*)"
+      "Bash(E:/Anaconda3/envs/cogmait312/python.exe -c \":*)",
+      "Bash(git config *)",
+      "Bash(env)",
+      "Bash(git push *)",
+      "Bash(ssh -T -o ConnectTimeout=5 git@github.com)",
+      "Read(//c/Users/zxy/.ssh/**)",
+      "Bash(git remote *)",
+      "Bash(PYTHONIOENCODING=utf-8 E:/Anaconda3/envs/cogmait312/python.exe -c ' *)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/爬取的数据/风险法规/第三版/分类/知识库/neo4j数据/**)",
+      "Bash(openspec list *)",
+      "Bash(openspec status *)"
     ]
   }
 }
