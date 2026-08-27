@@ -154,19 +154,19 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 @app.on_event("startup")
 async def startup_db_client():
     """
-    应用启动时初始化数据库
+    应用启动时初始化外部存储依赖
     """
-    logger.info("正在初始化数据库...")
-    try:
-        init_db()
-        logger.info("数据库初始化成功")
-    except Exception as e:
-        logger.error(f"数据库初始化失败: {str(e)}")
-        # 打印详细的堆栈跟踪信息，便于调试
-        logger.error(traceback.format_exc())
-        # 对于致命错误，可以选择关闭应用，但通常我们希望应用能够继续运行
-        # 如果没有数据库连接，应用的其他部分可能仍然可用
-        logger.warning("应用将继续启动，但数据库功能可能不可用")
+    if settings.MYSQL_SKIP_INIT:
+        logger.info("MYSQL_SKIP_INIT=true，跳过MySQL初始化")
+    else:
+        logger.info("正在初始化数据库...")
+        try:
+            init_db()
+            logger.info("数据库初始化成功")
+        except Exception as e:
+            logger.error(f"数据库初始化失败: {str(e)}")
+            logger.error(traceback.format_exc())
+            logger.warning("应用将继续启动，但数据库功能可能不可用")
 
     # 初始化MinIO存储桶
     if settings.MINIO_SKIP_INIT:
@@ -192,4 +192,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

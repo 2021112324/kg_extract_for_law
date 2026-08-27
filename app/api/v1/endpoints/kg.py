@@ -1054,6 +1054,41 @@ Raises:
             data=None
         )
 
+
+@router.post("/kgs/clause_extract_by_dir/standalone")
+async def clause_extract_by_dir_standalone(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+):
+    """从本地中文法规目录抽取最终 Neo4j 图谱，不使用 MySQL 或 MinIO。"""
+    try:
+        kg_graph_name = kg_service.generate_standalone_clause_graph_name(data_dir)
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.clause_extract_by_local_dir,
+            {
+                "clause_file_dir": data_dir,
+                "if_del_task": if_del_task,
+                "db": None,
+                "use_mysql": False,
+                "kg_graph_name": kg_graph_name,
+            },
+        )
+        return success_response(
+            msg="无 MySQL 中文法规抽取任务开始执行",
+            data={
+                "kg_graph_name": kg_graph_name,
+                "use_mysql": False,
+            },
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行无 MySQL 中文法规抽取任务失败: {str(e)}",
+            code=500,
+            data=None,
+        )
+
 @router.post("/kgs/{kg_id}/clause_en_extract_by_dir")
 async def clause_en_extract_by_dir(
         background_tasks: BackgroundTasks,  # 后台任务管理器

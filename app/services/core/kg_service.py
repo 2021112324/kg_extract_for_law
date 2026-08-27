@@ -2027,13 +2027,17 @@ class KGService:
             self,
             clause_file_dir,
             if_del_task,
-            db: Session,
+            db: Optional[Session] = None,
+            use_mysql: bool = True,
+            kg_graph_name: Optional[str] = None,
     ):
         """
         从本地目录提取条款知识图谱
         :param clause_file_dir: 文件夹路径
         :param if_del_task: 是否删除任务
-        :param db: 数据库会话
+        :param db: MySQL 管理模式使用的数据库会话
+        :param use_mysql: 是否写入 MySQL 知识库和任务记录
+        :param kg_graph_name: 无 MySQL 模式预生成的目标图谱名称
         :return:
         """
         # 检验参数
@@ -2042,6 +2046,19 @@ class KGService:
             raise Exception(f"文件目录不存在: {clause_file_dir}")
         if not os.path.isdir(clause_file_dir):
             raise Exception(f"文件目录不是目录: {clause_file_dir}")
+
+        if not use_mysql:
+            if db is not None:
+                raise ValueError("无 MySQL 模式不得传入数据库会话")
+            return await self._clause_extract_by_local_dir_standalone(
+                clause_file_dir=clause_file_dir,
+                if_del_task=if_del_task,
+                kg_graph_name=kg_graph_name,
+            )
+
+        if db is None:
+            raise ValueError("MySQL 管理模式必须传入数据库会话")
+
         new_kg = KGCreate(
             name=clause_file_dir.split("/")[-1],
             description="",
@@ -2130,6 +2147,151 @@ class KGService:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
         await self.clause_extractor.logging_result_stats()
         return True
+
+    @staticmethod
+    def generate_standalone_clause_graph_name(clause_file_dir: str) -> str:
+        """为无 MySQL 的中文法规目录任务预生成可定位的总图谱名称。"""
+        source_name = Path(str(clause_file_dir).rstrip("/\\")).name or "zh_law"
+        source_name = re.sub(r"[^\w]", "_", source_name, flags=re.UNICODE).strip("_") or "source"
+        # 全局命名可能以月份数字开头；加固定前缀以满足 Neo4j 标签语法。
+        return f"zh_law_{generate_unique_name(f'{source_name}_zh_law_kg')}"
+
+    def _get_clause_extractor_stats(self) -> dict:
+        result_stats = getattr(self.clause_extractor, "result_stats", None)
+        if result_stats is None:
+            return {}
+        return {
+            "error": int(getattr(result_stats, "error", 0) or 0),
+            "weak_warning": int(getattr(result_stats, "week_warning", 0) or 0),
+            "strong_warning": int(getattr(result_stats, "strong_warning", 0) or 0),
+            "error_msg": str(getattr(result_stats, "error_msg", "") or ""),
+            "weak_warning_msg": str(getattr(result_stats, "week_warning_msg", "") or ""),
+            "strong_warning_msg": str(getattr(result_stats, "strong_warning_msg", "") or ""),
+        }
+
+    def _disconnect_graph_storage_safely(self) -> None:
+        try:
+            self.graph_storage.disconnect()
+        except Exception as exc:
+            logging.warning("断开 Neo4j 连接时出现问题: %s", exc)
+
+    async def _clause_extract_by_local_dir_standalone(
+            self,
+            clause_file_dir: str,
+            if_del_task: bool,
+            kg_graph_name: Optional[str] = None,
+    ) -> dict:
+        """不使用 MySQL/MinIO，从本地中文法规目录生成并合并 Neo4j 图谱。"""
+        source_root = Path(clause_file_dir)
+        target_graph_name = kg_graph_name or self.generate_standalone_clause_graph_name(clause_file_dir)
+        files = sorted(
+            path for path in source_root.iterdir()
+            if path.is_file() and path.suffix.lower() in {".md", ".txt"}
+        )
+        successful_graph_names = []
+        errors = []
+        summary = {
+            "kg_id": None,
+            "kg_graph_name": target_graph_name,
+            "use_mysql": False,
+            "total": len(files),
+            "success": 0,
+            "failed": 0,
+            "errors": errors,
+        }
+
+        logging.info(
+            "开始无 MySQL 中文法规目录抽取: directory=%s, target_graph=%s, files=%s",
+            source_root,
+            target_graph_name,
+            len(files),
+        )
+
+        for file_path in files:
+            stage = "读取文件"
+            graph_name = self.generate_standalone_clause_graph_name(file_path.stem)
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                stage = "大模型抽取"
+                clause_kg = await self.clause_extractor.extract_clauses(
+                    filename=file_path.stem,
+                    text=content,
+                )
+                if not isinstance(clause_kg, dict):
+                    raise ValueError("大模型抽取结果不是图谱对象")
+                if not clause_kg.get("nodes"):
+                    raise ValueError("大模型抽取结果没有有效节点")
+                if not clause_kg.get("edges"):
+                    raise ValueError("大模型抽取结果没有有效关系")
+
+                stage = "Neo4j 写入"
+                self.graph_storage.connect()
+                saved = self.graph_storage.add_subgraph_with_merge(
+                    clause_kg,
+                    graph_name,
+                    "DomainLevel",
+                    filename=file_path.name,
+                )
+                if saved is not True:
+                    raise RuntimeError("中文法规图谱保存到 Neo4j 失败")
+                successful_graph_names.append(graph_name)
+                summary["success"] += 1
+                logging.info("中文法规文件处理成功: file=%s, graph=%s", file_path.name, graph_name)
+            except Exception as exc:
+                error = {
+                    "file": file_path.name,
+                    "stage": stage,
+                    "error": str(exc),
+                }
+                errors.append(error)
+                logging.exception(
+                    "中文法规文件处理失败: file=%s, stage=%s, error=%s",
+                    file_path.name,
+                    stage,
+                    exc,
+                )
+            finally:
+                self._disconnect_graph_storage_safely()
+
+        summary["failed"] = len(errors)
+        if not successful_graph_names:
+            summary["extractor_stats"] = self._get_clause_extractor_stats()
+            await self.clause_extractor.logging_result_stats()
+            logging.error("无 MySQL 中文法规目录抽取失败: %s", json.dumps(summary, ensure_ascii=False))
+            raise RuntimeError("中文法规目录下没有成功入库的图谱")
+
+        try:
+            for graph_name in successful_graph_names:
+                self.graph_storage.connect()
+                logging.info("正在合并中文法规图谱 %s -> %s", graph_name, target_graph_name)
+                merge_result = self.graph_storage.merge_graphs(graph_name, target_graph_name)
+                merge_error = getattr(merge_result, "error", None)
+                if merge_result is False or merge_error:
+                    raise RuntimeError(merge_error or f"图谱 {graph_name} 合并失败")
+                if if_del_task:
+                    deleted = self.graph_storage.delete_subgraph(graph_name)
+                    if deleted is not True:
+                        logging.warning("临时中文法规子图删除失败: %s", graph_name)
+                self.graph_storage.disconnect()
+        except Exception as exc:
+            self._disconnect_graph_storage_safely()
+            errors.append({
+                "file": None,
+                "stage": "图谱合并",
+                "error": str(exc),
+            })
+            summary["failed"] = len(errors)
+            summary["extractor_stats"] = self._get_clause_extractor_stats()
+            await self.clause_extractor.logging_result_stats()
+            logging.exception("无 MySQL 中文法规图谱合并失败: %s", json.dumps(summary, ensure_ascii=False))
+            raise RuntimeError(f"中文法规图谱合并时出现问题: {exc}") from exc
+        finally:
+            self._disconnect_graph_storage_safely()
+
+        summary["extractor_stats"] = self._get_clause_extractor_stats()
+        await self.clause_extractor.logging_result_stats()
+        logging.info("无 MySQL 中文法规目录抽取完成: %s", json.dumps(summary, ensure_ascii=False))
+        return summary
 
     async def other_language_law_extract_by_local_dir(
             self,
@@ -3739,7 +3901,7 @@ class KGService:
 
 # TODO:设计图谱名的生成逻辑
 def generate_unique_name(source_name):
-    return f"e6_{source_name}_{generate_snowflake_string_id()}"
+    return f"8月_{source_name}_{generate_snowflake_string_id()}"
 
 
 kg_service = KGService()

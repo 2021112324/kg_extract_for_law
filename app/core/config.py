@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     
     # 是否自动创建数据库表结构
     CREATE_TABLES: bool = True
+    # 仅运行无 MySQL 的抽取接口时，可跳过应用启动阶段的数据库初始化
+    MYSQL_SKIP_INIT: bool = os.getenv("MYSQL_SKIP_INIT", "false").lower() == "true"
     
     # 模型供应商设置
     OPENAI_API_KEY: Optional[str] = None

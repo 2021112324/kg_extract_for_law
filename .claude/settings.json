@@ -39,7 +39,9 @@
       "Bash(PYTHONIOENCODING=utf-8 E:/Anaconda3/envs/cogmait312/python.exe -c ' *)",
       "Read(//d/CogmAIT/8.1项目/8.1数据/爬取的数据/风险法规/第三版/分类/知识库/neo4j数据/**)",
       "Bash(openspec list *)",
-      "Bash(openspec status *)"
+      "Bash(openspec status *)",
+      "Bash(nslookup rm-bp1d1wx418791kc2z7o.mysql.rds.aliyuncs.com)",
+      "Bash(ping -n 2 rm-bp1d1wx418791kc2z7o.mysql.rds.aliyuncs.com)"
     ]
   }
 }

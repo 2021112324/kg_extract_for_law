@@ -1,0 +1,33 @@
+{
+  "input_path": "D:\\CogmAIT\\8.1项目\\8.1数据\\爬取的数据\\风险法规\\第三版\\分类\\中文抽取所用数据\\法文分类\\法律法规条款\\国务院关于产业链供应链安全的规定.txt",
+  "output_dir": "F:\\企业大脑知识库系统\\8.1项目\\抽取代码\\kg_extract_for_law\\app\\infrastructure\\information_extraction\\v2\\zh_law\\test_output\\real_model_国务院关于产业链供应链安全的规定_utf8",
+  "model_name": "qwen3-30b-a3b-instruct-2507",
+  "api_url": "http://222.171.219.26:20001/v1/chat/completions",
+  "lenient_mode": false,
+  "started_at": "2026-08-25T22:44:11.883044+08:00",
+  "status": "success",
+  "node_count": 54,
+  "edge_count": 56,
+  "metadata": {
+    "filename": "国务院关于产业链供应链安全的规定.txt",
+    "status": "complete",
+    "source_clause_count": 18,
+    "successful_clause_count": 18,
+    "failed_clause_count": 0,
+    "failed_clauses": [],
+    "model_success": true,
+    "run_stats": {
+      "total_files": 1,
+      "success_files": 1,
+      "error": 0,
+      "extraction_error": 0,
+      "file_processing_error": 0,
+      "weak_warning": 0,
+      "strong_warning": 0,
+      "error_messages": [],
+      "weak_warning_messages": [],
+      "strong_warning_messages": []
+    }
+  },
+  "finished_at": "2026-08-25T22:46:35.719276+08:00"
+}

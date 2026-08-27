@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # 为 True 时：产出"规则知识"（结构化组装）+ "条款单元内容知识"（原文）
 # 为 False 时：只产出"条款单元内容知识"（原文），取消结构化组装
-ENABLE_STRUCTURED_RULE_ASSEMBLY = True
+ENABLE_STRUCTURED_RULE_ASSEMBLY = False
 
 _TEMP_DIR = Path(__file__).resolve().parent / "temp"
 
