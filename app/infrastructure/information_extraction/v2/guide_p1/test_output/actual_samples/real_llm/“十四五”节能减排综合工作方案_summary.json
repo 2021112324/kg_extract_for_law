@@ -1,0 +1,23 @@
+{
+  "total_files": 1,
+  "success_files": 0,
+  "incomplete_files": 1,
+  "error": 0,
+  "extraction_error": 0,
+  "storage_error": 0,
+  "file_processing_error": 0,
+  "weak_warning": 0,
+  "strong_warning": 0,
+  "structure_node_count": 26,
+  "planned_block_count": 2,
+  "llm_success_count": 3,
+  "llm_empty_count": 0,
+  "llm_failed_count": 0,
+  "knowledge_unit_count": 15,
+  "node_count": 45,
+  "edge_count": 44,
+  "skipped_attachment_count": 0,
+  "error_messages": [],
+  "weak_warning_messages": [],
+  "strong_warning_messages": []
+}

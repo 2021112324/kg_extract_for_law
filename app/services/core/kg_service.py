@@ -2169,6 +2169,30 @@ class KGService:
             "strong_warning_msg": str(getattr(result_stats, "strong_warning_msg", "") or ""),
         }
 
+    @staticmethod
+    def _get_standalone_clause_log_summary(summary: dict) -> dict:
+        """Return a concise summary for logs while keeping full diagnostics in the API result."""
+        extractor_stats = summary.get("extractor_stats") or {}
+        return {
+            "kg_graph_name": summary.get("kg_graph_name"),
+            "use_mysql": summary.get("use_mysql", False),
+            "total": summary.get("total", 0),
+            "success": summary.get("success", 0),
+            "failed": summary.get("failed", 0),
+            "failed_items": [
+                {
+                    "file": item.get("file"),
+                    "stage": item.get("stage"),
+                }
+                for item in summary.get("errors", [])
+            ],
+            "extractor_stats": {
+                "error": int(extractor_stats.get("error", 0) or 0),
+                "weak_warning": int(extractor_stats.get("weak_warning", 0) or 0),
+                "strong_warning": int(extractor_stats.get("strong_warning", 0) or 0),
+            },
+        }
+
     def _disconnect_graph_storage_safely(self) -> None:
         try:
             self.graph_storage.disconnect()
@@ -2256,8 +2280,11 @@ class KGService:
         summary["failed"] = len(errors)
         if not successful_graph_names:
             summary["extractor_stats"] = self._get_clause_extractor_stats()
+            logging.error(
+                "无 MySQL 中文法规目录抽取失败: %s",
+                json.dumps(self._get_standalone_clause_log_summary(summary), ensure_ascii=False),
+            )
             await self.clause_extractor.logging_result_stats()
-            logging.error("无 MySQL 中文法规目录抽取失败: %s", json.dumps(summary, ensure_ascii=False))
             raise RuntimeError("中文法规目录下没有成功入库的图谱")
 
         try:
@@ -2282,15 +2309,21 @@ class KGService:
             })
             summary["failed"] = len(errors)
             summary["extractor_stats"] = self._get_clause_extractor_stats()
+            logging.exception(
+                "无 MySQL 中文法规图谱合并失败: %s",
+                json.dumps(self._get_standalone_clause_log_summary(summary), ensure_ascii=False),
+            )
             await self.clause_extractor.logging_result_stats()
-            logging.exception("无 MySQL 中文法规图谱合并失败: %s", json.dumps(summary, ensure_ascii=False))
             raise RuntimeError(f"中文法规图谱合并时出现问题: {exc}") from exc
         finally:
             self._disconnect_graph_storage_safely()
 
         summary["extractor_stats"] = self._get_clause_extractor_stats()
+        logging.info(
+            "无 MySQL 中文法规目录抽取完成: %s",
+            json.dumps(self._get_standalone_clause_log_summary(summary), ensure_ascii=False),
+        )
         await self.clause_extractor.logging_result_stats()
-        logging.info("无 MySQL 中文法规目录抽取完成: %s", json.dumps(summary, ensure_ascii=False))
         return summary
 
     async def other_language_law_extract_by_local_dir(

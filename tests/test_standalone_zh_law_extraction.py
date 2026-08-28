@@ -1,4 +1,5 @@
 import inspect
+import logging
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -222,6 +223,40 @@ async def test_standalone_mode_merges_successes_and_reports_partial_failure(tmp_
     assert len(storage.saved) == 1
     assert storage.merged == [(storage.saved[0][0], "target_graph")]
     assert storage.deleted == [storage.saved[0][0]]
+
+
+@pytest.mark.asyncio
+async def test_standalone_completion_log_is_concise_and_stats_are_last(tmp_path, caplog):
+    (tmp_path / "law.txt").write_text("valid", encoding="utf-8")
+    service = make_service({"law": VALID_GRAPH})
+    service.clause_extractor.result_stats.week_warning = 2
+    service.clause_extractor.result_stats.strong_warning = 1
+    service.clause_extractor.result_stats.week_warning_msg = "不应出现在完成摘要中的超长详情"
+
+    async def log_stats():
+        logging.info("测试统计尾行")
+
+    service.clause_extractor.logging_result_stats = log_stats
+    caplog.set_level(logging.INFO)
+
+    summary = await service.clause_extract_by_local_dir(
+        clause_file_dir=str(tmp_path),
+        if_del_task=True,
+        db=None,
+        use_mysql=False,
+        kg_graph_name="target_graph",
+    )
+
+    completion = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("无 MySQL 中文法规目录抽取完成:")
+    )
+    assert "不应出现在完成摘要中的超长详情" not in completion
+    assert '"weak_warning": 2' in completion
+    assert '"strong_warning": 1' in completion
+    assert caplog.records[-1].getMessage() == "测试统计尾行"
+    assert "不应出现在完成摘要中的超长详情" in summary["extractor_stats"]["weak_warning_msg"]
 
 
 @pytest.mark.asyncio

@@ -11,12 +11,14 @@
 from .exporter import export_graph, clear_temp_dir
 from .converter import convert_json_to_text
 from .converter_v2 import convert_json_to_text_v2
+from .converter_national_standard import convert_national_standard_json_to_text
 
 __all__ = [
     "export_graph",
     "clear_temp_dir",
     "convert_json_to_text",
     "convert_json_to_text_v2",
+    "convert_national_standard_json_to_text",
     "process_graph",
     "process_graph_v2",
 ]
