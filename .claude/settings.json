@@ -41,7 +41,30 @@
       "Bash(openspec list *)",
       "Bash(openspec status *)",
       "Bash(nslookup rm-bp1d1wx418791kc2z7o.mysql.rds.aliyuncs.com)",
-      "Bash(ping -n 2 rm-bp1d1wx418791kc2z7o.mysql.rds.aliyuncs.com)"
+      "Bash(ping -n 2 rm-bp1d1wx418791kc2z7o.mysql.rds.aliyuncs.com)",
+      "Bash(ls -la \"C:/Users/zxy/.claude/projects/f------------8-1--------kg-extract-for-law/memory/\" 2>&1; echo \"---MEMORY.md---\"; cat \"C:/Users/zxy/.claude/projects/f------------8-1--------kg-extract-for-law/memory/MEMORY.md\" 2>&1)",
+      "Read(//c/Users/zxy/.claude/projects/f------------8-1--------kg-extract-for-law/memory/**)",
+      "Bash(ls -la \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/法律法规条款\" 2>&1 | head -40)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/法律法规条款/**)",
+      "Bash(ls \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/\" 2>&1)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_816/知识库/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_816/**)",
+      "Bash(find \"D:/CogmAIT/8.1项目/8.1数据\" -maxdepth 5 -type d -name \"*国家标准2*\" 2>/dev/null | head; echo \"---搜索其他可能的位置---\"; ls \"D:/CogmAIT/8.1项目/8.1数据/\" 2>&1 | head -30)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/**)",
+      "Bash(ls -la \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/分点格式\" 2>&1 | head -40; echo \"=========条款格式=========\"; ls -la \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/条款格式\" 2>&1 | head -40)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/分点格式/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/条款格式/**)",
+      "Bash(ls -la \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/合规指引\" 2>&1 | head -60)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/知识库/json图谱/合规指引/**)",
+      "Bash(head -c 3000 \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/分点格式/“十四五”智能制造发展规划.txt\" 2>&1)",
+      "Bash(head -c 3000 \"D:/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_819/op2_风险映射添加/风险数据/中国/合规指引/条款格式/上市公司监管指引第4号——上市公司及其相关方承诺\\(2025修正\\).txt\" 2>&1)",
+      "Bash(python -c ' *)",
+      "Bash(python -X utf8 -c ' *)",
+      "Bash(python -X utf8 -c \"import sys,json; [print\\(json.loads\\(l\\)['content']\\) for l in sys.stdin]\")",
+      "Bash(cd \"F:/企业大脑知识库系统/8.1项目/抽取代码/kg_extract_for_law/app/infrastructure/kg_to_natural_language\" && echo \"=== graph/exporter.py 关键部分 ===\" && grep -n \"def export_graph_to_directory\\\\|def export_graph\\\\|NEO4J\\\\|GraphDatabase\\\\|driver\\\\|URI\\\\|AUTH\\\\|os.getenv\\\\|_DEFAULT\" graph/exporter.py 2>&1 | head -30 && echo \"\" && echo \"=== .env 内容\\(Neo4j相关\\) ===\" && grep -i \"neo4j\\\\|bolt\\\\|NEO4J\" ../../../../.env 2>&1 | head -20)",
+      "Read(//f//**)"
     ]
   }
 }

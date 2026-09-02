@@ -10,35 +10,20 @@ full.md、普通 Markdown/TXT 等输入整理成稳定的结构化中间结果�
 2. 前言、引言、目次文本。
 3. 正文章节树 body_tree。
 4. 附录树 appendix_tree。
-5. 表格、图片资源节点。
+5. 可选的表格、流程图描述临时上下文。
 6. 规范性引用文件候选。
-7. 结构校验和编号修复日志。
+7. 结构校验、资源跳过统计和编号修复日志。
 """
 
+import copy
 import json
 import logging
-import mimetypes
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote
 
 from app.infrastructure.string_utils.id_tool import generate_hex_uuid
-from app.infrastructure.storage.object_storage.base import StorageConfig
-from app.infrastructure.storage.object_storage.minio_adapter import MinIOAdapter
-
-
-NATIONAL_STANDARD_MINIO_URL = os.getenv("NATIONAL_STANDARD_MINIO_URL", "http://60.205.171.106:9001/")
-NATIONAL_STANDARD_MINIO_API_URL = os.getenv(
-    "NATIONAL_STANDARD_MINIO_API_URL",
-    NATIONAL_STANDARD_MINIO_URL.rstrip("/").replace(":9001", ":9000"),
-)
-NATIONAL_STANDARD_MINIO_ACCESS_KEY = os.getenv("NATIONAL_STANDARD_MINIO_ACCESS_KEY", "admin")
-NATIONAL_STANDARD_MINIO_SECRET_KEY = os.getenv("NATIONAL_STANDARD_MINIO_SECRET_KEY", "hit-wE8sR9wQ3pG1")
-NATIONAL_STANDARD_MINIO_BUCKET = os.getenv("NATIONAL_STANDARD_MINIO_BUCKET", "2-3project")
-NATIONAL_STANDARD_MINIO_PREFIX = os.getenv("NATIONAL_STANDARD_MINIO_PREFIX", "国家标准")
 
 
 # 标准编号识别规则。
@@ -93,6 +78,11 @@ HTML_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 HTML_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
+MERMAID_START_RE = re.compile(
+    r"^\s*(?:```\s*mermaid\s*|(?:flowchart|graph)\s+(?:TD|TB|BT|RL|LR)\b|"
+    r"sequenceDiagram\b|stateDiagram(?:-v2)?\b|classDiagram\b|erDiagram\b)",
+    re.IGNORECASE,
+)
 
 # Markdown 标题识别规则。
 # 示例：# 1 范围、## 4.2 标签内容。
@@ -186,23 +176,11 @@ def _normalize_md_heading_text(text: str) -> str:
     return f"{number}{rest}"
 
 
-def _sanitize_minio_path_part(text: str) -> str:
-    """清理 MinIO 对象路径中的非法或高风险字符。
-
-    MinIO 的 object name 可以包含 `/` 表示层级，但任务要求“文件名需过滤非法字符”，
-    因此对文件名、图片名等路径片段过滤 Windows/URL 中常见的危险字符。
-    """
+def _sanitize_path_part(text: str) -> str:
+    """清理输出文件名或图谱名片段中的非法字符。"""
     cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(text or "").strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     return cleaned or "未命名"
-
-
-def _normalize_minio_endpoint(minio_url: str) -> tuple[str, bool, str]:
-    """把任务给出的 MinIO URL 拆成 endpoint、secure 和 public_base_url。"""
-    url = str(minio_url or "").strip().rstrip("/")
-    secure = url.startswith("https://")
-    endpoint = re.sub(r"^https?://", "", url)
-    return endpoint, secure, url
 
 
 @dataclass
@@ -220,13 +198,13 @@ class StandardBlock:
     # block_id 用于溯源；如果原始输入没有 ID，就自动生成。
     block_id: str
 
-    # 标准化类型：title、paragraph、table、image、equation 等。
+    # 标准化类型：title、paragraph、table、image、flowchart、equation 等。
     block_type: str
 
-    # block 的文本主体。表格可保存 Markdown/HTML 文本，图片可保存图注。
+    # block 的文本主体。资源正文只允许在一次抽取的临时上下文中使用。
     text: str = ""
 
-    # 页码、坐标和资源路径用于后续溯源、图片检查、可能的页面范围恢复。
+    # 页码、坐标和资源路径只用于解析定位，不进入最终图谱。
     page_idx: int | None = None
     bbox: Any = None
     path: str = ""
@@ -255,29 +233,16 @@ class NationalStandardExtractor:
 
     def __init__(
         self,
-        upload_images: bool = True,
-        minio_url: str = NATIONAL_STANDARD_MINIO_URL,
-        minio_api_url: str = NATIONAL_STANDARD_MINIO_API_URL,
-        minio_access_key: str = NATIONAL_STANDARD_MINIO_ACCESS_KEY,
-        minio_secret_key: str = NATIONAL_STANDARD_MINIO_SECRET_KEY,
-        minio_bucket: str = NATIONAL_STANDARD_MINIO_BUCKET,
-        minio_prefix: str = NATIONAL_STANDARD_MINIO_PREFIX,
+        include_resource_descriptions: bool = False,
+        upload_images: bool | None = None,
     ):
-        """初始化国家标准解析器。
+        """初始化纯文本国家标准解析器。
 
-        upload_images=True 时，会在第一阶段解析后把图片上传到任务指定的 MinIO，
-        并把图片节点中的 minio_url 更新为线上链接。上传失败不会中断解析流程，
-        而是记录到 validation.image_uploads 中。
+        ``upload_images`` 仅为旧调用兼容参数，已不再触发上传或对象存储访问。
         """
-        self.upload_images = upload_images
-        self.minio_url = minio_url
-        self.minio_api_url = minio_api_url
-        self.minio_access_key = minio_access_key
-        self.minio_secret_key = minio_secret_key
-        self.minio_bucket = minio_bucket
-        self.minio_prefix = minio_prefix
-        self._minio_adapter: MinIOAdapter | None = None
-        self._minio_public_base_url = minio_url.rstrip("/")
+        self.include_resource_descriptions = include_resource_descriptions
+        if upload_images:
+            logging.warning("国家标准文本抽取已禁用图片上传，upload_images 参数将被忽略")
 
     def extract(self, input_path: str | Path) -> dict[str, Any]:
         """对一个国家标准输入路径执行完整第一阶段解析。
@@ -292,7 +257,7 @@ class NationalStandardExtractor:
         # 第二步：把来源文件转换成统一的 StandardBlock 序列。
         blocks = self.load_blocks(source)
 
-        # 第三步：在 block 序列上构建文件信息、章节树、资源节点和校验结果。
+        # 第三步：在 block 序列上构建文件信息、章节树和文本校验结果。
         return self.extract_from_blocks(blocks, source)
 
     def discover_source(self, input_path: str | Path) -> dict[str, Path | None]:
@@ -309,7 +274,7 @@ class NationalStandardExtractor:
             raise FileNotFoundError(f"国家标准输入路径不存在: {path}")
 
         source: dict[str, Path | None] = {
-            # root 用于解析相对路径，例如 images/xxx.png。
+            # root 用于定位输入文件。
             "root": path if path.is_dir() else path.parent,
             "content_list": None,
             "full_md": None,
@@ -317,7 +282,6 @@ class NationalStandardExtractor:
             "layout": None,
             "model": None,
             "pdf": None,
-            "images_dir": None,
             "risk_type_file": None,
             "input_file": None,
         }
@@ -354,7 +318,6 @@ class NationalStandardExtractor:
         source["layout"] = self._first_existing([p for p in json_files if "layout" in p.name.lower()])
         source["model"] = self._first_existing([p for p in json_files if "model" in p.name.lower()])
         source["pdf"] = self._first_existing(list(path.glob("*origin.pdf")) + list(path.glob("*.pdf")))
-        source["images_dir"] = path / "images" if (path / "images").exists() else None
         source["risk_type_file"] = path / "合规风险类型.txt" if (path / "合规风险类型.txt").exists() else None
         return source
 
@@ -384,27 +347,24 @@ class NationalStandardExtractor:
         该函数是最适合单元测试的入口：测试时可以直接构造 StandardBlock，
         不必依赖真实 MinerU 目录。
         """
-        source = source or {"root": None, "images_dir": None}
+        source = source or {"root": None}
 
         # 文件级信息只从封面/正文开始前区域进行规则抽取。
         file_info = self.extract_file_info(blocks, source)
 
-        # 章节树、附录树、表格、图片在一次顺序扫描中完成构建。
-        body_tree, appendix_tree, tables, images, repairs = self.build_trees(blocks, source)
+        # 章节树和可选描述临时上下文在一次顺序扫描中完成构建。
+        body_tree, appendix_tree, resource_contexts, resource_stats, repairs = self.build_trees(blocks, source)
 
-        # 任务2要求：将图片上传到 MinIO，并把原图片链接替换为线上链接。
-        image_uploads = self.upload_and_replace_image_links(images, tables, blocks, source)
-
-        # 引用候选依赖章节树和表格，所以在 build_trees 后执行。
-        references = self.extract_reference_candidates(body_tree, appendix_tree, tables)
+        # 引用候选只从正文文本提取，不再依赖表格资源正文。
+        references = self.extract_reference_candidates(body_tree, appendix_tree)
 
         # 校验结果和编号修复日志统一写入 validation。
-        validation = self.validate_structure(body_tree, appendix_tree, images, source)
+        validation = self.validate_structure(body_tree, appendix_tree)
         validation["number_repairs"] = repairs
-        validation["image_uploads"] = image_uploads
+        validation["resource_stats"] = resource_stats
         validation["review_status"] = "reviewed" if source.get("reviewed_md") else "unreviewed"
         validation["failed_data"] = (
-            self.collect_validation_failed_data(body_tree, appendix_tree, images, validation, source)
+            self.collect_validation_failed_data(body_tree, appendix_tree, validation, source)
             if not validation.get("passed")
             else []
         )
@@ -420,11 +380,15 @@ class NationalStandardExtractor:
             "reference_text": self._collect_reference_text(blocks),
             "body_tree": body_tree,
             "appendix_tree": appendix_tree,
-            "tables": tables,
-            "images": images,
             "reference_candidates": references,
             "validation": validation,
-            "blocks": [block.to_dict() for block in blocks],
+            "blocks": [
+                block.to_dict()
+                for block in blocks
+                if block.block_type not in {"image", "table", "flowchart"}
+            ],
+            # 私有临时上下文只供本次二阶段生成描述，持久化前必须移除。
+            "_resource_contexts": resource_contexts,
         }
 
     def _load_content_list_blocks(self, path: Path) -> list[StandardBlock]:
@@ -486,12 +450,15 @@ class NationalStandardExtractor:
         - `# 标题` 转为 title block。
         - 连续 Markdown 表格行合并为 table block。
         - 图片链接转为 image block。
+        - Mermaid 代码块转为 flowchart block。
         - 其他连续文本合并为 paragraph block。
         """
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         blocks: list[StandardBlock] = []
         paragraph_buffer: list[str] = []
         table_buffer: list[str] = []
+        flowchart_buffer: list[str] = []
+        in_mermaid = False
 
         def flush_paragraph() -> None:
             """把累计的普通段落写入 blocks。"""
@@ -504,6 +471,11 @@ class NationalStandardExtractor:
             if table_buffer:
                 blocks.append(StandardBlock(generate_hex_uuid(), "table", "\n".join(table_buffer).strip()))
                 table_buffer.clear()
+
+        def flush_flowchart() -> None:
+            if flowchart_buffer:
+                blocks.append(StandardBlock(generate_hex_uuid(), "flowchart", "\n".join(flowchart_buffer).strip()))
+                flowchart_buffer.clear()
 
         def append_html_images(text: str) -> None:
             """把一段 HTML/Markdown 文本里的图片链接额外登记为 image block。"""
@@ -520,8 +492,23 @@ class NationalStandardExtractor:
 
         for line in lines:
             stripped = line.strip()
+            if in_mermaid:
+                flowchart_buffer.append(line)
+                if stripped == "```":
+                    in_mermaid = False
+                    flush_flowchart()
+                continue
+
+            if re.match(r"^```\s*mermaid\s*$", stripped, flags=re.IGNORECASE):
+                flush_table()
+                flush_paragraph()
+                flowchart_buffer.append(line)
+                in_mermaid = True
+                continue
+
             if not stripped:
                 flush_table()
+                flush_flowchart()
                 flush_paragraph()
                 continue
 
@@ -530,10 +517,12 @@ class NationalStandardExtractor:
             html_images = list(HTML_IMAGE_RE.finditer(stripped))
             is_html_table = bool(HTML_TABLE_RE.search(stripped))
             is_table_line = stripped.startswith("|") and stripped.endswith("|")
+            is_bare_flowchart = bool(MERMAID_START_RE.match(stripped))
 
             if heading:
                 # 标题会打断当前段落或表格。
                 flush_table()
+                flush_flowchart()
                 flush_paragraph()
                 blocks.append(
                     StandardBlock(
@@ -554,6 +543,10 @@ class NationalStandardExtractor:
                     )
                 )
                 append_html_images(stripped)
+            elif is_bare_flowchart:
+                flush_table()
+                flush_paragraph()
+                flowchart_buffer.append(line)
             elif image:
                 # 图片独立成 block，方便后续建资源节点并校验路径。
                 flush_table()
@@ -589,6 +582,7 @@ class NationalStandardExtractor:
                     paragraph_buffer.append(stripped)
 
         flush_table()
+        flush_flowchart()
         flush_paragraph()
         return blocks
 
@@ -694,7 +688,7 @@ class NationalStandardExtractor:
     def _normalize_block_type(block_type: str, value: dict[str, Any], text: str) -> str:
         """把原始 block 类型归一为少数几类。
 
-        后续树构建主要关心 title、paragraph、table、image。
+        后续树构建主要关心 title、paragraph、table、image、flowchart。
         对没有明确类型但文本像标题的 block，也归一成 title。
         """
         lowered = block_type.lower()
@@ -702,6 +696,8 @@ class NationalStandardExtractor:
             return "table"
         if "image" in lowered or "figure" in lowered or value.get("img_path") or value.get("image_path"):
             return "image"
+        if "flowchart" in lowered or "mermaid" in lowered or MERMAID_START_RE.match(text):
+            return "flowchart"
         if "title" in lowered:
             return "title"
         if "equation" in lowered:
@@ -878,15 +874,15 @@ class NationalStandardExtractor:
         self,
         blocks: list[StandardBlock],
         source: dict[str, Path | None],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-        """顺序扫描 block，构建正文树、附录树、表格节点和图片节点。
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
+        """顺序扫描 block，构建正文树、附录树和临时资源描述上下文。
 
         该函数是第一阶段的核心。
 
         设计要点：
         - 正文和附录分别建树，避免附录被错误挂到最后一个正文节点下。
         - 使用 stack 维护当前正文路径，使用 appendix_stack 维护当前附录路径。
-        - 表格和图片独立成资源节点，同时把资源 ID 挂到当前章节节点。
+        - 图片只跳过并计数；表格和流程图仅在描述模式下形成临时上下文。
         - 目录行直接跳过，避免目次中的章节被重复建节点。
         """
         root_body: list[dict[str, Any]] = []
@@ -911,15 +907,20 @@ class NationalStandardExtractor:
         # seen_numbers 用于编号修复评分。例如如果已经见过 4.2 和 4.2.1，
         # 那么后续出现 4.22 时更可能是 4.2.2。
         seen_numbers: set[str] = set()
-        tables: list[dict[str, Any]] = []
-        images: list[dict[str, Any]] = []
+        resource_contexts: list[dict[str, Any]] = []
+        resource_stats = {
+            "skipped_image_blocks": 0,
+            "skipped_table_blocks": 0,
+            "skipped_flowchart_blocks": 0,
+            "description_candidates": 0,
+        }
 
         # repairs 记录所有自动编号修复，后续写入 validation.number_repairs。
         repairs: list[dict[str, Any]] = []
 
         for block in blocks:
             text = _clean_text(block.text)
-            if not text and block.block_type not in {"table", "image"}:
+            if not text and block.block_type not in {"table", "image", "flowchart"}:
                 continue
 
             # 预先计算各种标题匹配，避免在分支里重复正则。
@@ -1069,20 +1070,33 @@ class NationalStandardExtractor:
                 continue
 
             if block.block_type == "table":
-                # 表格独立成资源节点，同时关联到当前章节。
-                table = self._build_table_node(block, current_node)
-                tables.append(table)
+                resource_stats["skipped_table_blocks"] += 1
+                if self.include_resource_descriptions and current_node is not None:
+                    context = self._build_resource_description_context("table", block, current_node)
+                    resource_contexts.append(context)
+                    current_node["resource_context_ids"].append(context["context_id"])
+                    resource_stats["description_candidates"] += 1
                 if current_node is not None:
-                    current_node["tables"].append(table["table_id"])
                     current_node["source_blocks"].append(block.block_id)
                 continue
 
             if block.block_type == "image":
-                # 图片独立成资源节点，同时关联到当前章节。
-                image = self._build_image_node(block, current_node, source)
-                images.append(image)
+                resource_stats["skipped_image_blocks"] += 1
                 if current_node is not None:
-                    current_node["images"].append(image["image_id"])
+                    caption = _clean_text(block.text)
+                    if caption:
+                        current_node["content"] = (current_node.get("content", "") + "\n" + caption).strip()
+                    current_node["source_blocks"].append(block.block_id)
+                continue
+
+            if block.block_type == "flowchart":
+                resource_stats["skipped_flowchart_blocks"] += 1
+                if self.include_resource_descriptions and current_node is not None:
+                    context = self._build_resource_description_context("flowchart", block, current_node)
+                    resource_contexts.append(context)
+                    current_node["resource_context_ids"].append(context["context_id"])
+                    resource_stats["description_candidates"] += 1
+                if current_node is not None:
                     current_node["source_blocks"].append(block.block_id)
                 continue
 
@@ -1098,13 +1112,12 @@ class NationalStandardExtractor:
         # 树构建完成后统一刷新 path 和 full_path_title。
         self._refresh_paths(root_body)
         self._refresh_paths(root_appendix)
-        return root_body, root_appendix, tables, images, repairs
+        return root_body, root_appendix, resource_contexts, resource_stats, repairs
 
     def extract_reference_candidates(
         self,
         body_tree: list[dict[str, Any]],
         appendix_tree: list[dict[str, Any]],
-        tables: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """抽取规范性引用文件候选。
 
@@ -1114,7 +1127,6 @@ class NationalStandardExtractor:
         候选来源：
         - 标题像 `2 规范性引用文件` 的章节。
         - 其他正文中出现标准编号的章节。
-        - 表格中出现标准编号的内容。
         """
         candidates: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -1150,24 +1162,18 @@ class NationalStandardExtractor:
             # 规范性引用文件章节是主来源；正文其他位置出现标准编号也作为候选保留。
             if self._is_reference_section(node) or STANDARD_NO_RE.search(node.get("content", "")):
                 add_from_text(node.get("content", ""), node.get("number", ""), node.get("title", ""))
-        for table in tables:
-            # 表格里的引用标准也不能丢，尤其是某些标准会用表格列出引用文件。
-            if STANDARD_NO_RE.search(table.get("table_markdown", "")):
-                add_from_text(table.get("table_markdown", ""), table.get("related_section_number", ""), table.get("related_section_title", ""))
         return candidates
 
     def validate_structure(
         self,
         body_tree: list[dict[str, Any]],
         appendix_tree: list[dict[str, Any]],
-        images: list[dict[str, Any]],
-        source: dict[str, Path | None],
     ) -> dict[str, Any]:
         """对第一阶段解析结果做结构校验。
 
         校验分为两类：
         - issues：相对严重的问题，会让 passed=False。
-        - warnings：提示性问题，不阻断流程，例如图片文件不存在。
+        - warnings：提示性结构问题，不阻断流程。
         """
         issues: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
@@ -1187,32 +1193,6 @@ class NationalStandardExtractor:
         if len(appendix_codes) != len(set(appendix_codes)):
             issues.append({"type": "duplicate_appendix", "message": "存在重复附录编号", "appendix_codes": appendix_codes})
 
-        # 图片路径校验：只做存在性检查，不读取图片内容。
-        images_dir = source.get("images_dir")
-        root = source.get("root")
-        for image in images:
-            local_path = image.get("local_path")
-            if not local_path:
-                warnings.append({"type": "image_path_empty", "message": "图片路径为空", "image_id": image["image_id"]})
-                continue
-            candidate = Path(local_path)
-            if not candidate.is_absolute():
-                # MinerU 的 Markdown 通常写成 images/xxx.jpg。
-                # 若直接相对 images_dir 拼接，会变成 images/images/xxx.jpg。
-                # 因此带 images 前缀时优先相对 root，普通文件名才相对 images_dir。
-                first_part = candidate.parts[0].lower() if candidate.parts else ""
-                base = root if first_part == "images" else (images_dir or root)
-                candidate = Path(base) / candidate if base else candidate
-            if not candidate.exists():
-                warnings.append(
-                    {
-                        "type": "image_missing",
-                        "message": "图片文件不存在",
-                        "image_id": image["image_id"],
-                        "path": str(candidate),
-                    }
-                )
-
         return {
             "passed": not issues,
             "issues": issues,
@@ -1223,13 +1203,12 @@ class NationalStandardExtractor:
         self,
         body_tree: list[dict[str, Any]],
         appendix_tree: list[dict[str, Any]],
-        images: list[dict[str, Any]],
         validation: dict[str, Any],
         source: dict[str, Path | None] | None = None,
     ) -> list[dict[str, Any]]:
         """记录触发结构校验问题的数据内容，方便人工回查。
 
-        这里不尝试“自动修正文义”，只把问题对应的节点/图片摘出来。
+        这里不尝试“自动修正文义”，只把问题对应的结构节点摘出来。
         """
         records: list[dict[str, Any]] = []
         source_lines, source_path = self._read_validation_source_lines(source)
@@ -1238,7 +1217,6 @@ class NationalStandardExtractor:
             for node in self._walk_nodes(body_tree + appendix_tree)
             if node.get("number")
         }
-        image_by_id = {str(image.get("image_id", "")): image for image in images}
 
         for issue in validation.get("issues", []) or []:
             if issue.get("type") == "number_continuity":
@@ -1257,20 +1235,6 @@ class NationalStandardExtractor:
                 node = node_by_number.get(parent)
                 if node:
                     records.append(self._validation_node_record("warning", warning, node, source_lines, source_path))
-            elif warning.get("type") in {"image_missing", "image_path_empty"}:
-                image = image_by_id.get(str(warning.get("image_id", "")))
-                if image:
-                    records.append(
-                        {
-                            "level": "warning",
-                            "type": warning.get("type", ""),
-                            "message": warning.get("message", ""),
-                            "image_id": image.get("image_id", ""),
-                            "local_path": image.get("local_path", ""),
-                            "related_section_number": image.get("related_section_number", ""),
-                            "related_section_title": image.get("related_section_title", ""),
-                        }
-                    )
         return records
 
     @staticmethod
@@ -1418,8 +1382,7 @@ class NationalStandardExtractor:
             "path": "",
             "full_path_title": "",
             "content": "",
-            "tables": [],
-            "images": [],
+            "resource_context_ids": [],
             "page_range": [block.page_idx, block.page_idx] if block.page_idx is not None else [],
             "source_blocks": [block.block_id],
             "children": [],
@@ -1443,46 +1406,22 @@ class NationalStandardExtractor:
             roots.append(node)
         stack.append(node)
 
-    def _build_table_node(self, block: StandardBlock, current_node: dict[str, Any] | None) -> dict[str, Any]:
-        """把 table block 转为独立表格资源节点。"""
-        caption = self._extract_table_caption(block.text)
-        return {
-            "table_id": generate_hex_uuid(),
-            "node_type": "表格",
-            "table_number": caption.get("number", ""),
-            "table_caption": caption.get("caption", ""),
-            "table_markdown": block.text,
-            "table_html": block.raw.get("table_html") or block.raw.get("html") or (block.text if HTML_TABLE_RE.search(block.text) else ""),
-            "page_idx": block.page_idx,
-            "bbox": block.bbox,
-            "source_format": "content_list" if block.raw else "markdown",
-            "parsed_rows": self._parse_markdown_table(block.text),
-            "related_section_number": current_node.get("number", "") if current_node else "",
-            "related_section_title": current_node.get("title", "") if current_node else "",
-            "source_block": block.block_id,
-        }
-
-    def _build_image_node(
+    def _build_resource_description_context(
         self,
+        resource_type: str,
         block: StandardBlock,
-        current_node: dict[str, Any] | None,
-        source: dict[str, Path | None],
+        current_node: dict[str, Any],
     ) -> dict[str, Any]:
-        """把 image block 转为独立图片资源节点。"""
-        local_path = block.path or self._extract_image_path_from_text(block.text)
+        """构造一次抽取内使用的资源描述上下文，不写入持久化结果。"""
+        caption = self._extract_table_caption(block.text) if resource_type == "table" else {"number": "", "caption": ""}
         return {
-            "image_id": generate_hex_uuid(),
-            "node_type": "图片",
-            "local_path": local_path,
-            "minio_url": "",
-            "caption": block.text,
-            "image_description": block.raw.get("image_caption") or block.raw.get("description") or "",
-            "page_idx": block.page_idx,
-            "bbox": block.bbox,
-            "related_section_number": current_node.get("number", "") if current_node else "",
-            "related_section_title": current_node.get("title", "") if current_node else "",
-            "image_type": self._guess_image_type(block.text),
-            "source_block": block.block_id,
+            "context_id": generate_hex_uuid(),
+            "resource_type": resource_type,
+            "resource_text": block.text,
+            "number": caption.get("number", ""),
+            "title": caption.get("caption", "") or current_node.get("title", ""),
+            "section_number": current_node.get("number", ""),
+            "section_title": current_node.get("title", ""),
         }
 
     def _split_term_definition_nodes(
@@ -1571,8 +1510,7 @@ class NationalStandardExtractor:
                     "path": "",
                     "full_path_title": "",
                     "content": "",
-                    "tables": [],
-                    "images": [],
+                    "resource_context_ids": [],
                     "page_range": list(parent_node.get("page_range") or []),
                     "source_blocks": list(parent_node.get("source_blocks") or []),
                     "children": [],
@@ -1616,229 +1554,6 @@ class NationalStandardExtractor:
             if suffix and suffix.isdigit():
                 return ".".join([parent_number, *list(suffix)])
         return ""
-
-    def upload_and_replace_image_links(
-        self,
-        images: list[dict[str, Any]],
-        tables: list[dict[str, Any]],
-        blocks: list[StandardBlock],
-        source: dict[str, Path | None],
-    ) -> list[dict[str, Any]]:
-        """上传图片到 MinIO，并用线上链接替换结构化结果中的图片路径。
-
-        任务2要求图片保存路径为：
-
-        `国家标准/文件名/images/图片名`
-
-        其中“文件名”来自输入目录最后一层名称，例如：
-        `...\国家标准\城镇污水处理厂污染物排放标准`
-        的文件名就是 `城镇污水处理厂污染物排放标准`。
-
-        返回值记录每张图片的上传结果。失败时只记录错误，不中断正文结构解析。
-        """
-        upload_logs: list[dict[str, Any]] = []
-        if not self.upload_images:
-            for image in images:
-                upload_logs.append(
-                    {
-                        "image_id": image.get("image_id", ""),
-                        "status": "skipped",
-                        "reason": "upload_images=False",
-                    }
-                )
-            return upload_logs
-
-        if not images:
-            return upload_logs
-
-        try:
-            storage = self._get_minio_adapter()
-        except Exception as exc:
-            message = f"初始化 MinIO 客户端失败: {exc}"
-            logging.error(message)
-            for image in images:
-                image["upload_status"] = "failed"
-                image["upload_error"] = message
-                upload_logs.append(
-                    {
-                        "image_id": image.get("image_id", ""),
-                        "status": "failed",
-                        "error": message,
-                    }
-                )
-            return upload_logs
-
-        document_name = _sanitize_minio_path_part(self._document_name_from_source(source))
-        block_map = {block.block_id: block for block in blocks}
-        path_replacements: dict[str, str] = {}
-
-        for image in images:
-            image_id = image.get("image_id", "")
-            local_path_text = image.get("local_path", "")
-            local_path = self._resolve_image_path(local_path_text, source)
-            if not local_path or not local_path.exists():
-                message = f"图片文件不存在: {local_path_text}"
-                image["upload_status"] = "failed"
-                image["upload_error"] = message
-                upload_logs.append(
-                    {
-                        "image_id": image_id,
-                        "status": "failed",
-                        "local_path": local_path_text,
-                        "error": message,
-                    }
-                )
-                continue
-
-            image_name = _sanitize_minio_path_part(local_path.name)
-            object_name = f"{self.minio_prefix}/{document_name}/images/{image_name}"
-            content_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
-
-            try:
-                with local_path.open("rb") as file_stream:
-                    ok = storage.upload_file_stream(
-                        file_stream=file_stream,
-                        bucket_name=self.minio_bucket,
-                        object_name=object_name,
-                        content_type=content_type,
-                        file_size=local_path.stat().st_size,
-                    )
-                if not ok:
-                    raise RuntimeError("MinIO upload_file_stream 返回 False")
-                if not storage.file_exists(self.minio_bucket, object_name):
-                    raise RuntimeError(f"MinIO 上传后校验失败，未找到对象: {self.minio_bucket}/{object_name}")
-
-                online_url = self._build_public_minio_url(object_name)
-                path_replacements[local_path_text] = online_url
-                path_replacements[local_path.name] = online_url
-                path_replacements[str(Path("images") / local_path.name).replace("\\", "/")] = online_url
-                image["minio_bucket"] = self.minio_bucket
-                image["minio_object_name"] = object_name
-                image["minio_url"] = online_url
-                image["online_path"] = online_url
-                image["upload_status"] = "success"
-
-                # 同步替换 blocks 中的图片链接，保证最终输出里的 blocks 也是线上链接。
-                block = block_map.get(image.get("source_block", ""))
-                if block is not None:
-                    block.raw["original_path"] = block.path
-                    block.path = online_url
-
-                upload_logs.append(
-                    {
-                        "image_id": image_id,
-                        "status": "success",
-                        "local_path": str(local_path),
-                        "bucket": self.minio_bucket,
-                        "object_name": object_name,
-                        "url": online_url,
-                    }
-                )
-            except Exception as exc:
-                message = str(exc)
-                image["upload_status"] = "failed"
-                image["upload_error"] = message
-                upload_logs.append(
-                    {
-                        "image_id": image_id,
-                        "status": "failed",
-                        "local_path": str(local_path),
-                        "bucket": self.minio_bucket,
-                        "object_name": object_name,
-                        "error": message,
-                    }
-                )
-        if path_replacements:
-            self._replace_uploaded_image_links(tables, blocks, path_replacements)
-        return upload_logs
-
-    @staticmethod
-    def _replace_uploaded_image_links(
-        tables: list[dict[str, Any]],
-        blocks: list[StandardBlock],
-        replacements: dict[str, str],
-    ) -> None:
-        """把 Markdown/HTML 文本中的本地图片链接替换为线上链接。"""
-        if not replacements:
-            return
-
-        def replace_text(text: str) -> str:
-            result = str(text or "")
-            for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
-                if old:
-                    result = result.replace(old, new)
-            return result
-
-        for table in tables:
-            table["table_markdown"] = replace_text(table.get("table_markdown", ""))
-            table["table_html"] = replace_text(table.get("table_html", ""))
-
-        for block in blocks:
-            block.text = replace_text(block.text)
-            block.path = replacements.get(block.path, block.path)
-
-    def _get_minio_adapter(self) -> MinIOAdapter:
-        """懒加载 MinIO 客户端，避免没有图片时建立网络连接。"""
-        if self._minio_adapter is None:
-            endpoint, secure, _ = _normalize_minio_endpoint(self.minio_api_url)
-            _, _, public_base_url = _normalize_minio_endpoint(self.minio_url)
-            self._minio_public_base_url = public_base_url
-            self._minio_adapter = MinIOAdapter(
-                StorageConfig(
-                    endpoint=endpoint,
-                    access_key=self.minio_access_key,
-                    secret_key=self.minio_secret_key,
-                    secure=secure,
-                )
-            )
-            self._minio_adapter.ensure_bucket_exists(self.minio_bucket)
-        return self._minio_adapter
-
-    def _build_public_minio_url(self, object_name: str) -> str:
-        """构造写入结果中的线上图片链接。"""
-        return f"{self._minio_public_base_url}/{self.minio_bucket}/{quote(object_name, safe='/')}"
-
-    @staticmethod
-    def _document_name_from_source(source: dict[str, Path | None]) -> str:
-        """根据输入目录最后一层确定文件名。"""
-        root = source.get("root")
-        input_file = source.get("input_file")
-        if root:
-            return Path(root).name
-        if input_file:
-            return Path(input_file).stem
-        return "未命名国家标准"
-
-    @staticmethod
-    def _resolve_image_path(local_path: str, source: dict[str, Path | None]) -> Path | None:
-        """把图片相对路径解析为本地绝对路径。
-
-        Markdown 中常见写法可能是：
-        - `images/fig1.png`
-        - `fig1.png`
-        - 绝对路径
-
-        因此按 absolute、root/path、images_dir/name、images_dir/path 的顺序尝试。
-        """
-        if not local_path:
-            return None
-        raw_path = Path(str(local_path).strip())
-        if raw_path.is_absolute():
-            return raw_path
-
-        root = source.get("root")
-        images_dir = source.get("images_dir")
-        candidates: list[Path] = []
-        if root:
-            candidates.append(Path(root) / raw_path)
-        if images_dir:
-            candidates.append(Path(images_dir) / raw_path.name)
-            candidates.append(Path(images_dir) / raw_path)
-
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0] if candidates else raw_path
 
     def _refresh_paths(self, roots: list[dict[str, Any]]) -> None:
         """递归刷新树节点的 path 和 full_path_title。
@@ -2151,43 +1866,6 @@ class NationalStandardExtractor:
         return {"number": "", "caption": ""}
 
     @staticmethod
-    def _parse_markdown_table(text: str) -> list[list[str]]:
-        """把 Markdown 表格解析成二维数组。
-
-        这里只做轻量解析，目的是为后续表格理解提供基础结构。
-        """
-        rows: list[list[str]] = []
-        for line in _line_list(text):
-            if not (line.startswith("|") and line.endswith("|")):
-                continue
-            cells = [cell.strip() for cell in line.strip("|").split("|")]
-            if cells and not all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
-                rows.append(cells)
-        return rows
-
-    @staticmethod
-    def _extract_image_path_from_text(text: str) -> str:
-        """从 Markdown/HTML 图片语法中提取图片路径。"""
-        match = MARKDOWN_IMAGE_RE.search(text or "")
-        if match:
-            return match.group("path").strip()
-        html_match = HTML_IMAGE_RE.search(text or "")
-        return html_match.group("path").strip() if html_match else ""
-
-    @staticmethod
-    def _guess_image_type(text: str) -> str:
-        """根据图注关键词粗略判断图片类型。"""
-        if "流程" in text:
-            return "流程图"
-        if "标签" in text or "标志" in text:
-            return "标签样例"
-        if "结构" in text:
-            return "结构图"
-        if "照片" in text:
-            return "照片"
-        return "其他"
-
-    @staticmethod
     def _walk_nodes(nodes: list[dict[str, Any]]) -> Iterable[dict[str, Any]]:
         """深度优先遍历章节树。"""
         for node in nodes:
@@ -2261,9 +1939,25 @@ def extract_national_standard(input_path: str | Path) -> dict[str, Any]:
     return NationalStandardExtractor().extract(input_path)
 
 
+def public_national_standard_parse_result(result: dict[str, Any]) -> dict[str, Any]:
+    """返回可持久化的一阶段结果，剔除一次抽取使用的私有资源上下文。"""
+    public_result = copy.deepcopy(
+        {key: value for key, value in result.items() if not str(key).startswith("_")}
+    )
+
+    def remove_private_node_fields(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            node.pop("resource_context_ids", None)
+            remove_private_node_fields(node.get("children", []) or [])
+
+    remove_private_node_fields(public_result.get("body_tree", []) or [])
+    remove_private_node_fields(public_result.get("appendix_tree", []) or [])
+    return public_result
+
+
 def save_national_standard_parse_result(input_path: str | Path, output_path: str | Path) -> dict[str, Any]:
     """便捷函数：解析输入路径，并把结构化结果保存为 JSON 文件。"""
-    result = extract_national_standard(input_path)
+    result = public_national_standard_parse_result(extract_national_standard(input_path))
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2273,7 +1967,8 @@ def save_national_standard_parse_result(input_path: str | Path, output_path: str
 def extract_national_standard_batch(
     input_root_dir: str | Path,
     output_dir: str | Path,
-    upload_images: bool = True,
+    include_resource_descriptions: bool = False,
+    upload_images: bool | None = None,
 ) -> dict[str, Any]:
     """批量解析国家标准目录，并将结果保存到 output_dir。
 
@@ -2292,7 +1987,10 @@ def extract_national_standard_batch(
     if not standard_dirs and input_root.is_dir():
         standard_dirs = [input_root]
 
-    extractor = NationalStandardExtractor(upload_images=upload_images)
+    extractor = NationalStandardExtractor(
+        include_resource_descriptions=include_resource_descriptions,
+        upload_images=upload_images,
+    )
     summary: dict[str, Any] = {
         "input_root_dir": str(input_root),
         "output_dir": str(output_root),
@@ -2304,10 +2002,10 @@ def extract_national_standard_batch(
     }
 
     for standard_dir in standard_dirs:
-        output_name = _sanitize_minio_path_part(standard_dir.name) + ".json"
+        output_name = _sanitize_path_part(standard_dir.name) + ".json"
         output_path = output_root / output_name
         try:
-            result = extractor.extract(standard_dir)
+            result = public_national_standard_parse_result(extractor.extract(standard_dir))
             output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             validation_passed = bool(result.get("validation", {}).get("passed"))
             status = "success" if validation_passed else "validation_failed"
@@ -2324,8 +2022,7 @@ def extract_national_standard_batch(
                     "status": status,
                     "body_root_count": len(result.get("body_tree", [])),
                     "appendix_root_count": len(result.get("appendix_tree", [])),
-                    "table_count": len(result.get("tables", [])),
-                    "image_count": len(result.get("images", [])),
+                    "resource_stats": result.get("validation", {}).get("resource_stats", {}),
                     "reference_candidate_count": len(result.get("reference_candidates", [])),
                     "validation_passed": validation_passed,
                     "failed_data_count": len(result.get("validation", {}).get("failed_data", []) or []),

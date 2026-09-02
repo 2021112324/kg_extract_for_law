@@ -65,6 +65,10 @@ from app.infrastructure.information_extraction.other_language_law.config import 
     DEFAULT_TRANSLATED_DIR as OTHER_LANGUAGE_DEFAULT_TRANSLATED_DIR,
     TRANSLATION_OVERWRITE as OTHER_LANGUAGE_TRANSLATION_OVERWRITE,
 )
+from app.infrastructure.information_extraction.v2.guide_p1 import (
+    GuideP1StandaloneRunner,
+    generate_standalone_guide_p1_graph_name,
+)
 from app.infrastructure.response import success_response, not_found_response, error_response
 from app.infrastructure.storage.object_storage import StorageFactory
 from app.models.kg import KG as KGModel, KGExtractionTask, KGFile
@@ -3305,7 +3309,10 @@ class KGService:
             self,
             standard_data_dir,
             if_del_task,
-            db: Session,
+            db: Optional[Session] = None,
+            use_mysql: bool = True,
+            kg_graph_name: Optional[str] = None,
+            include_resource_descriptions: bool = False,
     ):
         """
         从本地目录抽取国家标准知识图谱并保存至 Neo4j。
@@ -3314,13 +3321,26 @@ class KGService:
         1. 单份国家标准目录：目录下直接包含 full.md；
         2. 国家标准分类目录：目录下包含多个子目录，每个子目录包含 full.md。
 
-        每份标准创建一个 KGExtractionTask 和一个 task 子图，成功后再合并到目录级 KG 总图谱。
+        MySQL 管理模式会创建 KGExtractionTask；独立模式只写入 Neo4j 并在内存汇总状态。
         """
         standard_data_dir = standard_data_dir.replace('\\', '/')
         if not os.path.exists(standard_data_dir):
             raise Exception(f"文件目录不存在: {standard_data_dir}")
         if not os.path.isdir(standard_data_dir):
             raise Exception(f"文件目录不是目录: {standard_data_dir}")
+
+        if not use_mysql:
+            if db is not None:
+                raise ValueError("国家标准无 MySQL 模式不得传入数据库会话")
+            return await self._national_standard_extract_by_local_dir_standalone(
+                standard_data_dir=standard_data_dir,
+                if_del_task=if_del_task,
+                kg_graph_name=kg_graph_name,
+                include_resource_descriptions=include_resource_descriptions,
+            )
+
+        if db is None:
+            raise ValueError("国家标准 MySQL 管理模式必须传入数据库会话")
 
         new_kg = KGCreate(
             name=standard_data_dir.rstrip("/").split("/")[-1],
@@ -3428,6 +3448,157 @@ class KGService:
             "failed": len(error_files),
             "errors": error_files,
         }
+
+    @staticmethod
+    def generate_standalone_national_standard_graph_name(standard_data_dir: str) -> str:
+        """为无 MySQL 国家标准目录任务生成合法、可定位的 Neo4j 图谱名。"""
+        source_name = Path(str(standard_data_dir).rstrip("/\\")).name or "national_standard"
+        source_name = re.sub(r"[^\w]", "_", source_name, flags=re.UNICODE).strip("_") or "source"
+        return f"national_standard_{generate_unique_name(f'{source_name}_kg')}"
+
+    @staticmethod
+    def _get_national_standard_extractor_stats(extractor: NationalStandardGraphExtractor) -> dict:
+        result_stats = getattr(extractor, "result_stats", None)
+        if result_stats is None:
+            return {}
+        return {
+            "error": int(getattr(result_stats, "error", 0) or 0),
+            "weak_warning": int(getattr(result_stats, "week_warning", 0) or 0),
+            "strong_warning": int(getattr(result_stats, "strong_warning", 0) or 0),
+            "skipped_resource_blocks": int(getattr(result_stats, "skipped_resource_blocks", 0) or 0),
+            "filtered_nodes": int(getattr(result_stats, "filtered_nodes", 0) or 0),
+            "filtered_properties": int(getattr(result_stats, "filtered_properties", 0) or 0),
+            "filtered_relations": int(getattr(result_stats, "filtered_relations", 0) or 0),
+            "description_nodes": int(getattr(result_stats, "description_nodes", 0) or 0),
+            "error_msg": str(getattr(result_stats, "error_msg", "") or ""),
+            "weak_warning_msg": str(getattr(result_stats, "week_warning_msg", "") or ""),
+            "strong_warning_msg": str(getattr(result_stats, "strong_warning_msg", "") or ""),
+        }
+
+    async def _national_standard_extract_by_local_dir_standalone(
+            self,
+            standard_data_dir: str,
+            if_del_task: bool,
+            kg_graph_name: Optional[str] = None,
+            include_resource_descriptions: bool = False,
+    ) -> dict:
+        """不使用 MySQL/MinIO，从本地目录抽取并合并国家标准文本图谱。"""
+        source_root = Path(standard_data_dir)
+        standard_dirs = self._discover_national_standard_dirs(source_root)
+        if not standard_dirs:
+            raise ValueError(f"未发现可抽取的国家标准目录，目录下需包含 full.md: {standard_data_dir}")
+
+        target_graph_name = kg_graph_name or self.generate_standalone_national_standard_graph_name(standard_data_dir)
+        extractor = NationalStandardGraphExtractor(
+            max_concurrent=int(os.getenv("NATIONAL_STANDARD_SERVICE_MAX_CONCURRENT", "1")),
+            include_resource_descriptions=include_resource_descriptions,
+        )
+        successful_graph_names: list[str] = []
+        errors: list[dict] = []
+        summary = {
+            "kg_id": None,
+            "kg_graph_name": target_graph_name,
+            "use_mysql": False,
+            "use_minio": False,
+            "include_resource_descriptions": include_resource_descriptions,
+            "total": len(standard_dirs),
+            "success": 0,
+            "failed": 0,
+            "node_count": 0,
+            "edge_count": 0,
+            "errors": errors,
+        }
+
+        logging.info(
+            "开始国家标准独立目录抽取: directory=%s, target_graph=%s, files=%s, descriptions=%s",
+            source_root,
+            target_graph_name,
+            len(standard_dirs),
+            include_resource_descriptions,
+        )
+
+        for standard_dir in standard_dirs:
+            stage = "大模型抽取"
+            graph_name = generate_unique_name("national_standard_standalone_task")
+            try:
+                graph_result = await extractor.extract(standard_dir)
+                if graph_result.get("status") != "success":
+                    raise RuntimeError(f"国家标准图谱抽取未成功: {graph_result.get('status')}")
+                graph = graph_result.get("graph", {}) or {}
+                nodes = graph.get("nodes", []) or []
+                edges = graph.get("edges", []) or []
+                if not nodes:
+                    raise ValueError("国家标准图谱节点为空")
+
+                stage = "Neo4j 写入"
+                self.graph_storage.connect()
+                saved = self.graph_storage.add_subgraph_with_merge(
+                    graph,
+                    graph_name,
+                    "DomainLevel",
+                    filename=graph_result.get("filename") or standard_dir.name,
+                )
+                if saved is not True:
+                    raise RuntimeError("国家标准图谱保存到 Neo4j 失败")
+                successful_graph_names.append(graph_name)
+                summary["success"] += 1
+                summary["node_count"] += len(nodes)
+                summary["edge_count"] += len(edges)
+                logging.info(
+                    "国家标准文件处理成功: file=%s, graph=%s, nodes=%s, edges=%s",
+                    standard_dir.name,
+                    graph_name,
+                    len(nodes),
+                    len(edges),
+                )
+            except Exception as exc:
+                errors.append({"file": standard_dir.name, "stage": stage, "error": str(exc)})
+                logging.exception(
+                    "国家标准文件处理失败: file=%s, stage=%s, error=%s",
+                    standard_dir.name,
+                    stage,
+                    exc,
+                )
+            finally:
+                self._disconnect_graph_storage_safely()
+
+        summary["failed"] = len(errors)
+        if not successful_graph_names:
+            summary["extractor_stats"] = self._get_national_standard_extractor_stats(extractor)
+            await extractor.logging_result_stats()
+            raise RuntimeError("国家标准目录下没有成功入库的图谱")
+
+        try:
+            for graph_name in successful_graph_names:
+                self.graph_storage.connect()
+                logging.info("正在合并国家标准图谱 %s -> %s", graph_name, target_graph_name)
+                merge_result = self.graph_storage.merge_graphs(graph_name, target_graph_name)
+                merge_error = getattr(merge_result, "error", None)
+                if merge_result is False or merge_error:
+                    raise RuntimeError(merge_error or f"图谱 {graph_name} 合并失败")
+                if if_del_task:
+                    deleted = self.graph_storage.delete_subgraph(graph_name)
+                    if deleted is not True:
+                        logging.warning("临时国家标准子图删除失败: %s", graph_name)
+                self.graph_storage.disconnect()
+        except Exception as exc:
+            errors.append({"file": None, "stage": "图谱合并", "error": str(exc)})
+            summary["failed"] = len(errors)
+            logging.exception("国家标准独立图谱合并失败: %s", exc)
+            raise RuntimeError(f"国家标准图谱合并时出现问题: {exc}") from exc
+        finally:
+            self._disconnect_graph_storage_safely()
+
+        summary["extractor_stats"] = self._get_national_standard_extractor_stats(extractor)
+        logging.info(
+            "国家标准独立目录抽取完成: target_graph=%s, total=%s, success=%s, failed=%s",
+            target_graph_name,
+            summary["total"],
+            summary["success"],
+            summary["failed"],
+        )
+        await extractor.logging_result_stats()
+        return summary
 
     @staticmethod
     def _discover_national_standard_dirs(root: Path) -> list[Path]:
@@ -3760,6 +3931,27 @@ class KGService:
             logging.error(f"{file}文件处理出现问题，请检查！" + error)
         await self.guide_clause_extractor.logging_result_stats()
         return True
+
+    @staticmethod
+    def generate_standalone_guide_p1_graph_name(guide_data_dir: str) -> str:
+        """为无 MySQL/MinIO 的分点格式合规指引任务生成目标图谱名。"""
+        return generate_standalone_guide_p1_graph_name(guide_data_dir)
+
+    async def guide_p1_extract_by_local_dir_standalone(
+            self,
+            guide_data_dir: str,
+            output_dir: Optional[str] = None,
+            if_del_task: bool = False,
+            kg_graph_name: Optional[str] = None,
+    ) -> dict:
+        """不使用 MySQL/MinIO，抽取分点格式合规指引并合并到 Neo4j。"""
+        runner = GuideP1StandaloneRunner(self.graph_storage)
+        return await runner.run(
+            guide_data_dir=guide_data_dir,
+            output_dir=output_dir,
+            if_del_task=if_del_task,
+            kg_graph_name=kg_graph_name,
+        )
 
     async def litigation_extract_by_local_dir(
             self,

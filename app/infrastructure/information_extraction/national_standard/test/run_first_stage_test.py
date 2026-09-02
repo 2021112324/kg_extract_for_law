@@ -22,9 +22,9 @@ OUTPUT_DIR = (
     / "first_stage_test"
 )
 
-# 是否上传图片到 MinIO。
-# 仅测试结构解析时建议 False；需要验证图片 MinIO 链接时再改为 True。
-UPLOAD_IMAGES = False
+# 是否为表格和流程图生成仅供大模型使用的临时描述上下文。
+# 默认关闭；开启后原始资源载荷仍不会写入一阶段公开结果。
+INCLUDE_RESOURCE_DESCRIPTIONS = False
 
 
 # =========================
@@ -48,14 +48,14 @@ def main() -> None:
     summary = extract_national_standard_batch(
         input_root_dir=INPUT_DIR,
         output_dir=OUTPUT_DIR,
-        upload_images=UPLOAD_IMAGES,
+        include_resource_descriptions=INCLUDE_RESOURCE_DESCRIPTIONS,
     )
 
     summary_path = OUTPUT_DIR / "summary.json"
     print("国家标准一阶段测试完成")
     print("input_dir:", INPUT_DIR)
     print("output_dir:", OUTPUT_DIR)
-    print("upload_images:", UPLOAD_IMAGES)
+    print("include_resource_descriptions:", INCLUDE_RESOURCE_DESCRIPTIONS)
     print("summary_path:", summary_path)
     print(
         "summary:",

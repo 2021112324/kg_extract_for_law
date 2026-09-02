@@ -212,6 +212,13 @@ def test_converts_core_knowledge_and_references(tmp_path: Path) -> None:
     result, entries = _convert(tmp_path, nodes, edges)
     contents = [entry["content"] for entry in entries]
     types = {entry["knowledge_type"] for entry in entries}
+    source_prefix = f"在《{filename}》中，"
+    for entry in entries:
+        if entry["source_node_type"] == "标准文件":
+            assert not entry["content"].startswith(source_prefix)
+            continue
+        assert entry["content"].startswith(source_prefix)
+        assert not entry["content"][len(source_prefix):].startswith(filename)
 
     assert result["source_files"] == 1
     assert {
@@ -231,6 +238,47 @@ def test_converts_core_knowledge_and_references(tmp_path: Path) -> None:
     assert sum("测试产品应安装安全装置" in content for content in contents) == 1
     assert all(entry["source_file"] == filename for entry in entries)
     assert all(entry["knowledge_id"].startswith("ns_") for entry in entries)
+
+
+def test_skips_file_level_bibliographic_references(tmp_path: Path) -> None:
+    filename = "机械电气安全"
+    nodes = [
+        _node(
+            1,
+            "标准文件",
+            filename,
+            name=filename,
+            标准中文名称=filename,
+            标准编号="GB/T 5226.1—2017",
+        ),
+        _node(
+            2,
+            "标准依据",
+            filename,
+            标准编号="IEC 82079-1:2012",
+            标准名称="Preparation of instructions for use",
+            依据类型="参考",
+        ),
+        _node(
+            3,
+            "标准依据",
+            filename,
+            标准编号="IEC 60204-1:2016",
+            标准名称="Safety of machinery—Electrical equipment of machines",
+            依据类型="引用",
+        ),
+    ]
+    edges = [
+        _edge(101, 1, 2, "依据"),
+        _edge(102, 1, 3, "依据"),
+    ]
+
+    result, entries = _convert(tmp_path, nodes, edges)
+    contents = [entry["content"] for entry in entries]
+
+    assert not any("IEC 82079-1:2012" in content for content in contents)
+    assert any("IEC 60204-1:2016" in content for content in contents)
+    assert result["skip_reason_counts"]["引用知识:文件级参考文献不生成知识"] == 1
 
 
 def test_resource_knowledge_uses_descriptions_only(tmp_path: Path) -> None:
@@ -307,6 +355,12 @@ def test_resource_knowledge_uses_descriptions_only(tmp_path: Path) -> None:
 
     result, entries = _convert(tmp_path, nodes, edges)
     contents = [entry["content"] for entry in entries]
+    source_prefix = f"在《{filename}》中，"
+    assert all(
+        entry["content"].startswith(source_prefix)
+        for entry in entries
+        if entry["source_node_type"] != "标准文件"
+    )
 
     assert sum(entry["knowledge_type"] == "表格索引知识" for entry in entries) == 1
     assert sum(entry["knowledge_type"] == "流程图描述知识" for entry in entries) == 1
@@ -431,9 +485,17 @@ def test_filters_invalid_candidates_deduplicates_and_isolates_files(tmp_path: Pa
     assert ["总计", "国家标准测试", str(result["total_entries"])] in csv_rows
 
 
-def test_public_entry_does_not_change_regulation_converter_signatures() -> None:
-    assert list(inspect.signature(convert_json_to_text).parameters) == ["graph_type"]
-    assert list(inspect.signature(convert_json_to_text_v2).parameters) == ["graph_type"]
+def test_public_entries_support_isolated_input_and_output_directories() -> None:
+    assert list(inspect.signature(convert_json_to_text).parameters) == [
+        "graph_type",
+        "input_dir",
+        "output_dir",
+    ]
+    assert list(inspect.signature(convert_json_to_text_v2).parameters) == [
+        "graph_type",
+        "input_dir",
+        "output_dir",
+    ]
     assert list(inspect.signature(convert_national_standard_json_to_text).parameters) == [
         "graph_type",
         "input_dir",

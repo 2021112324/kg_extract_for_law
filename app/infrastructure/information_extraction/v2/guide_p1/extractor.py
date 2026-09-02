@@ -215,6 +215,9 @@ class GuideP1Extractor:
                     stats.add_weak_warning(f"{filename} {block.get('block_id')}: {warning}")
 
         graph = GuideP1GraphBuilder(filename, parse_result).build(extraction_result if run_llm else None)
+        for warning in (graph.get("metadata") or {}).get("warnings", []):
+            if warning and not any(message.endswith(warning) for message in stats.weak_warning_messages):
+                stats.add_weak_warning(f"{filename}: {warning}")
         stats.knowledge_unit_count = sum(1 for node in graph["nodes"] if node["node_type"] == "指引知识单元")
         stats.node_count = len(graph["nodes"])
         stats.edge_count = len(graph["edges"])

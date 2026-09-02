@@ -235,6 +235,17 @@ class ExtractorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(result["run_stats"]["llm_empty_count"], 0)
         self.assertGreater(result["run_stats"]["knowledge_unit_count"], 0)
         self.assertEqual(0, result["run_stats"]["extraction_error"])
+        self.assertGreater(result["run_stats"]["weak_warning"], 0)
+
+    async def test_empty_high_knowledge_block_is_a_strong_warning(self) -> None:
+        mock = TrackingMockExtractor(empty_token="推进绿色改造")
+        extractor = GuideP1Extractor(
+            config=replace(DEFAULT_CONFIG, strict_mode=True),
+            llm_extractor=mock,
+        )
+        result = await extractor.extract_text(SAMPLE_TEXT, filename="示例发展规划.txt")
+        self.assertEqual("success", result["status"])
+        self.assertGreater(result["run_stats"]["strong_warning"], 0)
 
     async def test_strict_failure_has_no_parser_semantic_fallback(self) -> None:
         mock = TrackingMockExtractor(fail_token="严禁违规建设")

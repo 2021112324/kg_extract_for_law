@@ -18,6 +18,7 @@ eggs/
 lib/
 lib64/
 parts/
+temp/
 sdist/
 var/
 wheels/
@@ -149,3 +150,7 @@ openspec/
 app/infrastructure/information_extraction/compliance_case_v1/reference/
 result2/
 test_data/
+
+# 临时产物与压缩包
+*.zip
+logs/

@@ -18,7 +18,7 @@ from app.infrastructure.information_extraction.method.base import LangextractCon
 from app.infrastructure.information_extraction.national_standard.national_standard_extract import (
     NationalStandardExtractor,
     _discover_markdown_standard_dirs,
-    _sanitize_minio_path_part,
+    _sanitize_path_part,
 )
 from app.infrastructure.information_extraction.national_standard.prompt.example import (
     example_for_standard_file_info,
@@ -79,10 +79,64 @@ STANDARD_REQUIREMENT_ALLOWED_PROPS = {
     "量化条件",
 }
 PROPERTY_ALLOW_OVERRIDES = {
-    "标准结构节点": {"节点层级", "完整路径标题", "是否附录节点", "附录编号", "附录类型", "相关图片地址"},
-    "表格": {"表格HTML", "解析行"},
-    "图片": {"图片标题", "图片链接", "图片类型", "image_id"},
+    "标准结构节点": {"节点层级", "完整路径标题", "是否附录节点", "附录编号", "附录类型"},
 }
+
+CORE_ENTITY_TYPES = {
+    "标准文件",
+    "标准依据",
+    "标准结构节点",
+    "术语定义",
+    "标准要求",
+    "指标限值",
+    "试验检测方法",
+    "引用标准",
+}
+DESCRIPTION_ENTITY_TYPES = {"表格", "流程图"}
+DESCRIPTION_ALLOWED_PROPERTIES = {
+    "表格": {"表号", "表题", "表格描述"},
+    "流程图": {"流程图编号", "流程图标题", "流程图描述"},
+}
+FORBIDDEN_RESOURCE_PROPERTIES = {
+    "相关图片地址",
+    "图片标题",
+    "图片链接",
+    "图片类型",
+    "image_id",
+    "table_id",
+    "表格ID",
+    "表格内容",
+    "表格HTML",
+    "解析行",
+    "流程图语法类型",
+    "流程图内容",
+    "流程节点摘要",
+    "流程关系摘要",
+}
+CORE_RELATION_TRIPLES = {
+    ("标准文件", "依据", "标准依据"),
+    ("标准文件", "包含", "标准结构节点"),
+    ("标准结构节点", "包含", "标准结构节点"),
+    ("标准结构节点", "定义", "术语定义"),
+    ("标准结构节点", "规定", "标准要求"),
+    ("标准结构节点", "规定", "指标限值"),
+    ("标准结构节点", "规定", "试验检测方法"),
+    ("标准结构节点", "引用", "引用标准"),
+    ("标准要求", "引用", "引用标准"),
+    ("试验检测方法", "引用", "引用标准"),
+}
+DESCRIPTION_RELATION_TRIPLES = {
+    ("标准结构节点", "包含", "表格"),
+    ("标准结构节点", "包含", "流程图"),
+}
+
+
+def _schema_without_resource_entities(schema_text: str) -> str:
+    """移除表格、流程图实体定义及对应关系三元组。"""
+    text = re.sub(r"^##\s+表格\s*$.*?(?=^##\s+流程图\s*$)", "", schema_text, flags=re.M | re.S)
+    text = re.sub(r"^##\s+流程图\s*$.*?(?=^#\s+关系\s*$)", "", text, flags=re.M | re.S)
+    text = re.sub(r"^-\s*标准结构节点-包含-(?:表格|流程图)\s*$\n?", "", text, flags=re.M)
+    return text
 
 
 def _extract_all_allowed_properties_from_schema(schema_text: str) -> dict[str, set[str]]:
@@ -117,6 +171,11 @@ class ResultStats:
         self.week_warning_msg = ""
         self.strong_warning = 0
         self.strong_warning_msg = ""
+        self.skipped_resource_blocks = 0
+        self.filtered_nodes = 0
+        self.filtered_properties = 0
+        self.filtered_relations = 0
+        self.description_nodes = 0
 
 
 def _normalize_match_text(value: Any) -> str:
@@ -193,12 +252,16 @@ class NationalStandardGraphExtractor:
         max_concurrent: int = 3,
         include_validation_failed: bool = False,
         max_tree_nodes: int | None = None,
+        include_resource_descriptions: bool = False,
     ) -> None:
         self.include_validation_failed = include_validation_failed
         self.max_tree_nodes = max_tree_nodes
+        self.include_resource_descriptions = include_resource_descriptions
         self.result_stats = ResultStats()
         self.semaphore = asyncio.Semaphore(max_concurrent)
-        self.first_stage_extractor = NationalStandardExtractor(upload_images=True)
+        self.first_stage_extractor = NationalStandardExtractor(
+            include_resource_descriptions=include_resource_descriptions,
+        )
         config = LangextractConfig(
             model_name=NATIONAL_STANDARD_GRAPH_MODEL,
             api_key=NATIONAL_STANDARD_GRAPH_API_KEY,
@@ -217,6 +280,11 @@ class NationalStandardGraphExtractor:
 
     async def extract_from_parse_result(self, parse_result: dict[str, Any], filename: str) -> dict[str, Any]:
         validation = parse_result.get("validation", {}) or {}
+        resource_stats = validation.get("resource_stats", {}) or {}
+        self.result_stats.skipped_resource_blocks += sum(
+            int(resource_stats.get(key, 0) or 0)
+            for key in ("skipped_image_blocks", "skipped_table_blocks", "skipped_flowchart_blocks")
+        )
         validation_passed = bool(validation.get("passed"))
         if not validation_passed:
             self.result_stats.error += 1
@@ -243,7 +311,11 @@ class NationalStandardGraphExtractor:
             if item.get("status") != "success":
                 self.result_stats.error += 1
                 self.result_stats.error_msg += f"LLM调用失败: {filename} error={item.get('error', '')}\n"
-        graph_builder = _GraphBuilder(filename, self.result_stats)
+        graph_builder = _GraphBuilder(
+            filename,
+            self.result_stats,
+            include_resource_descriptions=self.include_resource_descriptions,
+        )
         graph_builder.add_context_graph(parse_result)
         graph_builder.add_llm_extractions(llm_extractions)
         graph = graph_builder.to_graph()
@@ -271,6 +343,7 @@ class NationalStandardGraphExtractor:
                 "llm_call_count": len(llm_extractions),
                 "llm_failed_count": llm_failed_count,
                 "validation_passed": validation_passed,
+                "resource_stats": resource_stats,
             },
         }
 
@@ -331,9 +404,21 @@ class NationalStandardGraphExtractor:
 
     async def _llm_extract_tree_node(self, content: str, node: dict[str, Any]) -> dict[str, Any]:
         async with self.semaphore:
+            if self.include_resource_descriptions:
+                tree_schema = schema_for_standard_tree_node
+                tree_prompt = (
+                    prompt_for_standard_tree_node
+                    + "\n表格和流程图只能抽取非空自然语言描述，不得输出资源正文、HTML、资源ID或Mermaid代码。"
+                )
+            else:
+                tree_schema = _schema_without_resource_entities(schema_for_standard_tree_node)
+                tree_prompt = (
+                    prompt_for_standard_tree_node
+                    + "\n当前为严格文本模式：不得抽取表格、图片或流程图实体，只抽取核心文本知识。"
+                )
             result = await self.extractor.entity_and_relationship_extract(
-                user_prompt=prompt_for_standard_tree_node,
-                schema=schema_for_standard_tree_node,
+                user_prompt=tree_prompt,
+                schema=tree_schema,
                 input_text=content,
                 examples=example_for_standard_tree_node,
             )
@@ -414,63 +499,28 @@ class NationalStandardGraphExtractor:
                 return str(node.get("content", "") or "")
         return ""
 
-    @staticmethod
-    def _build_node_llm_input(node: dict[str, Any], parse_result: dict[str, Any], filename: str) -> str:
-        table_map = {table.get("table_id"): table for table in parse_result.get("tables", []) or []}
-        image_map = {image.get("image_id"): image for image in parse_result.get("images", []) or []}
-        tables = [table_map.get(table_id) for table_id in node.get("tables", []) if table_map.get(table_id)]
-        images = [image_map.get(image_id) for image_id in node.get("images", []) if image_map.get(image_id)]
-        table_context = NationalStandardGraphExtractor._build_table_llm_context(tables)
-        return (
+    def _build_node_llm_input(self, node: dict[str, Any], parse_result: dict[str, Any], filename: str) -> str:
+        text = (
             f"文件：{filename}\n"
             f"节点编号：{node.get('number', '')}\n"
             f"节点标题：{node.get('title', '')}\n"
             f"节点路径：{node.get('full_path_title', '')}\n"
-            f"节点内容：\n{NationalStandardGraphExtractor._escape_latex_for_json(str(node.get('content', '') or ''))}\n"
-            f"相关表格：\n{json.dumps(table_context, ensure_ascii=False, indent=2)}\n"
-            f"相关图片：\n{json.dumps(images[:5], ensure_ascii=False, indent=2)}"
+            f"节点内容：\n{NationalStandardGraphExtractor._escape_latex_for_json(str(node.get('content', '') or ''))}"
         )
-
-    @staticmethod
-    def _build_table_llm_context(tables: list[dict[str, Any]], max_tables: int = 5) -> list[dict[str, Any]]:
-        """Build lightweight table context for LLM without copying full table HTML."""
-        result: list[dict[str, Any]] = []
-        for table in tables[:max_tables]:
-            parsed_rows = table.get("parsed_rows")
-            result.append(
-                {
-                    "table_id": table.get("table_id", ""),
-                    "table_number": table.get("table_number", ""),
-                    "table_caption": table.get("table_caption", ""),
-                    "related_section_number": table.get("related_section_number", ""),
-                    "related_section_title": table.get("related_section_title", ""),
-                    "field_summary": NationalStandardGraphExtractor._summarize_table_fields(table),
-                    "row_count": len(parsed_rows) if isinstance(parsed_rows, list) else "",
-                    "output_hint": "完整表格内容已由一阶段表格节点保存；LLM输出时请使用table_id，不要复述完整HTML或Markdown。",
-                }
-            )
-        return result
-
-    @staticmethod
-    def _summarize_table_fields(table: dict[str, Any], max_fields: int = 20) -> list[str]:
-        parsed_rows = table.get("parsed_rows")
-        fields: list[str] = []
-        if isinstance(parsed_rows, list) and parsed_rows:
-            first_row = parsed_rows[0]
-            if isinstance(first_row, dict):
-                fields = [str(key) for key in first_row.keys()]
-            elif isinstance(first_row, list):
-                fields = [str(value) for value in first_row]
-        if not fields:
-            table_markdown = str(table.get("table_markdown", "") or "")
-            for line in table_markdown.splitlines():
-                if "|" not in line:
-                    continue
-                cells = [cell.strip() for cell in line.strip().strip("|").split("|") if cell.strip()]
-                if cells and not all(re.fullmatch(r":?-+:?", cell) for cell in cells):
-                    fields = cells
-                    break
-        return fields[:max_fields]
+        if not self.include_resource_descriptions:
+            return text
+        context_map = {
+            item.get("context_id"): item
+            for item in parse_result.get("_resource_contexts", []) or []
+        }
+        contexts = [
+            context_map[context_id]
+            for context_id in node.get("resource_context_ids", []) or []
+            if context_id in context_map
+        ]
+        if not contexts:
+            return text
+        return text + "\n资源描述临时上下文：\n" + json.dumps(contexts[:5], ensure_ascii=False, indent=2)
 
     @staticmethod
     def _walk_nodes(nodes: list[dict[str, Any]]) -> Iterable[dict[str, Any]]:
@@ -491,20 +541,39 @@ class NationalStandardGraphExtractor:
         logging.info(f"📄✅：错误数: {self.result_stats.error}")
         logging.info(f"📄✅：弱警告数: {self.result_stats.week_warning}")
         logging.info(f"📄✅：强警告数: {self.result_stats.strong_warning}")
+        logging.info(f"📄✅：跳过资源块数: {self.result_stats.skipped_resource_blocks}")
+        logging.info(f"📄✅：过滤节点数: {self.result_stats.filtered_nodes}")
+        logging.info(f"📄✅：过滤属性数: {self.result_stats.filtered_properties}")
+        logging.info(f"📄✅：过滤关系数: {self.result_stats.filtered_relations}")
+        logging.info(f"📄✅：描述节点数: {self.result_stats.description_nodes}")
 
 
 class _GraphBuilder:
     """整合一阶段上下文节点与 LLM 抽取结果。"""
 
-    def __init__(self, filename: str, result_stats: ResultStats | None = None) -> None:
+    def __init__(
+        self,
+        filename: str,
+        result_stats: ResultStats | None = None,
+        include_resource_descriptions: bool = False,
+    ) -> None:
         self.filename = filename
         self.nodes: dict[tuple[str, str], dict[str, Any]] = {}
         self.edges: list[dict[str, Any]] = []
         self.name_to_id: dict[str, str] = {}
-        self.table_content_to_id: dict[str, str] = {}
         self.result_stats = result_stats
+        self.include_resource_descriptions = include_resource_descriptions
+        self._resource_contexts_by_id: dict[str, dict[str, Any]] = {}
+        self._description_context_types_by_scope: dict[str, set[str]] = {}
+        self._description_context_types_by_node_id: dict[str, set[str]] = {}
+        self._counted_description_node_ids: set[str] = set()
 
     def add_context_graph(self, parse_result: dict[str, Any]) -> None:
+        self._resource_contexts_by_id = {
+            str(item.get("context_id")): item
+            for item in parse_result.get("_resource_contexts", []) or []
+            if isinstance(item, dict) and item.get("context_id")
+        }
         file_info = parse_result.get("file_info", {}) or {}
         file_name = file_info.get("标准中文名称") or self.filename
         context_file_properties = {
@@ -527,11 +596,29 @@ class _GraphBuilder:
                 if not name or not entity_type:
                     continue
                 entity["properties"] = self._clean_entity_properties(entity.get("properties", {}) or {})
-                if entity_type == "图片":
-                    # 图片节点只由第一阶段真实图片资源生成，二阶段 LLM 不新增图片节点。
+                allowed_types = set(CORE_ENTITY_TYPES)
+                if self.include_resource_descriptions:
+                    allowed_types.update(DESCRIPTION_ENTITY_TYPES)
+                if entity_type not in allowed_types:
+                    if self.result_stats:
+                        self.result_stats.filtered_nodes += 1
                     continue
-                if entity_type == "流程图" and not self._is_valid_flowchart(entity.get("properties", {})):
-                    continue
+                if entity_type in DESCRIPTION_ENTITY_TYPES:
+                    if not self._description_entity_has_current_context(entity_type, item):
+                        if self.result_stats:
+                            self.result_stats.filtered_nodes += 1
+                        continue
+                    description_key = "表格描述" if entity_type == "表格" else "流程图描述"
+                    description = str(entity.get("properties", {}).get(description_key) or "").strip()
+                    if not description:
+                        if self.result_stats:
+                            self.result_stats.filtered_nodes += 1
+                        continue
+                    entity["properties"] = {
+                        key: value
+                        for key, value in entity.get("properties", {}).items()
+                        if key in DESCRIPTION_ALLOWED_PROPERTIES[entity_type] and value not in (None, "", [], {})
+                    }
                 if entity_type == "标准文件":
                     if not self._is_current_standard_file_entity(name, entity.get("properties", {})):
                         self._alias_to_standard_file(name, entity.get("properties", {}))
@@ -557,7 +644,7 @@ class _GraphBuilder:
                     if internal_id:
                         self._register_entity_aliases(internal_id, name, entity_type, entity.get("properties", {}))
                         continue
-                existing_id = self._resolve_resource_node_id(name, entity_type, entity.get("properties", {}))
+                existing_id = self._resolve_context_node_id(name, entity_type, entity.get("properties", {}))
                 filtered_properties = self._filter_entity_properties_by_schema(
                     entity_type,
                     entity.get("properties", {}) or {},
@@ -567,8 +654,17 @@ class _GraphBuilder:
                 if existing_id:
                     self._update_node_by_id(existing_id, filtered_properties, source="llm")
                     self._register_entity_aliases(existing_id, name, entity_type, filtered_properties)
+                    entity_id = existing_id
                 else:
-                    self.add_node(name, entity_type, filtered_properties, source="llm")
+                    entity_id = self.add_node(name, entity_type, filtered_properties, source="llm")
+                if (
+                    entity_type in DESCRIPTION_ENTITY_TYPES
+                    and entity_id
+                    and entity_id not in self._counted_description_node_ids
+                ):
+                    self._counted_description_node_ids.add(entity_id)
+                    if self.result_stats:
+                        self.result_stats.description_nodes += 1
                 if entity_type == "标准要求" and self.result_stats:
                     properties = entity.get("properties", {}) or {}
                     qiangdu = (properties.get("约束强度") or "").strip()
@@ -646,63 +742,20 @@ class _GraphBuilder:
             self.name_to_id[str(node.get("number"))] = node_id
         if node.get("full_path_title"):
             self.name_to_id[str(node.get("full_path_title"))] = node_id
+        if self.include_resource_descriptions:
+            context_types = {
+                self._resource_context_entity_type(self._resource_contexts_by_id[context_id])
+                for context_id in node.get("resource_context_ids", []) or []
+                if context_id in self._resource_contexts_by_id
+            }
+            context_types.discard("")
+            if context_types:
+                self._description_context_types_by_node_id[node_id] = context_types
+                for scope_key in self._tree_node_scope_keys(node):
+                    self._description_context_types_by_scope.setdefault(scope_key, set()).update(context_types)
         self.add_edge(parent_id or file_id, node_id, "包含", {"来源": "first_stage_context"}, source="first_stage_context")
-        self._add_resource_context(node, node_id, parse_result)
         for child in node.get("children", []) or []:
             self._add_context_tree_node(child, file_id, parse_result, node_id)
-
-    def _add_resource_context(self, node: dict[str, Any], node_id: str, parse_result: dict[str, Any]) -> None:
-        table_map = {table.get("table_id"): table for table in parse_result.get("tables", []) or []}
-        for table_id in node.get("tables", []) or []:
-            table = table_map.get(table_id)
-            if not table:
-                continue
-            name = table.get("table_caption") or table.get("table_number") or f"表格_{table_id}"
-            table_node_id = self.add_node(
-                name,
-                "表格",
-                {
-                    "表号": table.get("table_number", ""),
-                    "表题": table.get("table_caption", ""),
-                    "表格内容": table.get("table_markdown", ""),
-                    "表格描述": "",
-                    "表格HTML": table.get("table_html", ""),
-                    "解析行": table.get("parsed_rows", []),
-                    "table_id": table_id,
-                },
-                source="first_stage_context",
-            )
-            self.add_edge(node_id, table_node_id, "包含", {"来源": "first_stage_context"}, source="first_stage_context")
-            self.name_to_id[str(table_id)] = table_node_id
-            self.name_to_id[f"table_id_{table_id}"] = table_node_id
-            table_content_key = self._normalize_resource_content(table.get("table_markdown", "") or table.get("table_html", ""))
-            if table_content_key:
-                self.table_content_to_id[table_content_key] = table_node_id
-
-        image_map = {image.get("image_id"): image for image in parse_result.get("images", []) or []}
-        for image_id in node.get("images", []) or []:
-            image = image_map.get(image_id)
-            if not image:
-                continue
-            image_url = image.get("minio_url") or image.get("online_path") or image.get("local_path", "")
-            if not image_url:
-                continue
-            self._append_node_list_property(node_id, "相关图片地址", str(image_url))
-            name = image.get("caption") or image.get("local_path") or f"图片_{image_id}"
-            image_node_id = self.add_node(
-                name,
-                "图片",
-                {
-                    "图片标题": image.get("caption", ""),
-                    "图片链接": image_url,
-                    "图片类型": image.get("image_type", ""),
-                    "image_id": image_id,
-                },
-                source="first_stage_context",
-            )
-            self.name_to_id[str(image_id)] = image_node_id
-            self.name_to_id[f"image_id_{image_id}"] = image_node_id
-            self.add_edge(node_id, image_node_id, "包含", {"来源": "first_stage_context"}, source="first_stage_context")
 
     def add_node(
         self,
@@ -711,6 +764,13 @@ class _GraphBuilder:
         properties: dict[str, Any] | None = None,
         source: str = "llm",
     ) -> str:
+        allowed_types = set(CORE_ENTITY_TYPES)
+        if self.include_resource_descriptions:
+            allowed_types.update(DESCRIPTION_ENTITY_TYPES)
+        if node_type not in allowed_types:
+            if self.result_stats:
+                self.result_stats.filtered_nodes += 1
+            return ""
         filtered_properties = self._filter_entity_properties_by_schema(node_type, properties or {}, source=source)
         if node_type == "标准文件":
             for key, node in self.nodes.items():
@@ -763,7 +823,10 @@ class _GraphBuilder:
         properties: dict[str, Any],
         source: str = "llm",
     ) -> dict[str, Any]:
-        allowed = set(NODE_ALLOWED_PROPERTIES.get(entity_type) or set())
+        if entity_type in DESCRIPTION_ENTITY_TYPES:
+            allowed = set(DESCRIPTION_ALLOWED_PROPERTIES.get(entity_type) or set())
+        else:
+            allowed = set(NODE_ALLOWED_PROPERTIES.get(entity_type) or set())
         allowed.update(PROPERTY_ALLOW_OVERRIDES.get(entity_type, set()))
         if not allowed:
             if properties and self.result_stats:
@@ -776,13 +839,15 @@ class _GraphBuilder:
         filtered = {
             key: value
             for key, value in (properties or {}).items()
-            if key in allowed and value not in (None, "", [], {})
+            if key in allowed and key not in FORBIDDEN_RESOURCE_PROPERTIES and value not in (None, "", [], {})
         }
         dropped = [
             str(key)
             for key, value in (properties or {}).items()
-            if key not in allowed and value not in (None, "", [], {})
+            if (key not in allowed or key in FORBIDDEN_RESOURCE_PROPERTIES) and value not in (None, "", [], {})
         ]
+        if dropped and self.result_stats:
+            self.result_stats.filtered_properties += len(dropped)
         if dropped and source == "llm" and self.result_stats:
             self.result_stats.week_warning += 1
             preview = ", ".join(key[:80] for key in sorted(dropped)[:10])
@@ -835,21 +900,19 @@ class _GraphBuilder:
             if alias:
                 self.name_to_id[str(alias)] = node_id
 
-    def _resolve_resource_node_id(
+    def _resolve_context_node_id(
         self,
         node_name: str,
         node_type: str,
         properties: dict[str, Any] | None = None,
     ) -> str:
-        if node_type not in {"标准结构节点", "流程图", "表格"}:
+        if node_type != "标准结构节点":
             return ""
         props = properties or {}
         for key in (
             props.get("节点编号"),
             props.get("节点路径"),
             props.get("完整路径标题"),
-            props.get("table_id"),
-            props.get("表格ID"),
             node_name,
             f"{props.get('节点编号', '')} {props.get('节点标题', '')}".strip(),
         ):
@@ -859,19 +922,7 @@ class _GraphBuilder:
             resolved = self._resolve_node_id(value)
             if resolved:
                 return resolved
-            if value.startswith("image_id_"):
-                resolved = self._resolve_node_id(value.removeprefix("image_id_"))
-                if resolved:
-                    return resolved
-        if node_type == "表格":
-            table_content_key = self._normalize_resource_content(props.get("表格内容", ""))
-            if table_content_key and table_content_key in self.table_content_to_id:
-                return self.table_content_to_id[table_content_key]
         return ""
-
-    @staticmethod
-    def _normalize_resource_content(value: Any) -> str:
-        return "".join(str(value or "").split())
 
     @staticmethod
     def _clean_entity_properties(properties: dict[str, Any]) -> dict[str, Any]:
@@ -1012,29 +1063,6 @@ class _GraphBuilder:
         return ""
 
     @staticmethod
-    def _is_valid_flowchart(properties: dict[str, Any] | None) -> bool:
-        props = properties or {}
-        text = "\n".join(
-            str(props.get(key, "") or "")
-            for key in ("流程图语法类型", "流程图内容")
-        ).lower()
-        return any(
-            marker in text
-            for marker in (
-                "```mermaid",
-                "flowchart ",
-                "graph td",
-                "graph lr",
-                "graph bt",
-                "graph rl",
-                "sequencediagram",
-                "statediagram",
-                "classdiagram",
-                "erdiagram",
-            )
-        )
-
-    @staticmethod
     def _mark_internal_reference(entity: dict[str, Any]) -> None:
         props = entity.setdefault("properties", {})
         number = str(props.get("标准编号") or entity.get("name") or "")
@@ -1056,13 +1084,36 @@ class _GraphBuilder:
     ) -> None:
         if not source_id or not target_id:
             return
+        clean_properties = {
+            key: value
+            for key, value in (properties or {}).items()
+            if key not in FORBIDDEN_RESOURCE_PROPERTIES
+        }
+        dropped_property_count = len(properties or {}) - len(clean_properties)
+        if dropped_property_count and self.result_stats:
+            self.result_stats.filtered_properties += dropped_property_count
+        source_type = self._node_type_by_id(source_id)
+        target_type = self._node_type_by_id(target_id)
+        allowed_triples = set(CORE_RELATION_TRIPLES)
+        if self.include_resource_descriptions:
+            allowed_triples.update(DESCRIPTION_RELATION_TRIPLES)
+        if (source_type, relation_type, target_type) not in allowed_triples:
+            if self.result_stats:
+                self.result_stats.filtered_relations += 1
+            return
+        if target_type in DESCRIPTION_ENTITY_TYPES:
+            available_types = self._description_context_types_by_node_id.get(source_id, set())
+            if target_type not in available_types:
+                if self.result_stats:
+                    self.result_stats.filtered_relations += 1
+                return
         for existing in self.edges:
             if (
                 existing.get("source_id") == source_id
                 and existing.get("target_id") == target_id
                 and existing.get("relation_type") == relation_type
             ):
-                existing["properties"].update(properties or {})
+                existing["properties"].update(clean_properties)
                 if source and source not in str(existing.get("source", "")):
                     existing["source"] = f"{existing.get('source')}+{source}"
                 return
@@ -1071,19 +1122,78 @@ class _GraphBuilder:
             "target_id": target_id,
             "relation_type": relation_type,
             "directionality": "单向",
-            "properties": properties or {},
+            "properties": clean_properties,
             "filename": self.filename,
             "source": source,
         }
         if edge not in self.edges:
             self.edges.append(edge)
 
+    def _node_type_by_id(self, node_id: str) -> str:
+        for node in self.nodes.values():
+            if node.get("node_id") == node_id:
+                return str(node.get("node_type") or "")
+        return ""
+
     def _resolve_node_id(self, key: str) -> str:
         value = str(key or "")
         return self.name_to_id.get(value) or self.name_to_id.get(value.split("_", 1)[-1], "")
 
     def to_graph(self) -> dict[str, Any]:
+        self._prune_unlinked_description_nodes()
         return {"nodes": list(self.nodes.values()), "edges": self.edges}
+
+    @staticmethod
+    def _resource_context_entity_type(context: dict[str, Any]) -> str:
+        return {"table": "表格", "flowchart": "流程图"}.get(str(context.get("resource_type") or ""), "")
+
+    @staticmethod
+    def _tree_node_scope_keys(node: dict[str, Any]) -> set[str]:
+        number = str(node.get("number") or "").strip()
+        title = str(node.get("title") or "").strip()
+        full_path_title = str(node.get("full_path_title") or "").strip()
+        return {
+            value
+            for value in (number, title, f"{number} {title}".strip(), full_path_title)
+            if value
+        }
+
+    def _description_entity_has_current_context(self, entity_type: str, item: dict[str, Any]) -> bool:
+        if item.get("scope") != "tree_node":
+            return False
+        number = str(item.get("node_number") or "").strip()
+        title = str(item.get("node_title") or "").strip()
+        scope_keys = {value for value in (number, title, f"{number} {title}".strip()) if value}
+        return any(
+            entity_type in self._description_context_types_by_scope.get(scope_key, set())
+            for scope_key in scope_keys
+        )
+
+    def _prune_unlinked_description_nodes(self) -> None:
+        linked_description_ids = {
+            edge.get("target_id")
+            for edge in self.edges
+            if self._node_type_by_id(str(edge.get("target_id") or "")) in DESCRIPTION_ENTITY_TYPES
+        }
+        removed_ids: set[str] = set()
+        for key, node in list(self.nodes.items()):
+            if node.get("node_type") in DESCRIPTION_ENTITY_TYPES and node.get("node_id") not in linked_description_ids:
+                removed_ids.add(str(node.get("node_id") or ""))
+                del self.nodes[key]
+        if not removed_ids:
+            return
+        self.name_to_id = {
+            alias: node_id
+            for alias, node_id in self.name_to_id.items()
+            if node_id not in removed_ids
+        }
+        self._counted_description_node_ids.difference_update(removed_ids)
+        if self.result_stats:
+            self.result_stats.filtered_nodes += len(removed_ids)
+            self.result_stats.description_nodes = max(
+                0,
+                self.result_stats.description_nodes - len(removed_ids),
+            )
 
     def validate_and_report(self) -> None:
         """Post-build validation: check standard file info for missing key fields."""
@@ -1147,7 +1257,7 @@ async def extract_national_standard_graph_batch(
         "items": [],
     }
     for standard_dir in standard_dirs:
-        output_path = output_root / f"{_sanitize_minio_path_part(standard_dir.name)}.json"
+        output_path = output_root / f"{_sanitize_path_part(standard_dir.name)}.json"
         try:
             result = await extractor.extract(standard_dir)
             output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import subprocess
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 # FastAPI核心组件
@@ -1415,6 +1415,53 @@ Raises:
         )
 
 
+@router.post("/kgs/guide_p1_extract_by_dir/standalone")
+async def guide_p1_extract_by_dir_standalone(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        output_dir: Optional[str] = None,
+        if_del_task: bool = False,
+):
+    """
+    从本地目录抽取分点格式合规指引图谱，不使用 MySQL 或 MinIO。
+
+    抽取在后台执行，最终错误、警告和图谱统计写入日志及
+    ``<output_dir>/service_summary.json``。
+    """
+    try:
+        if not os.path.isdir(data_dir):
+            raise ValueError(f"分点格式合规指引目录不存在或不是目录: {data_dir}")
+        resolved_output_dir = output_dir or data_dir.rstrip("/\\") + "_guide_p1_output"
+        kg_graph_name = kg_service.generate_standalone_guide_p1_graph_name(data_dir)
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.guide_p1_extract_by_local_dir_standalone,
+            {
+                "guide_data_dir": data_dir,
+                "output_dir": resolved_output_dir,
+                "if_del_task": if_del_task,
+                "kg_graph_name": kg_graph_name,
+            },
+        )
+        return success_response(
+            msg="分点格式合规指引独立抽取任务开始执行",
+            data={
+                "kg_graph_name": kg_graph_name,
+                "output_dir": resolved_output_dir,
+                "summary_path": os.path.join(resolved_output_dir, "service_summary.json"),
+                "use_mysql": False,
+                "use_minio": False,
+                "strict_mode": True,
+            },
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行分点格式合规指引独立抽取任务失败: {str(e)}",
+            code=500,
+            data=None,
+        )
+
+
 @router.post("/kgs/{kg_id}/national_standard_extract_by_dir")
 async def national_standard_extract_by_dir(
         background_tasks: BackgroundTasks,
@@ -1425,14 +1472,15 @@ async def national_standard_extract_by_dir(
     """
 基于国家标准两阶段抽取流程的知识图谱入库接口。
 
-功能：对指定目录下的国家标准 MinerU/Markdown 解析数据进行知识图谱抽取，并保存至 Neo4j。
+功能：对指定目录下的国家标准 Markdown 解析数据进行知识图谱抽取，并保存至 Neo4j。
+该兼容管理接口仍使用 MySQL 记录知识图谱和抽取任务；无数据库部署应调用 standalone 接口。
 输入目录支持两种形式：
 1. 单份国家标准目录：目录下直接包含 full.md；
 2. 国家标准分类目录：目录下每个子目录是一份标准数据，且子目录中包含 full.md。
 
 流程：
-1. 一阶段以 full.md 为主解析标准文件信息、正文/附录树、表格、图片、引用候选；
-2. 二阶段调用 LLM 抽取标准文件、标准结构节点、术语定义、标准要求、指标限值、试验检测方法、引用标准、表格等图谱数据；
+1. 一阶段以 full.md 为主解析标准文件信息、正文/附录树和引用候选；
+2. 二阶段调用 LLM 抽取标准文件、标准结构节点、术语定义、标准要求、指标限值、试验检测方法和引用标准等文本图谱数据；
 3. 每份标准生成一个 task 子图并保存至 Neo4j；
 4. 所有成功 task 子图合并到目录级 KG 总图谱。
 
@@ -1456,6 +1504,45 @@ async def national_standard_extract_by_dir(
             msg=f"执行国家标准图谱抽取任务失败: {str(e)}",
             code=500,
             data=None
+        )
+
+
+@router.post("/kgs/national_standard_extract_by_dir/standalone")
+async def national_standard_extract_by_dir_standalone(
+        background_tasks: BackgroundTasks,
+        data_dir: str,
+        if_del_task: bool = False,
+        include_resource_descriptions: bool = False,
+):
+    """从本地国家标准目录抽取文本知识图谱，不使用 MySQL 或 MinIO。"""
+    try:
+        kg_graph_name = kg_service.generate_standalone_national_standard_graph_name(data_dir)
+        background_tasks.add_task(
+            kg_task_manager.run_async_function,
+            kg_service.national_standard_extract_by_local_dir,
+            {
+                "standard_data_dir": data_dir,
+                "if_del_task": if_del_task,
+                "db": None,
+                "use_mysql": False,
+                "kg_graph_name": kg_graph_name,
+                "include_resource_descriptions": include_resource_descriptions,
+            },
+        )
+        return success_response(
+            msg="国家标准独立抽取任务开始执行",
+            data={
+                "kg_graph_name": kg_graph_name,
+                "use_mysql": False,
+                "use_minio": False,
+                "include_resource_descriptions": include_resource_descriptions,
+            },
+        )
+    except Exception as e:
+        return error_response(
+            msg=f"执行国家标准独立抽取任务失败: {str(e)}",
+            code=500,
+            data=None,
         )
 
 

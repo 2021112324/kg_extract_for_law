@@ -71,14 +71,13 @@ example_for_standard_tree_node = [
 内容：
 电子电气产品污染控制标志应清晰可见、易于识别，并应标注在产品或产品说明中。
 若某种有害物质在该部件中含有，则该有害物质对应的含量标注为“×”。
-相关表格：
+资源描述临时上下文：
 [
   {
-    "table_id": "table_001",
-    "table_number": "表1",
-    "table_caption": "有害物质含有信息表",
-    "field_summary": ["部件名称", "铅(Pb)", "汞(Hg)"],
-    "output_hint": "完整表格内容已由一阶段表格节点保存；LLM输出时请使用table_id，不要复述完整HTML或Markdown。"
+    "resource_type": "table",
+    "number": "表1",
+    "title": "有害物质含有信息表",
+    "resource_text": "部件名称、铅(Pb)、汞(Hg)等有害物质含有信息"
   }
 ]
 """,
@@ -114,8 +113,6 @@ example_for_standard_tree_node = [
                 "attributes": {
                     "表号": "表1",
                     "表题": "有害物质含有信息表",
-                    "table_id": "table_001",
-                    "表格内容": "",
                     "表格描述": "该表用于标识各部件中有害物质的名称及含量。",
                 },
             },
