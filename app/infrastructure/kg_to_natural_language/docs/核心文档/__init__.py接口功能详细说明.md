@@ -9,14 +9,15 @@
 
 `kg_to_natural_language` 是知识图谱向自然语言知识条目转换的统一入口。调用方只需从包级入口导入函数，无需了解导出器、分类转换器、批处理器和风险指标处理器的内部目录结构。
 
-该模块提供以下六类能力：
+该模块提供以下七类能力：
 
 1. 从 Neo4j 按标签导出节点和关系，生成 `node.json`、`edge.json`。
 2. 将已有图谱 JSON 转换为自然语言知识条目，并生成统计文件。
 3. 自动识别中文法规、国家标准、英文法规和合规指引图谱，分发给对应转换器。
 4. 一次性处理“法律法规条款、国家标准、行政监管规则、英文法规、合规指引”五类图谱，发布分类知识条目。
-5. 根据三级风险指标映射文件生成知识条目，调用大模型计算关联度，并发布按关联度排序的最终知识文本。
-6. 根据指标树和阶段一成果，统计三级及上级风险指标的知识条目数量，并在父级范围内对重复映射文件去重。
+5. 根据来源文件地区映射，将英文法规知识分别发布为美国和欧盟及其成员国知识文件。
+6. 根据三级风险指标映射文件生成知识条目，调用大模型计算关联度，并发布按关联度排序的最终知识文本。
+7. 根据指标树和阶段一成果，统计三级及上级风险指标的知识条目数量，并在父级范围内对重复映射文件去重。
 
 模块主要处理 Neo4j 和本地文件，不依赖 MySQL、MinIO。只有风险知识关联度评分阶段需要访问大模型服务。
 
@@ -37,6 +38,7 @@
 | 单图完整处理 | `process_graph` | 从 Neo4j 导出指定标签，并自动路由完成转换 |
 | 中文法规兼容处理 | `process_graph_v2` | 从 Neo4j 导出指定标签，并固定使用中文法规 v2 转换器 |
 | 五类批处理 | `process_graphs_by_type` | 导出五类固定图谱，分别转换并统一发布 |
+| 英文法规地区发布 | `process_english_law_knowledge_by_region` | 将“英文法规”图谱知识按来源文件分为美国和欧盟及其成员国两类 |
 | 风险知识阶段一 | `generate_risk_indicator_knowledge` | 生成一个三级指标所映射文件的知识 JSON |
 | 风险知识阶段二 | `rank_risk_indicator_knowledge` | 对阶段一知识评分、排序并发布最终 TXT |
 | 单指标完整处理 | `process_risk_indicator_knowledge` | 顺序执行单指标的知识生成和评分排序 |
@@ -60,6 +62,7 @@ app\infrastructure\kg_to_natural_language
 | 转换元数据 | `temp/jsonl/<图谱类型>.jsonl` | 国家标准、英文法规和合规指引的逐条知识元数据 |
 | 转换统计 | `temp/csv/` | 知识类型、来源文件、跳过原因和关系问题等统计 |
 | 五类正式知识 | `data/type/` | 五个分类 TXT 及 `知识条目统计.json` |
+| 英文法规地区知识 | `data/type/地区/` | `美国.txt`、`欧盟及其成员国.txt` 及独立统计 JSON |
 | 单指标阶段一成果 | `temp/risk/<三级指标序号>/` | 每个映射文件的 JSON 和汇总 `all.json` |
 | 单指标最终成果 | `data/risk/<三级指标序号>/all.txt` | 按关联度排序的知识条目，仅保留知识正文 |
 | 全指标处理汇总 | `data/risk/处理汇总.json` | 全部三级指标的进度、成功、失败和跳过统计 |
@@ -99,6 +102,12 @@ process_graphs_by_type
         ├── 对应类别转换器
         ├── 结果一致性校验
         └── data/type 原子发布
+
+process_english_law_knowledge_by_region
+  ├── export_graph_to_directory("英文法规")
+  ├── convert_english_law_json_to_text
+  ├── 按 source_file 查询地区映射并校验数量守恒
+  └── data/type/地区 原子发布
 
 process_risk_indicator_knowledge
   ├── generate_risk_indicator_knowledge
@@ -412,6 +421,32 @@ data/type/知识条目统计.json
 批处理先在暂存目录完成五类导出、转换和结果一致性校验，全部成功后才替换正式成果。发布失败时尝试恢复上一次完整文件，避免出现只更新部分分类的状态。
 
 若某类别没有节点，会生成空 TXT 并记为零；若图谱存在节点但转换结果为零条知识，则视为结果异常。
+
+### 5.4 `process_english_law_knowledge_by_region(...)`
+
+**作用：** 从 Neo4j 导出“英文法规”标签，复用英文法规专用转换器生成一次知识及来源元数据，再依据来源文件映射将知识分为美国和欧盟及其成员国两类。
+
+```python
+from app.infrastructure.kg_to_natural_language import (
+    process_english_law_knowledge_by_region,
+)
+
+summary = process_english_law_knowledge_by_region()
+```
+
+默认读取 `data/json/filename到region映射.json`，默认发布：
+
+```text
+data/type/地区/美国.txt
+data/type/地区/欧盟及其成员国.txt
+data/type/地区/知识条目统计.json
+```
+
+接口也接受可选的 `mapping_path` 和 `output_dir` 关键字参数，便于测试或独立发布。映射键按文件基本名匹配，并兼容路径差异、首尾空白和大小写差异；地区值仅允许“美国”和“欧盟及其成员国”。
+
+地区分类只决定知识写入哪个文件，不改写知识正文，也不在地区间重新去重。接口会校验每条知识都具有来源且能唯一命中地区，并要求两类知识数量之和等于英文转换器的知识总数。映射缺失、地区非法、规范化键冲突、数量不守恒或发布失败时，整批任务失败，原有地区成果保持不变。
+
+该接口仅使用 Neo4j、本地映射文件和英文法规转换器，不调用 MySQL、MinIO 或大模型，也不会修改 `data/type/英文法规.txt`。它是独立接口，不会改变 `process_graphs_by_type()` 的处理范围和返回结构。
 
 ## 第六章 风险指标知识接口
 

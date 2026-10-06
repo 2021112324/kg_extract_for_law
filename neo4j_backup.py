@@ -10,7 +10,7 @@ AUTH = ("neo4j", "ug4GMLnArVaKz8z")   # 改成你的用户名密码
 
 # ========== 2. 导出配置 ==========
 BATCH_SIZE = 10000
-OUTPUT_DIR = r"D:\CogmAIT\neo4j数据备份\7月22日"
+OUTPUT_DIR = r"D:\CogmAIT\neo4j数据备份\9月24日"
 
 NODES_FILE = os.path.join(OUTPUT_DIR, "nodes.csv")
 RELS_FILE = os.path.join(OUTPUT_DIR, "rels.csv")

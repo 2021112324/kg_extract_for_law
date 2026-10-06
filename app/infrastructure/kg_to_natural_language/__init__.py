@@ -1,14 +1,16 @@
 """
 知识图谱导出与自然语言转换模块
 
-提供四个核心功能：
+提供六个核心功能：
 1. 从 Neo4j 按标签导出图谱数据为 JSON
 2. 将导出的 JSON 转换为自然语言知识条目
 3. 批量生成五类固定标签的知识条目及统计
-4. 按三级风险指标生成、评分并排序映射文件知识条目
-5. 统计三级及上级风险指标的知识条目数量
+4. 将英文法规知识按美国、欧盟及其成员国两个地区发布
+5. 按三级风险指标生成、评分并排序映射文件知识条目
+6. 统计三级及上级风险指标的知识条目数量
 
 主入口函数: process_graph(tag, graph_type)、process_graphs_by_type()、
+process_english_law_knowledge_by_region()、
 generate_risk_indicator_knowledge(indicator_number)、
 rank_risk_indicator_knowledge(indicator_number)、
 process_risk_indicator_knowledge(indicator_number)、
@@ -20,6 +22,7 @@ import sys
 
 from .batch import categories as typed_categories
 from .batch import processor as typed_batch
+from .batch import region_processor as typed_region_batch
 from .converters import base as converter
 from .converters import chinese_law as converter_v2
 from .converters import compliance_guide as converter_compliance_guide
@@ -27,6 +30,7 @@ from .converters import english_law as converter_english_law
 from .converters import national_standard as converter_national_standard
 from .converters import router as converter_unified
 from .converters import source_context
+from .economic_industry import classify_knowledge_by_industry
 from .graph import exporter
 from .risk import config as risk_indicator_config
 from .risk import generation as risk_knowledge_generation
@@ -53,6 +57,9 @@ convert_compliance_guide_json_to_text = (
 convert_graph_to_text = converter_unified.convert_graph_to_text
 detect_graph_type = converter_unified.detect_graph_type
 process_typed_knowledge_entries = typed_batch.process_typed_knowledge_entries
+process_english_law_knowledge_by_region = (
+    typed_region_batch.process_english_law_knowledge_by_region
+)
 generate_risk_indicator_knowledge = (
     risk_knowledge_generation.generate_risk_indicator_knowledge
 )
@@ -80,6 +87,7 @@ _LEGACY_MODULE_ALIASES = {
     "source_context": source_context,
     "exporter": exporter,
     "typed_batch": typed_batch,
+    "typed_region_batch": typed_region_batch,
     "typed_categories": typed_categories,
     "risk_graph_query": risk_graph_query,
     "risk_indicator_config": risk_indicator_config,
@@ -106,11 +114,13 @@ __all__ = [
     "process_graph",
     "process_graph_v2",
     "process_graphs_by_type",
+    "process_english_law_knowledge_by_region",
     "generate_risk_indicator_knowledge",
     "rank_risk_indicator_knowledge",
     "process_risk_indicator_knowledge",
     "process_all_risk_indicator_knowledge",
     "build_risk_indicator_knowledge_statistics",
+    "classify_knowledge_by_industry",
 ]
 
 

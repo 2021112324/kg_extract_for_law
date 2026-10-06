@@ -64,7 +64,22 @@
       "Bash(python -X utf8 -c ' *)",
       "Bash(python -X utf8 -c \"import sys,json; [print\\(json.loads\\(l\\)['content']\\) for l in sys.stdin]\")",
       "Bash(cd \"F:/企业大脑知识库系统/8.1项目/抽取代码/kg_extract_for_law/app/infrastructure/kg_to_natural_language\" && echo \"=== graph/exporter.py 关键部分 ===\" && grep -n \"def export_graph_to_directory\\\\|def export_graph\\\\|NEO4J\\\\|GraphDatabase\\\\|driver\\\\|URI\\\\|AUTH\\\\|os.getenv\\\\|_DEFAULT\" graph/exporter.py 2>&1 | head -30 && echo \"\" && echo \"=== .env 内容\\(Neo4j相关\\) ===\" && grep -i \"neo4j\\\\|bolt\\\\|NEO4J\" ../../../../.env 2>&1 | head -20)",
-      "Read(//f//**)"
+      "Read(//f//**)",
+      "Bash(xargs -0 '-I{}' sh -c 'sz=$\\(stat -c%s \"{}\" 2>/dev/null || echo 0\\); if [ \"$sz\" -gt 10485760 ]; then echo \"$sz {}\"; fi')",
+      "Bash(xargs -0 '-I{}' sh -c 'sz=$\\(stat -c%s \"{}\" 2>/dev/null || echo 0\\); if [ \"$sz\" -gt 1048576 ]; then echo \"$sz {}\"; fi')",
+      "Bash(git reset *)",
+      "Bash(git rm *)",
+      "Bash(git diff *)",
+      "Bash(awk '{print $5, $9}')",
+      "Bash(git ls-tree *)",
+      "Bash(git add *)",
+      "Bash(grep -E \"\\\\.zip$|/temp/|/logs/|logging\\\\.txt\")",
+      "Bash(git commit *)",
+      "Bash(python -X utf8 tests/dir_cache_status.py \"app/infrastructure/kg_to_natural_language\")",
+      "Bash(conda run *)",
+      "Bash(conda run -n cogmait312 python -X utf8 -c ' *)",
+      "Bash(rm -f _run_classify_tmp.py)",
+      "Bash(sc query *)"
     ]
   }
 }
