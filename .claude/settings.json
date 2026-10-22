@@ -79,7 +79,16 @@
       "Bash(conda run *)",
       "Bash(conda run -n cogmait312 python -X utf8 -c ' *)",
       "Bash(rm -f _run_classify_tmp.py)",
-      "Bash(sc query *)"
+      "Bash(sc query *)",
+      "Bash(rm -f _test_neo4j_conn_tmp.py)",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 10.160.22.79 -Port 7687 -WarningAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,TcpTestSucceeded\")",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 10.160.22.79 -Port 7474 -WarningAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,TcpTestSucceeded\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/migrator_neo4j.py', encoding='utf-8'\\).read\\(\\)\\); print\\('语法检查通过'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('tests/migrate_neo4j_label.py', encoding='utf-8'\\).read\\(\\)\\); print\\('语法检查通过'\\)\")",
+      "Bash(rm -f _test_model_tmp.py)",
+      "Bash(ping -n 2 222.171.219.26)",
+      "Bash(powershell -Command \"Test-NetConnection -ComputerName 222.171.219.26 -Port 20001 -WarningAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,TcpTestSucceeded\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app/infrastructure/risk_map/run_mapping.py', encoding='utf-8'\\).read\\(\\)\\); print\\('语法检查通过'\\)\")"
     ]
   }
 }

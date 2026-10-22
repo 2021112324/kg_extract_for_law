@@ -16,6 +16,9 @@ from neo4j import Driver, GraphDatabase
 from neo4j.graph import Node, Relationship
 
 from app.core.config import settings
+from app.infrastructure.graph_storage.subgraph_records import (
+    node_to_dict, relationship_to_dict, read_records,
+)
 
 from ..batch.categories import ALLOWED_TYPED_GRAPH_LABELS
 
@@ -35,26 +38,12 @@ def _get_driver() -> Driver:
 
 def _node_to_dict(node: Node) -> dict[str, Any]:
     """将 Neo4j Node 对象转换为导出格式的字典。"""
-    return {
-        "identity": node.id,
-        "labels": list(node.labels),
-        "properties": dict(node.items()),
-        "elementId": node.element_id,
-    }
+    return node_to_dict(node)
 
 
 def _relationship_to_dict(rel: Relationship) -> dict[str, Any]:
     """将 Neo4j Relationship 对象转换为导出格式的字典。"""
-    return {
-        "identity": rel.id,
-        "start": rel.start_node.id,
-        "end": rel.end_node.id,
-        "type": rel.type,
-        "properties": dict(rel.items()),
-        "elementId": rel.element_id,
-        "startNodeElementId": rel.start_node.element_id,
-        "endNodeElementId": rel.end_node.element_id,
-    }
+    return relationship_to_dict(rel)
 
 
 def clear_temp_dir() -> None:
@@ -95,23 +84,14 @@ def _export_graph_to_directory(
 
     try:
         with driver.session(database=settings.NEO4J_DATABASE) as session:
-            node_query = f"MATCH (n:`{tag}`) RETURN n"
-            nodes = [
-                {"n": _node_to_dict(record["n"])}
-                for record in session.run(node_query)
-            ]
+            nodes, edges = read_records(
+                session, tag, internal_only=internal_relationships_only,
+                node_converter=_node_to_dict, edge_converter=_relationship_to_dict,
+            )
             node_path = output_dir / "node.json"
             _write_json(node_path, nodes)
             logger.info("已导出 %s 个节点 -> %s", len(nodes), node_path)
 
-            if internal_relationships_only:
-                edge_query = f"MATCH (n:`{tag}`)-[p]->(q:`{tag}`) RETURN p"
-            else:
-                edge_query = f"MATCH (n:`{tag}`)-[p]->(q) RETURN p"
-            edges = [
-                {"p": _relationship_to_dict(record["p"])}
-                for record in session.run(edge_query)
-            ]
             edge_path = output_dir / "edge.json"
             _write_json(edge_path, edges)
             logger.info("已导出 %s 个关系 -> %s", len(edges), edge_path)

@@ -19,6 +19,7 @@ lib/
 lib64/
 parts/
 temp/
+output/
 sdist/
 var/
 wheels/

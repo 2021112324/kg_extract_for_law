@@ -2,10 +2,18 @@
 Neo4j图数据库适配器
 """
 import logging
+import copy
+import json
 from typing import Dict, Any, Optional
 
 from neo4j import GraphDatabase, Driver
 from neo4j.exceptions import Neo4jError
+from neo4j import READ_ACCESS, unit_of_work
+
+from .subgraph_records import (
+    SubgraphError, digest, encode, graph_content, identifier, read_records,
+    snapshot_hash, validate_snapshot,
+)
 
 from .base import (
     IGraphStorage,
@@ -29,7 +37,8 @@ class Neo4jAdapter(IGraphStorage):
             uri: str = None,
             username: str = None,
             password: str = None,
-            database: str = "neo4j"
+            database: str = "neo4j",
+            driver_options: Optional[dict] = None
     ):
         """
         初始化Neo4j适配器
@@ -45,6 +54,7 @@ class Neo4jAdapter(IGraphStorage):
         self.password = password if password else "testForV2"
         self.database = database if database else "neo4j"
         self.driver: Optional[Driver] = None
+        self.driver_options = dict(driver_options or {})
 
     def _sanitize_property_name(self, prop_name: str) -> str:
         """
@@ -134,7 +144,8 @@ class Neo4jAdapter(IGraphStorage):
         try:
             self.driver = GraphDatabase.driver(
                 self.uri,
-                auth=(self.username, self.password)
+                auth=(self.username, self.password),
+                **self.driver_options
             )
             return self.is_connected()
         except Exception as e:
@@ -179,6 +190,280 @@ class Neo4jAdapter(IGraphStorage):
         except Exception as e:
             logger.error(f"Neo4j连接测试失败: {str(e)}")
             return False
+
+    def verify_subgraph_support(self):
+        if not self.driver:
+            raise SubgraphError("driver_not_connected")
+        with self.driver.session(database=self.database, default_access_mode=READ_ACCESS) as session:
+            version = session.execute_read(lambda tx: tx.run(
+                "// risk_map:version\nCALL dbms.components() YIELD name, versions "
+                "WHERE name='Neo4j Kernel' RETURN versions[0] AS version"
+            ).single()["version"])
+        if int(version.split(".")[0]) < 5:
+            raise SubgraphError("neo4j_5_or_newer_required")
+        return version
+
+    def _read_subgraph_tx(self, tx, tag, max_nodes, max_relationships, max_bytes):
+        nodes, edges = read_records(tx, tag, max_nodes=max_nodes, max_relationships=max_relationships, max_bytes=max_bytes)
+        boundary = tx.run(
+            "// risk_map:boundary\nMATCH (a)-[r]->(b) "
+            "WHERE ($tag IN labels(a)) <> ($tag IN labels(b)) RETURN count(r) AS count", tag=tag,
+        ).single()["count"]
+        result = {"database": self.database, "source_label": tag,
+                  "nodes": nodes, "edges": edges, "boundary_count": boundary,
+                  "scope_counts": self._scope_counts_tx(tx, tag)}
+        validate_snapshot(result)
+        size = len(json.dumps(encode(result), ensure_ascii=False).encode("utf-8"))
+        if size > max_bytes:
+            raise SubgraphError("snapshot_byte_budget_exceeded")
+        result["fingerprint"] = snapshot_hash(result)
+        result["encoded_bytes"] = size
+        return result
+
+    def read_subgraph_records(self, graph_tag, *, fetch_size=1000, max_nodes=50000,
+                              max_relationships=200000, max_bytes=268435456, timeout=120):
+        """Strict full export. Unlike run_query, failures are never empty results."""
+        identifier(graph_tag)
+        if not self.driver:
+            raise SubgraphError("driver_not_connected")
+        if any(type(v) is not int or v <= 0 for v in (fetch_size, max_nodes, max_relationships, max_bytes)):
+            raise SubgraphError("invalid_read_budget")
+        with self.driver.session(database=self.database, default_access_mode=READ_ACCESS,
+                                 fetch_size=fetch_size) as session:
+            return session.execute_read(unit_of_work(timeout=timeout)(lambda tx: self._read_subgraph_tx(
+                tx, graph_tag, max_nodes, max_relationships, max_bytes)))
+
+    def _scope_counts_tx(self, tx, target):
+        nodes = tx.run("// risk_map:occupied_nodes\nMATCH (n) WHERE $tag IN labels(n) OR n.graph_tag=$tag "
+                       "RETURN count(n) AS count", tag=target).single()["count"]
+        edges = tx.run("// risk_map:occupied_edges\nMATCH (a)-[r]->(b) "
+                       "WHERE r.graph_tag=$tag OR ($tag IN labels(a) AND $tag IN labels(b)) "
+                       "RETURN count(r) AS count", tag=target).single()["count"]
+        return {"nodes": nodes, "relationships": edges}
+
+    def _assert_target_empty_tx(self, tx, target):
+        if any(self._scope_counts_tx(tx, target).values()):
+            raise SubgraphError("target_graph_already_exists")
+
+    def check_subgraph_destination(self, target):
+        identifier(target)
+        if target == "_RiskMapPublication":
+            raise SubgraphError("reserved_target_label")
+        with self.driver.session(database=self.database, default_access_mode=READ_ACCESS) as session:
+            session.execute_read(lambda tx: self._assert_target_empty_tx(tx, target))
+
+    def _verify_copy_tx(self, tx, record, *, max_nodes, max_relationships, max_bytes):
+        snapshot = self._read_subgraph_tx(tx, record["target_label"], max_nodes, max_relationships, max_bytes)
+        def inverse(pairs, expected):
+            if (not isinstance(pairs, list) or len(pairs) != expected
+                    or any(not isinstance(p, (list, tuple)) or len(p) != 2
+                           or any(not isinstance(v, str) or not v for v in p) for p in pairs)
+                    or len({p[0] for p in pairs}) != len(pairs)
+                    or len({p[1] for p in pairs}) != len(pairs)):
+                raise SubgraphError("publication_identity_map_invalid")
+            return {physical: logical for logical, physical in pairs}
+        nodes = inverse(record["node_map"], record["node_count"])
+        edges = inverse(record["edge_map"], record["relationship_count"])
+        scope = self._scope_counts_tx(tx, record["target_label"])
+        if (len(snapshot["nodes"]) != len(nodes) or len(snapshot["edges"]) != len(edges)
+                or snapshot["boundary_count"] or scope != {"nodes": len(nodes), "relationships": len(edges)}):
+            raise SubgraphError("publication_membership_changed")
+        try:
+            actual = graph_content(snapshot, nodes, edges)
+        except KeyError as exc:
+            raise SubgraphError("publication_physical_members_changed") from exc
+        if digest(actual) != record["target_hash"]:
+            raise SubgraphError("publication_content_changed")
+
+    def inspect_subgraph_publication(self, target, *, manifest=None, timeout=120,
+                                    max_nodes=50000, max_relationships=200000, max_bytes=268435456):
+        identifier(target)
+        with self.driver.session(database=self.database, default_access_mode=READ_ACCESS) as session:
+            def inspect(tx):
+                if manifest is None:
+                    return {"status": "unverified", "inspection_status": "unverified",
+                            "target_label": target, "diagnostic_counts": self._scope_counts_tx(tx, target)}
+                if (manifest.get("commit_confirmed") is not True or manifest.get("target_label") != target
+                        or manifest.get("database") != self.database
+                        or manifest.get("status") not in {"committed_complete", "committed_partial"}):
+                    raise SubgraphError("invalid_local_publication_manifest")
+                self._verify_copy_tx(tx, manifest, max_nodes=max_nodes,
+                                     max_relationships=max_relationships, max_bytes=max_bytes)
+                return {k: manifest[k] for k in (
+                    "status", "publish_id", "target_label", "source_label", "source_hash", "target_hash", "database",
+                    "nodes_created", "relationships_created")} | {"inspection_status": "verified"}
+            return session.execute_read(unit_of_work(timeout=timeout)(inspect))
+
+    def create_subgraph_copy(self, records, target_label, *, source_label, source_hash, publish_id,
+                             completeness="partial", batch_size=500, timeout=120,
+                             max_nodes=50000, max_relationships=200000, max_bytes=268435456,
+                             preserve_extra_labels=False):
+        """One explicit transaction. No registry, schema operations or automatic write replay."""
+        tag = identifier(target_label)
+        if target_label in {source_label, "_RiskMapPublication"}:
+            raise SubgraphError("source_target_label_conflict")
+        if (not isinstance(publish_id, str) or not publish_id or completeness not in {"complete", "partial"}
+                or type(batch_size) is not int or batch_size <= 0):
+            raise SubgraphError("invalid_publication_options")
+        plan = copy.deepcopy(records)
+        validate_snapshot(plan)
+        if len(plan["nodes"]) > max_nodes or len(plan["edges"]) > max_relationships:
+            raise SubgraphError("atomic_budget_exceeded")
+        if len(json.dumps(encode(plan), ensure_ascii=False).encode("utf-8")) > max_bytes:
+            raise SubgraphError("atomic_byte_budget_exceeded")
+        for row in plan["nodes"]:
+            labels = row["n"]["labels"]
+            scope_valid = (target_label in labels and source_label not in labels
+                           if preserve_extra_labels else labels == [target_label])
+            if not scope_valid or row["n"]["properties"].get("graph_tag") != target_label:
+                raise SubgraphError("invalid_target_node_scope")
+        if any(r["p"]["properties"].get("graph_tag") != target_label for r in plan["edges"]):
+            raise SubgraphError("invalid_target_relationship_scope")
+        expected = graph_content(plan)
+        base = {"publish_id": publish_id, "target_label": target_label, "source_label": source_label,
+                "source_hash": source_hash, "database": self.database}
+        tx = None
+        commit_started = False
+        commit_acknowledged = False
+        rollback_confirmed = False
+        try:
+            with self.driver.session(database=self.database) as session:
+                try:
+                    tx = session.begin_transaction(timeout=timeout)
+                    self._assert_target_empty_tx(tx, target_label)
+                    node_map, edge_map = {}, {}
+                    groups = {}
+                    for row in expected["nodes"]:
+                        group = tuple(sorted(row["labels"])) if preserve_extra_labels else (target_label,)
+                        groups.setdefault(group, []).append(row)
+                    for labels, members in groups.items():
+                        label_expression = ":".join(identifier(label) for label in labels)
+                        for offset in range(0, len(members), batch_size):
+                            rows = members[offset:offset + batch_size]
+                            result = list(tx.run(f"// risk_map:create_nodes\nUNWIND $rows AS row CREATE (n:{label_expression}) "
+                                                 "SET n=row.properties RETURN row.key AS key, elementId(n) AS id", rows=rows))
+                            if len(result) != len(rows) or {r["key"] for r in result} != {r["key"] for r in rows}:
+                                raise SubgraphError("node_creation_incomplete")
+                            node_map.update((r["key"], r["id"]) for r in result)
+                    for kind in sorted({r["type"] for r in expected["edges"]}):
+                        rows = [{**r, "start": node_map[r["start"]], "end": node_map[r["end"]]}
+                                for r in expected["edges"] if r["type"] == kind]
+                        for offset in range(0, len(rows), batch_size):
+                            batch = rows[offset:offset + batch_size]
+                            result = list(tx.run(
+                                f"// risk_map:create_edges\nUNWIND $rows AS row MATCH (a:{tag}), (b:{tag}) "
+                                "WHERE elementId(a)=row.start AND elementId(b)=row.end "
+                                f"CREATE (a)-[r:{identifier(kind)}]->(b) SET r=row.properties "
+                                "RETURN row.key AS key, elementId(r) AS id", rows=batch))
+                            if len(result) != len(batch) or {r["key"] for r in result} != {r["key"] for r in batch}:
+                                raise SubgraphError("relationship_creation_incomplete")
+                            edge_map.update((r["key"], r["id"]) for r in result)
+                    if set(node_map) & set(node_map.values()) or set(edge_map) & set(edge_map.values()):
+                        raise SubgraphError("source_physical_objects_reused")
+                    record = {**base, "target_hash": digest(expected), "status": "committed_" + completeness,
+                              "commit_confirmed": True, "node_count": len(node_map), "relationship_count": len(edge_map),
+                              "nodes_created": len(node_map), "relationships_created": len(edge_map),
+                              "node_map": sorted(node_map.items()), "edge_map": sorted(edge_map.items())}
+                    self._verify_copy_tx(tx, record, max_nodes=max_nodes,
+                                         max_relationships=max_relationships, max_bytes=max_bytes)
+                    commit_started = True
+                    tx.commit()
+                    commit_acknowledged = True
+                    # Cleanup errors after an acknowledged commit must not negate it.
+                    try:
+                        tx.close()
+                    except Exception:
+                        record["transaction_cleanup_error"] = True
+                    return record
+                except Exception as exc:
+                    code = getattr(exc, "code", "") or type(exc).__name__
+                    error = str(exc) if isinstance(exc, SubgraphError) else str(code)
+                    if commit_started:
+                        return {**base, "status": "commit_unknown", "error": "commit_acknowledgement_unconfirmed"}
+                    if tx is None:
+                        return {**base, "status": "failed", "rollback_confirmed": True, "error": error}
+                    try:
+                        tx.rollback()
+                        rollback_confirmed = True
+                    except Exception:
+                        return {**base, "status": "commit_unknown", "error": "rollback_acknowledgement_unconfirmed"}
+                    return {**base, "status": "failed", "rollback_confirmed": True, "error": error}
+        except Exception as exc:
+            if commit_acknowledged:
+                return {**record, "session_cleanup_error": True}
+            if tx is not None and not rollback_confirmed:
+                return {**base, "status": "commit_unknown", "error": "session_exit_unconfirmed"}
+            return {**base, "status": "failed", "rollback_confirmed": tx is None or rollback_confirmed,
+                    "error": type(exc).__name__}
+
+    def read_subgraph_articles(self, target_label, ids, *, timeout=120):
+        """Read a frozen physical batch, never paginate a mutable property selection."""
+        tag = identifier(target_label)
+        if len(ids) != len(set(ids)):
+            raise SubgraphError("duplicate_article_identity")
+        with self.driver.session(database=self.database, default_access_mode=READ_ACCESS) as session:
+            def read(tx):
+                rows = list(tx.run(f"// risk_map:read_articles\nUNWIND $ids AS id MATCH (n:{tag}) "
+                                   "WHERE elementId(n)=id AND n.graph_tag=$tag AND n.label=$kind "
+                                   "RETURN elementId(n) AS id, properties(n) AS properties",
+                                   ids=ids, tag=target_label, kind="法条"))
+                if len(rows) != len(ids) or {r["id"] for r in rows} != set(ids):
+                    raise SubgraphError("article_inventory_changed")
+                return {r["id"]: dict(r["properties"]) for r in rows}
+            return session.execute_read(unit_of_work(timeout=timeout)(read))
+
+    def update_subgraph_article_properties(self, target_label, rows, *, timeout=120):
+        """Restricted physical-member patch, one explicit transaction, no write replay."""
+        tag = identifier(target_label)
+        allowed = {"三级指标映射候选列表", "三级指标映射列表", "三级指标映射状态",
+                   "三级指标映射Top5", "三级指标映射版本"}
+        if target_label.startswith("_RiskMap") or not isinstance(rows, list) or not rows:
+            raise SubgraphError("invalid_mapping_patch")
+        ids = [row.get("id") for row in rows]
+        if (any(not isinstance(i, str) or not i for i in ids) or len(set(ids)) != len(ids)
+                or any(not isinstance(row.get("properties"), dict)
+                       or not row["properties"] or set(row["properties"]) - allowed for row in rows)):
+            raise SubgraphError("invalid_mapping_patch")
+        for row in rows:
+            for key, value in row["properties"].items():
+                if value is None:
+                    continue
+                if key in {"三级指标映射Top5", "三级指标映射版本", "三级指标映射状态"}:
+                    raise SubgraphError("legacy_mapping_fields_removal_only")
+                if key in {"三级指标映射候选列表", "三级指标映射列表"}:
+                    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+                        raise SubgraphError("invalid_mapping_list_type")
+        started = False
+        acknowledged = False
+        result = None
+        try:
+            with self.driver.session(database=self.database) as session:
+                with session.begin_transaction(timeout=timeout) as tx:
+                    members = list(tx.run(
+                        f"// risk_map:patch_members\nUNWIND $ids AS id MATCH (n:{tag}) "
+                        "WHERE elementId(n)=id AND n.graph_tag=$tag AND n.label=$kind "
+                        "RETURN elementId(n) AS id", ids=ids, tag=target_label, kind="法条"))
+                    if len(members) != len(ids) or {r["id"] for r in members} != set(ids):
+                        raise SubgraphError("mapping_member_mismatch")
+                    updated = list(tx.run(
+                        f"// risk_map:patch_articles\nUNWIND $rows AS row MATCH (n:{tag}) "
+                        "WHERE elementId(n)=row.id AND n.graph_tag=$tag AND n.label=$kind "
+                        "SET n += row.properties RETURN elementId(n) AS id",
+                        rows=rows, tag=target_label, kind="法条"))
+                    if len(updated) != len(ids) or {r["id"] for r in updated} != set(ids):
+                        raise SubgraphError("mapping_update_incomplete")
+                    # += merges property maps; each list VALUE is replaced, never appended.
+                    started = True
+                    tx.commit()
+                    acknowledged = True
+                    result = {"status": "committed", "commit_confirmed": True, "ids": sorted(ids)}
+            return result
+        except Exception as exc:
+            if acknowledged:
+                return {**result, "cleanup_error": True}
+            return {"status": "commit_unknown" if started else "failed",
+                    "commit_confirmed": False,
+                    "error": str(exc) if isinstance(exc, SubgraphError) else type(exc).__name__}
 
     def run_query(self, query: str, params: dict = None) -> list:
         """
