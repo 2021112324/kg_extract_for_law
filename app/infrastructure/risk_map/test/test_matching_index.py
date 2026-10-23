@@ -24,14 +24,15 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(attachment_ids(index, ["测试法.txt"], "美国"), [])
         self.assertNotEqual(revision_family(normalize_document_name("测试法（2024年试行）"))[0], "测试法")
 
-    def test_multiple_versions_all_sources_merge_not_random(self):
+    def test_multiple_version_fallback_is_ambiguous_not_merged(self):
         data = tree()
         mapping = data["产品法律风险"]["一级"]["二级"]["指标1"]["映射文件"]["中国"]
         mapping["测试法（2023年修订）"] = {"原始文本": "旧版本", "已找到": "", "依据文件名": "测试法（2023年修订）", "知识依据": TEXT}
         index = build_tree_index(data, Diagnostics())
-        ids = attachment_ids(index, ["测试法（2024修正）.txt"], "中国")
-        self.assertEqual(len(ids), 8)
-        self.assertEqual(len({index.attachments[i].indicator_number for i in ids}), 7)
+        # Scoped identity policy no longer treats a revision family as edition equivalence.
+        with self.assertRaises(DocumentAmbiguity):
+            attachment_ids(index, ["测试法（2024修正）.txt"], "中国")
+        self.assertEqual(len(attachment_ids(index, ["测试法"], "中国")), 7)
 
     def test_conflicting_formal_indicator_number_rejected(self):
         data = tree()

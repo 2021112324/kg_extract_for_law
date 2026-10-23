@@ -30,6 +30,19 @@ class FileAttachment:
     tree_path: tuple[str, ...]
     identity: tuple[str, str]
     provenance: list[dict] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    source_verification: dict = field(default_factory=lambda: {
+        "verified": False, "detail": "provenance_not_configured"})
+
+
+@dataclass(frozen=True)
+class NameBinding:
+    attachment_id: int
+    region: str
+    identity: tuple[str, str]
+    role: str
+    original_name: str
+    normalized_name: str
 
 
 @dataclass
@@ -50,3 +63,6 @@ class TreeIndex:
     families: dict[tuple[str, str], set[tuple[str, str]]] = field(default_factory=dict)
     files: dict[tuple[str, str], list[int]] = field(default_factory=dict)
     pools: dict[tuple[str, str, str, str], EvidencePool] = field(default_factory=dict)
+    name_bindings: dict[tuple[str, str], list[NameBinding]] = field(default_factory=dict)
+    family_bindings: dict[tuple[str, str], list[NameBinding]] = field(default_factory=dict)
+    input_stats: dict = field(default_factory=dict)

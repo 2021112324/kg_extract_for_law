@@ -88,7 +88,11 @@
       "Bash(rm -f _test_model_tmp.py)",
       "Bash(ping -n 2 222.171.219.26)",
       "Bash(powershell -Command \"Test-NetConnection -ComputerName 222.171.219.26 -Port 20001 -WarningAction SilentlyContinue | Select-Object RemoteAddress,RemotePort,TcpTestSucceeded\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('app/infrastructure/risk_map/run_mapping.py', encoding='utf-8'\\).read\\(\\)\\); print\\('语法检查通过'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app/infrastructure/risk_map/run_mapping.py', encoding='utf-8'\\).read\\(\\)\\); print\\('语法检查通过'\\)\")",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_923/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_923/指标文件/处理后的指标文件/三级指标映射/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_923/指标文件/**)",
+      "Read(//d/CogmAIT/8.1项目/8.1数据/合规风险指标映射数据/v1_923/指标文件/处理后的指标文件/**)"
     ]
   }
 }

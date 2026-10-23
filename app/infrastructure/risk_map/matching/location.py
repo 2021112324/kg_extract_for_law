@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from dataclasses import asdict
 
 from ..common.indicators import encode_candidates
 from ..common.model_client import ModelFailure, parse_json
@@ -11,7 +12,9 @@ from .evidence_parser import HEAD, LOCATOR
 
 
 class DocumentAmbiguity(ValueError):
-    pass
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
 
 SYSTEM = """判断同一法规的描述是否包含给定法条可识别的全部或局部内容，不要求摘录完整。
 编号仅是线索，不能仅凭同号或相同主题匹配；编号变更不排除明确内容对应。
@@ -66,29 +69,51 @@ def resolve_attachments(index, filenames, region):
     sources = [{"original_name": raw, "normalized_name": name,
                 "family": revision_family(name)[0], "revision_annotations": revision_family(name)[1]}
                for raw, name in names]
-    identities = set()
-    method = "unmatched"
-    for tier in ("exact", "revision_family", "country_prefix"):
-        for _, name in names:
-            if tier == "exact":
-                identities.update(index.names.get((region, name), ()))
-            elif tier == "revision_family":
-                identities.update(index.families.get((region, revision_family(name)[0]), ()))
-            else:
-                for variant in country_variants(name, region):
-                    identities.update(index.names.get((region, variant), ()))
-                    identities.update(index.families.get((region, revision_family(variant)[0]), ()))
-        if identities:
-            method = tier
-            break
-    # Contradictory source aliases cannot be hidden by a stronger tier on one alias.
-    source_families = {country_family(name, region) for _, name in names}
-    identity_families = {country_family(identity[1], region) for identity in identities}
-    if len(source_families) > 1 or len(identity_families) > 1:
-        raise DocumentAmbiguity("来源或命中名称指向不同法规文件，不能合并: " +
-                                repr(sorted(source_families | identity_families))[:600])
+    tiers = ("exact", "revision_family", "country_prefix")
+    hits, identities = [], set()
+    for raw, name in names:
+        levels = [index.name_bindings.get((region, name), []),
+                  index.family_bindings.get((region, revision_family(name)[0]), []),
+                  [b for v in country_variants(name, region)
+                   for b in (*index.name_bindings.get((region, v), []),
+                             *index.family_bindings.get((region, revision_family(v)[0]), []))]]
+        found, method = [], "unmatched"
+        for tier, bindings in zip(tiers, levels):
+            if bindings:
+                found = sorted(set(bindings), key=lambda b: (b.attachment_id, b.role, b.original_name))
+                method = tier
+                break
+        matches = {b.identity for b in found}
+        identities.update(matches)
+        hits.append({"original_name": raw, "normalized_name": name, "method": method,
+                     "matched_identities": sorted(matches), "bindings": [asdict(b) for b in found]})
+    methods = [hit["method"] for hit in hits if hit["method"] != "unmatched"]
+    info = {"method": max(methods, key=tiers.index) if methods else "unmatched", "sources": sources,
+            "matched_identities": sorted(identities), "name_hits": hits}
+
+    def conflict(reason):
+        info["conflict"] = reason
+        raise DocumentAmbiguity("来源或命中名称存在文件冲突: " + reason, info)
+
+    if len(identities) > 1:
+        conflict("multiple_file_identities")
+    # A declared alias is evidence, not permission to join incompatible input editions.
+    versions = {tuple(re.findall(r"(?:19|20)\d{2}", " ".join(s["revision_annotations"]))) for s in sources}
+    versions.discard(())
+    if len(versions) > 1:
+        conflict("contradictory_input_versions")
+    if identities:
+        identity = next(iter(identities))
+        allowed_families = {country_family(normalize_document_name(name), region)
+            for aid in index.files[identity] for name in (index.attachments[aid].mapped_name,
+                index.attachments[aid].basis_name, *index.attachments[aid].aliases) if name.strip()}
+        if any(hit["method"] == "unmatched" and country_family(hit["normalized_name"], region) not in allowed_families
+               for hit in hits):
+            conflict("unexplained_source_name")
+    elif len({country_family(name, region) for _, name in names}) > 1:
+        conflict("unresolved_source_names")
     ids = sorted({aid for identity in identities for aid in index.files[identity]})
-    return ids, {"method": method, "sources": sources, "matched_identities": sorted(identities)}
+    return ids, info
 
 
 def attachment_ids(index, filenames, region):
@@ -102,17 +127,23 @@ async def locate_article(article, index, region, session):
         result["file_match"] = file_match
     except DocumentAmbiguity as exc:
         return {**result, "status": "文件歧义", "coverage_complete": False,
+                "file_match": exc.details,
                 "errors": [{"kind": "file_ambiguity", "error": str(exc)}],
                 "properties": {CANDIDATES: [], FINAL: None}}
     if not ids:
         return {**result, "status": "文件未匹配", "properties": {CANDIDATES: [], FINAL: None}}
     grouped = {}
     result["skipped_attachment_ids"] = []
+    result["skipped_attachments"] = []
     for aid in ids:
         attachment = index.attachments[aid]
         units = descriptions(attachment.knowledge)
         if not units:
             result["skipped_attachment_ids"].append(aid)
+            verification = attachment.source_verification
+            result["skipped_attachments"].append({"attachment_id": aid,
+                "reason": verification.get("empty_reason", "empty_reason_unverified"),
+                "reason_detail": verification.get("detail", "provenance_not_configured")})
             continue
         for unit in units:
             grouped.setdefault(unit, []).append(aid)

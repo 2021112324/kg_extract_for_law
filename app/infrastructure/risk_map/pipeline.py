@@ -11,13 +11,13 @@ from ..graph_storage.subgraph_records import decode, digest, encode, snapshot_ha
 from .common.io import content_hash, file_hash
 from .common.model_client import ModelSession, OpenAICompatibleClient, redact
 from .common.progress import set_step, update_progress
-from .common.run_inputs import code_identity, empty_attachments, freeze_inputs, skip_summary
+from .common.run_inputs import code_identity, empty_attachments, freeze_inputs, provenance_identity, skip_summary
 from .common.stats import Diagnostics
 from .config import CANDIDATES, FINAL, MANAGED, PROTOCOL, REVIEW_PROTOCOL
 from .local_records import RunRecords, target_lock, unresolved_runs
 from .matching.location import locate_article, SYSTEM as MATCH_SYSTEM
 from .neo4j_bridge import copy_plan, freeze_articles, verify_target
-from .preparation.tree_index import build_tree_index
+from .preparation.tree_index import attach_provenance, build_tree_index
 from .review.review import EXAMPLES, review_article, SYSTEM as REVIEW_SYSTEM
 
 logger = logging.getLogger(__name__)
@@ -46,12 +46,24 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     if action in {"resume", "inspect"} and not run_id:
         raise ValueError("resume/inspect必须提供本次新协议的RUN_ID")
     root, tree = Path(config.output_root).resolve(), Path(config.tree_path).resolve()
-    if tree == root or root in tree.parents or tree in root.parents:
-        raise ValueError("输出目录必须与指标树输入分离")
+    source_path = Path(config.provenance_path).resolve() if config.provenance_path is not None else None
+    for input_path in (tree, source_path):
+        if input_path is not None and (input_path == root or root in input_path.parents or input_path in root.parents):
+            raise ValueError("输出目录必须与指标树及来源明细输入分离")
+    if source_path == tree:
+        raise ValueError("来源明细不能与指标树使用同一文件")
     tree_bytes = tree.read_bytes()
     tree_digest = hashlib.sha256(tree_bytes).hexdigest()
     diagnostics = Diagnostics()
     index = build_tree_index(json.loads(tree_bytes.decode("utf-8-sig")), diagnostics)
+    provenance_bytes = None
+    if source_path is not None:
+        try:
+            provenance_bytes = source_path.read_bytes()
+            source_details = json.loads(provenance_bytes.decode("utf-8-sig"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ValueError("来源明细无法读取或解析: " + type(exc).__name__) from None
+        attach_provenance(index, source_details, diagnostics)
     identity = code_identity()
     skipped = empty_attachments(index, config.region)
     connection = content_hash([getattr(adapter, "uri", "injected"), getattr(adapter, "username", ""), adapter.database])
@@ -59,11 +71,17 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                "tree_hash": tree_digest, "connection": connection,
                "prompt_hash": content_hash([MATCH_SYSTEM, REVIEW_SYSTEM, EXAMPLES]), "review_protocol": REVIEW_PROTOCOL,
                "runtime_hash": identity["runtime_hash"]}
+    binding["provenance"] = provenance_identity(provenance_bytes, config)
     own_client = None
     session = None
     records = None
+    record_writable = action == "map"
     summary = {"copy_status": "not_started", "mapping_status": "not_started",
-               "target_label": config.target_label, "source_label": config.source_label}
+               "target_label": config.target_label, "source_label": config.source_label,
+               "input_diagnostics": index.input_stats}
+    logger.info("[输入准备] 指标=%s 挂接=%s 含别名挂接=%s 来源核验=%s",
+                len(index.indicators), len(index.attachments), index.input_stats.get("alias_attachments", 0),
+                index.input_stats["provenance"])
     options = dict(config.read_options)
     timeout = options.get("timeout", 600)
     with target_lock(root, [connection, config.target_label]):
@@ -75,7 +93,8 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     raise ValueError("源图谱为空，请检查源标签")
                 await db_call(adapter.check_subgraph_destination, config.target_label)
                 return {**summary, "status": "prepared", "nodes": len(source["nodes"]),
-                        "relationships": len(source["edges"]), "indicators": len(index.indicators)}, 0
+                        "relationships": len(source["edges"]), "indicators": len(index.indicators),
+                        "tree_diagnostics": diagnostics.to_dict()}, 0
             if action == "map":
                 if unresolved_runs(root, connection, config.target_label):
                     raise WriteUncertain("同一目标存在历史未决本地写入；禁止通过新run_id绕过核对")
@@ -83,7 +102,9 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 summary["run_id"] = records.run_id
                 input_hash = freeze_inputs(records, tree_bytes, config, {"matching": MATCH_SYSTEM, "review": REVIEW_SYSTEM,
                                                            "review_examples": EXAMPLES},
-                              identity, skipped)
+                              identity, skipped, provenance_bytes=provenance_bytes,
+                              verification=[{"attachment_id": aid, **a.source_verification}
+                                            for aid, a in enumerate(index.attachments)])
                 records.save("run.json", {**binding, "run_id": records.run_id,
                     "source_label": config.source_label, "target_label": config.target_label,
                     "input_manifest_hash": input_hash})
@@ -122,11 +143,15 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 records = RunRecords(root, run_id, resume=True)
                 summary["run_id"] = records.run_id
                 run = records.read("run.json")
-                if any(run.get(k) != v for k, v in binding.items()):
-                    raise ValueError("恢复协议、连接、配置或指标树与原运行不一致")
+                changed = [k for k, v in binding.items() if run.get(k) != v]
+                if changed:
+                    raise ValueError("恢复身份不一致: " + ", ".join(changed))
                 inputs = records.read("inputs/manifest.json")
-                if content_hash(inputs) != run.get("input_manifest_hash") or inputs["tree_hash"] != tree_digest or any(
-                        file_hash(records.path / "inputs" / name) != expected for name, expected in inputs["files"].items()):
+                if (content_hash(inputs) != run.get("input_manifest_hash") or inputs["tree_hash"] != tree_digest
+                        or inputs.get("provenance") != binding["provenance"]
+                        or ("provenance.json" in inputs["files"]) != binding["provenance"]["enabled"]
+                        or any(not (records.path / "inputs" / name).is_file()
+                            or file_hash(records.path / "inputs" / name) != expected for name, expected in inputs["files"].items())):
                     raise ValueError("冻结输入快照校验失败")
                 if (records.path / "copy_result.json").is_file():
                     copy_result = records.read("copy_result.json")
@@ -143,6 +168,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 if (frozen["hash"] != content_hash(inventory) or frozen["copy_hash"] != content_hash(manifest)
                         or inventory != freeze_articles(source, manifest)):
                     raise ValueError("冻结法条清单校验失败")
+                record_writable = True
             summary["articles"] = len(inventory)
             confirmed, pending, patches = records.batches()
             if pending:
@@ -230,7 +256,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
         except (asyncio.CancelledError, KeyboardInterrupt):
             summary["mapping_status"] = "interrupted"
             summary["status"] = "interrupted"
-            if records:
+            if records and record_writable:
                 try:
                     records.save("summary.json", summary)
                 except OSError:
@@ -249,7 +275,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 except Exception:
                     summary["client_cleanup_error"] = True
         summary["status"] = summary["mapping_status"]
-        if records:
+        if records and record_writable:
             summary["record_directory"] = str(records.path)
             try:
                 confirmed, pending, _ = records.batches()

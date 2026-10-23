@@ -14,6 +14,9 @@ CANDIDATES = "三级指标映射候选列表"
 FINAL = "三级指标映射列表"
 LEGACY = ("三级指标映射Top5", "三级指标映射版本", "三级指标映射状态")
 MANAGED = (CANDIDATES, FINAL, *LEGACY)
+FILENAME_POLICY = "scoped-reference-alias-v2"
+EMPTY_BASIS_POLICY = "verified-source-skip-v2"
+PROVENANCE_POLICY = "current-reference-verification-v1"
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,8 @@ class ModelConfig:
                 "max_tokens": self.max_tokens, "protocol": PROTOCOL,
                 "review_protocol": REVIEW_PROTOCOL, "review_max_group_candidates": self.review_max_group_candidates,
                 "json_policy": POLICY, "json_repair_version": dependency_version(),
-                "filename_policy": "exact-family-cn-prefix-v1", "empty_basis_policy": "skip-v1"}
+                "filename_policy": FILENAME_POLICY, "empty_basis_policy": EMPTY_BASIS_POLICY,
+                "provenance_policy": PROVENANCE_POLICY}
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class MappingConfig:
     read_options: dict = field(default_factory=lambda: {
         "fetch_size": 1000, "max_nodes": 50000, "max_relationships": 200000,
         "max_bytes": 536870912, "timeout": 600})
+    provenance_path: Path | None = None
 
     def validate(self, *, writing=True):
         if (not isinstance(self.source_label, str) or not isinstance(self.target_label, str)
@@ -80,4 +85,4 @@ class MappingConfig:
     def semantic_hash(self):
         return content_hash({"source": self.source_label, "target": self.target_label,
                              "region": self.region, "protocol": PROTOCOL,
-                             "model": self.model.semantic})
+                             "model": self.model.semantic, "provenance_enabled": self.provenance_path is not None})

@@ -39,6 +39,7 @@ TARGET_GRAPH_LABEL = "行政监管规则_指标映射"
 NEO4J_WRITE_ENABLED = True
 TARGET_EXCLUSIVE_WRITE_CONFIRMED = True  # 操作确认，不是分布式锁；运行期间不要修改源或目标。
 TREE_PATH = DEFAULT_TREE_PATH
+PROVENANCE_PATH = None  # 可选：主树同目录的“条款知识来源明细.json”；None不自动读取附件。
 REGION = "中国"
 OUTPUT_ROOT = SCRIPT_DIR / "output" / "copy_first"
 RUN_ID = None  # map时None自动生成；resume/inspect填写本次copy_first摘要中的run_id。
@@ -81,6 +82,7 @@ def build_config():
                 or not url.hostname or url.username or url.password or url.query or url.fragment):
             raise ValueError("模型名称、接口或密钥配置不完整/不合法")
     config = MappingConfig(SOURCE_GRAPH_LABEL, TARGET_GRAPH_LABEL, tree_path=Path(TREE_PATH),
+        provenance_path=Path(PROVENANCE_PATH) if PROVENANCE_PATH is not None else None,
         output_root=Path(OUTPUT_ROOT), region=REGION, model=model,
         write_enabled=NEO4J_WRITE_ENABLED, exclusive_target=TARGET_EXCLUSIVE_WRITE_CONFIRMED,
         read_options=NEO4J_OPTIONS)

@@ -112,7 +112,9 @@ class FilenameTests(unittest.TestCase):
         ids, info = resolve_attachments(index, ["测试法.txt"], "中国")
         self.assertEqual(len(ids), 1)
         self.assertEqual(info["method"], "exact")
-        self.assertEqual(len(attachment_ids(index, ["测试法(2024修订)"], "中国")), 2)
+        from app.infrastructure.risk_map.matching.location import DocumentAmbiguity
+        with self.assertRaises(DocumentAmbiguity):
+            attachment_ids(index, ["测试法(2024修订)"], "中国")
 
     def test_conflicting_alias_is_not_arbitrarily_chosen(self):
         from app.infrastructure.risk_map.matching.location import DocumentAmbiguity
@@ -233,8 +235,10 @@ class SkipAndSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.calls, 0)
             self.assertEqual(summary["article_statuses"], {"无可用依据": 21})
             self.assertEqual(summary["failed_stage_tasks"], 0)
-            self.assertEqual(summary["basis_skips"], {"unique_empty_attachments": 2, "document_families": 1,
-                                                       "affected_articles": 21, "all_empty_articles": 21})
+            for key, value in {"unique_empty_attachments": 2, "document_families": 1,
+                               "affected_articles": 21, "all_empty_articles": 21}.items():
+                self.assertEqual(summary["basis_skips"][key], value)
+            self.assertEqual(summary["basis_skips"]["by_reason"]["empty_reason_unverified"]["unique_empty_attachments"], 2)
             records = RunRecords(config.output_root, summary["run_id"], resume=True)
             inputs = records.path / "inputs"
             self.assertEqual((root / "tree.json").read_bytes(), (inputs / "indicator_tree.json").read_bytes())
