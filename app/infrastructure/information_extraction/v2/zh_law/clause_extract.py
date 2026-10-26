@@ -7,6 +7,10 @@ from typing import Any
 
 from app.infrastructure.information_extraction.base import Entity, Relationship
 from app.infrastructure.information_extraction.factory import InformationExtractionFactory
+from app.infrastructure.information_extraction.langextract_adapter import LangextractAdapter
+from app.infrastructure.information_extraction.quantitative import (
+    build_quant_condition_from_text, normalize_quant_condition, law_document_validator,
+)
 from app.infrastructure.information_extraction.v2.zh_law.config import DEFAULT_CONFIG, ZhLawConfig
 from app.infrastructure.information_extraction.v2.zh_law.io_utils import load_text, output_path, save_json
 from app.infrastructure.information_extraction.v2.zh_law.prompt.example import example_for_clause, \
@@ -135,106 +139,12 @@ def _normalize_function_type(value, text: str = "") -> str:
     return "必要"
 
 
-def _parse_number_token(token: str):
-    token = str(token or "").strip()
-    if not token:
-        return None
-    try:
-        return float(token) if "." in token else int(token)
-    except ValueError:
-        try:
-            return _cn_number_to_int(token)
-        except ValueError:
-            return None
+def _build_quant_condition_from_text(text: str, context: str = ""):
+    return build_quant_condition_from_text(text, context=context)
 
 
-def _infer_quant_type(text: str) -> str:
-    if re.search(r"元|万元|罚款|金额|所得|费用|赔偿", text):
-        return "金额"
-    if re.search(r"%|％|百分|比例|率", text):
-        return "比例"
-    if re.search(r"年|月|日|天|小时|期限|期间|届满|以前|以内|前|后", text):
-        return "期限"
-    if "次" in text:
-        return "次数"
-    if "倍" in text:
-        return "倍数"
-    return "其他"
-
-
-def _infer_quant_unit(text: str) -> str:
-    for unit in ["万元", "元", "%", "％", "年", "月", "日", "天", "小时", "次", "倍"]:
-        if unit in text:
-            return "%" if unit == "％" else unit
-    return ""
-
-
-def _normalize_quant_value_by_unit(value, unit: str):
-    if value is None:
-        return None
-    if unit == "万元":
-        return value * 10000
-    return value
-
-
-def _build_quant_condition_from_text(text: str) -> dict | None:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-    unit = _infer_quant_unit(raw)
-    numbers = []
-    for match in re.finditer(r"(\d+(?:\.\d+)?|[零一二三四五六七八九十百千万]+)", raw):
-        value = _parse_number_token(match.group(1))
-        if value is not None:
-            numbers.append(_normalize_quant_value_by_unit(value, unit))
-
-    relation = "其他"
-    min_value = None
-    max_value = None
-    has_lower = bool(re.search(r"以上|不少于|不低于|不得低于|超过", raw))
-    has_upper = bool(re.search(r"以下|以内|不超过|不得超过|低于", raw))
-    if has_lower and has_upper:
-        relation = "区间"
-        if len(numbers) >= 2:
-            min_value = numbers[0]
-            max_value = numbers[1]
-    elif has_lower:
-        relation = "下限"
-        if numbers:
-            min_value = numbers[0]
-    elif has_upper:
-        relation = "上限"
-        if numbers:
-            max_value = numbers[0]
-    elif numbers:
-        relation = "等于"
-        min_value = numbers[0]
-        max_value = numbers[0]
-
-    return {
-        "原文件": raw,
-        "量化值类型": _infer_quant_type(raw),
-        "最小值": min_value,
-        "最大值": max_value,
-        "单位": unit,
-        "约束关系": relation,
-    }
-
-
-def _normalize_quant_condition(value):
-    if isinstance(value, dict):
-        if not any(str(value.get(key, "") or "").strip() for key in QUANT_CONDITION_KEYS):
-            return None
-        result = {key: value.get(key) for key in QUANT_CONDITION_KEYS}
-        result["原文件"] = result.get("原文件") or value.get("原文") or value.get("raw_text") or ""
-        return result
-    if isinstance(value, list):
-        conditions = [_normalize_quant_condition(item) for item in value]
-        conditions = [item for item in conditions if item]
-        if not conditions:
-            return None
-        return conditions[0] if len(conditions) == 1 else conditions
-    return _build_quant_condition_from_text(str(value or "").strip())
+def _normalize_quant_condition(value, context: str = ""):
+    return normalize_quant_condition(value, context=context)
 
 
 def _normalize_law_properties(
@@ -275,7 +185,7 @@ def _normalize_law_properties(
                 props["其他信息"] = f"{other_info}；{note}" if other_info else note
 
         if node_type == "条款单元":
-            quant_condition = _normalize_quant_condition(props.get("量化条件"))
+            quant_condition = _normalize_quant_condition(props.get("量化条件"), context=content_text)
             props["量化条件"] = quant_condition
             props["量化特征"] = "定量" if quant_condition else "定性"
         else:
@@ -908,6 +818,8 @@ class ClauseExtractor:
                     schema=extract_schema,
                     input_text=extract_content,
                     examples=extract_examples,
+                    **({"document_validator": law_document_validator(filename, clause_number, clause_content)}
+                       if isinstance(self.extractor, LangextractAdapter) else {}),
                 )
                 # 临时保存条款单元和引用依据
                 clause_units = {}

@@ -1,3 +1,6 @@
+from app.infrastructure.information_extraction.quantitative import unit_guidance
+
+
 schema_for_clause = """
 # 实体
 ## 法条
@@ -105,3 +108,5 @@ schema_for_file_info = """
 ### 关系三元组
 - 法规文件-依据-法规依据
 """
+
+schema_for_clause += "\n# 量化条件补充约束\n" + unit_guidance()

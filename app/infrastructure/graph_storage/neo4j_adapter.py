@@ -4,6 +4,7 @@ Neo4j图数据库适配器
 import logging
 import copy
 import json
+import time
 from typing import Dict, Any, Optional
 
 from neo4j import GraphDatabase, Driver
@@ -14,6 +15,7 @@ from .subgraph_records import (
     SubgraphError, digest, encode, graph_content, identifier, read_records,
     snapshot_hash, validate_snapshot,
 )
+from .diagnostics import exception_details, redact_diagnostics
 
 from .base import (
     IGraphStorage,
@@ -436,34 +438,64 @@ class Neo4jAdapter(IGraphStorage):
         started = False
         acknowledged = False
         result = None
+        stage = "open_session"
+        matched_count = updated_count = None
+        matched_ids = updated_ids = None
+        began = time.monotonic()
+        secrets = (getattr(self, "password", ""),)
+        context = redact_diagnostics({"uri": getattr(self, "uri", ""), "database": self.database, "target_label": target_label,
+            "row_count": len(rows), "article_ids_sample": ids[:5], "timeout_seconds": timeout}, secrets)
+        logger.info("[法条属性写入开始] %s", json.dumps(context, ensure_ascii=False))
         try:
             with self.driver.session(database=self.database) as session:
+                stage = "begin_transaction"
                 with session.begin_transaction(timeout=timeout) as tx:
+                    stage = "verify_members"
                     members = list(tx.run(
                         f"// risk_map:patch_members\nUNWIND $ids AS id MATCH (n:{tag}) "
                         "WHERE elementId(n)=id AND n.graph_tag=$tag AND n.label=$kind "
                         "RETURN elementId(n) AS id", ids=ids, tag=target_label, kind="法条"))
-                    if len(members) != len(ids) or {r["id"] for r in members} != set(ids):
+                    matched_count = len(members)
+                    matched_ids = [r["id"] for r in members]
+                    if len(members) != len(ids) or set(matched_ids) != set(ids):
                         raise SubgraphError("mapping_member_mismatch")
+                    stage = "update_properties"
                     updated = list(tx.run(
                         f"// risk_map:patch_articles\nUNWIND $rows AS row MATCH (n:{tag}) "
                         "WHERE elementId(n)=row.id AND n.graph_tag=$tag AND n.label=$kind "
                         "SET n += row.properties RETURN elementId(n) AS id",
                         rows=rows, tag=target_label, kind="法条"))
-                    if len(updated) != len(ids) or {r["id"] for r in updated} != set(ids):
+                    updated_count = len(updated)
+                    updated_ids = [r["id"] for r in updated]
+                    if len(updated) != len(ids) or set(updated_ids) != set(ids):
                         raise SubgraphError("mapping_update_incomplete")
                     # += merges property maps; each list VALUE is replaced, never appended.
+                    stage = "commit"
+                    logger.info("[法条属性准备提交] database=%s target=%s rows=%s elapsed=%.3fs",
+                                context["database"], context["target_label"], len(rows), time.monotonic() - began)
                     started = True
                     tx.commit()
                     acknowledged = True
                     result = {"status": "committed", "commit_confirmed": True, "ids": sorted(ids)}
+                    stage = "cleanup"
+            logger.info("[法条属性提交已确认] database=%s target=%s rows=%s elapsed=%.3fs",
+                        context["database"], context["target_label"], len(rows), time.monotonic() - began)
             return result
         except Exception as exc:
+            details = {**context, **exception_details(exc, secrets), "failure_stage": stage,
+                       "commit_started": started, "commit_confirmed": acknowledged,
+                       "matched_count": matched_count, "updated_count": updated_count,
+                       "missing_member_ids": sorted(set(ids) - set(matched_ids)) if matched_ids is not None else None,
+                       "unexpected_member_ids": sorted(set(matched_ids) - set(ids)) if matched_ids is not None else None,
+                       "missing_updated_ids": sorted(set(ids) - set(updated_ids)) if updated_ids is not None else None,
+                       "elapsed_seconds": round(time.monotonic() - began, 3)}
+            logger.log(logging.WARNING if acknowledged else logging.ERROR,
+                       "[法条属性%s] %s", "提交后清理异常" if acknowledged else "写入失败",
+                       json.dumps(details, ensure_ascii=False))
             if acknowledged:
-                return {**result, "cleanup_error": True}
+                return {**result, "cleanup_error": True, "cleanup_diagnostic": details}
             return {"status": "commit_unknown" if started else "failed",
-                    "commit_confirmed": False,
-                    "error": str(exc) if isinstance(exc, SubgraphError) else type(exc).__name__}
+                    **details}
 
     def run_query(self, query: str, params: dict = None) -> list:
         """

@@ -6,15 +6,17 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import time
 
+from ..graph_storage.diagnostics import exception_details, redact_diagnostics
 from ..graph_storage.subgraph_records import decode, digest, encode, snapshot_hash
 from .common.io import content_hash, file_hash
-from .common.model_client import ModelSession, OpenAICompatibleClient, redact
+from .common.model_client import ModelSession, OpenAICompatibleClient
 from .common.progress import set_step, update_progress
 from .common.run_inputs import code_identity, empty_attachments, freeze_inputs, provenance_identity, skip_summary
 from .common.stats import Diagnostics
 from .config import CANDIDATES, FINAL, MANAGED, PROTOCOL, REVIEW_PROTOCOL
-from .local_records import RunRecords, target_lock, unresolved_runs
+from .local_records import RunRecords, now, target_lock, unresolved_runs
 from .matching.location import locate_article, SYSTEM as MATCH_SYSTEM
 from .neo4j_bridge import copy_plan, freeze_articles, verify_target
 from .preparation.tree_index import attach_provenance, build_tree_index
@@ -25,6 +27,25 @@ logger = logging.getLogger(__name__)
 
 class WriteUncertain(RuntimeError):
     pass
+
+
+def persist_diagnostic(records, name, detail, secrets):
+    """Keep the original failure visible even if local diagnostic persistence fails."""
+    detail = redact_diagnostics({"time": now(), **detail}, secrets)
+    logger.error("[故障详情] %s", json.dumps(detail, ensure_ascii=False))
+    errors = []
+    for destination in ("file", "event"):
+        try:
+            if destination == "file":
+                records.save(name, detail)
+            else:
+                records.event("failures", detail)
+        except OSError as exc:
+            failure = exception_details(exc, secrets)
+            errors.append({"destination": destination, **failure})
+            logger.error("[故障记录保存失败] destination=%s path=%s detail=%s",
+                         destination, records.path, json.dumps(failure, ensure_ascii=False))
+    return detail, errors
 
 
 async def db_call(function, *args, **kwargs):
@@ -79,6 +100,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     summary = {"copy_status": "not_started", "mapping_status": "not_started",
                "target_label": config.target_label, "source_label": config.source_label,
                "input_diagnostics": index.input_stats}
+    secrets = (config.model.api_key, getattr(adapter, "password", ""))
     logger.info("[输入准备] 指标=%s 挂接=%s 含别名挂接=%s 来源核验=%s",
                 len(index.indicators), len(index.attachments), index.input_stats.get("alias_attachments", 0),
                 index.input_stats["provenance"])
@@ -222,11 +244,55 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                             raise
                     rows = [{"id": r["id"], "properties": r["properties"]} for r in results]
                     key, intent_hash = records.intent(phase, rows, results)
-                    receipt = await db_call(adapter.update_subgraph_article_properties,
-                                            config.target_label, rows, timeout=timeout)
-                    if receipt["status"] != "committed" or not receipt.get("commit_confirmed"):
-                        raise WriteUncertain("属性写入未确认；停止后续写入并保留基础图谱")
-                    records.acknowledge(key, intent_hash, receipt)
+                    context = {"run_id": records.run_id, "phase": phase, "batch": key,
+                        "intent_hash": intent_hash, "database": adapter.database, "uri": getattr(adapter, "uri", "injected"),
+                        "source_label": config.source_label, "target_label": config.target_label,
+                        "row_count": len(rows), "article_ids": [a["id"] for a in batch],
+                        "articles": [{"id": a["id"], "number": a["number"], "filenames": a["filenames"]}
+                                     for a in batch],
+                        "property_keys": sorted({k for row in rows for k in row["properties"]}),
+                        "payload_bytes": len(json.dumps(rows, ensure_ascii=False).encode("utf-8")),
+                        "timeout_seconds": timeout}
+                    logger.info("[映射批次写入开始] %s", json.dumps(redact_diagnostics(context, secrets), ensure_ascii=False))
+                    write_started = time.monotonic()
+                    try:
+                        receipt = await db_call(adapter.update_subgraph_article_properties,
+                                                config.target_label, rows, timeout=timeout)
+                    except Exception as exc:
+                        receipt = {"status": "exception", "commit_confirmed": False,
+                                   "failure_stage": "adapter_call", **exception_details(exc, secrets)}
+                    if not isinstance(receipt, dict):
+                        receipt = {"status": "invalid_receipt", "commit_confirmed": False,
+                                   "failure_stage": "adapter_return", "error_type": type(receipt).__name__}
+                    receipt = redact_diagnostics(receipt, secrets)
+                    if receipt.get("status") != "committed" or not receipt.get("commit_confirmed"):
+                        name = "checkpoints/" + key + "_failure.json"
+                        detail, errors = persist_diagnostic(records, name, {
+                            **context, "event_type": "database_write_failure", "diagnostic_file": name,
+                            "elapsed_seconds": round(time.monotonic() - write_started, 3),
+                            "receipt": receipt}, secrets)
+                        summary["write_failure"] = detail
+                        if errors:
+                            summary["diagnostic_record_errors"] = errors
+                        raise WriteUncertain("属性写入未确认；停止后续写入并保留基础图谱；"
+                            f"phase={phase} batch={key} receipt_status={receipt.get('status')} "
+                            f"stage={receipt.get('failure_stage', 'unknown')} "
+                            f"error_type={receipt.get('error_type', 'unknown')}")
+                    try:
+                        records.acknowledge(key, intent_hash, receipt)
+                    except OSError as exc:
+                        name = "checkpoints/" + key + "_failure.json"
+                        detail, errors = persist_diagnostic(records, name, {
+                            **context, "event_type": "acknowledgement_persistence_failure",
+                            "diagnostic_file": name, "failure_stage": "save_acknowledgement",
+                            "receipt": receipt, **exception_details(exc, secrets)}, secrets)
+                        summary["write_failure"] = detail
+                        if errors:
+                            summary["diagnostic_record_errors"] = errors
+                        raise WriteUncertain(f"数据库提交已确认但本地回执保存失败；batch={key}；禁止自动重放") from exc
+                    logger.info("[映射批次写入已确认] run_id=%s phase=%s batch=%s rows=%s elapsed=%.3fs cleanup_error=%s",
+                                records.run_id, phase, key, len(rows), time.monotonic() - write_started,
+                                bool(receipt.get("cleanup_error")))
                     done.update((r["id"], r) for r in results)
                     if phase == "review":
                         removed_count = sum(len(group["removed"]) for r in results for group in r["groups"]
@@ -253,9 +319,11 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
             summary["failed_stage_tasks"] = failures
             summary["model"] = session.counters if session else {}
             code = 2 if failures else 0
-        except (asyncio.CancelledError, KeyboardInterrupt):
+        except (asyncio.CancelledError, KeyboardInterrupt) as exc:
             summary["mapping_status"] = "interrupted"
             summary["status"] = "interrupted"
+            summary["interruption"] = exception_details(exc, secrets)
+            logger.warning("[执行取消或键盘中断] %s", json.dumps(summary["interruption"], ensure_ascii=False))
             if records and record_writable:
                 try:
                     records.save("summary.json", summary)
@@ -263,7 +331,17 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     logger.error("[摘要保存失败] 基础复制状态=%s", summary["copy_status"])
             raise
         except Exception as exc:
-            summary["error"] = redact(str(exc), config.model.api_key) if isinstance(exc, (ValueError, WriteUncertain)) else type(exc).__name__
+            summary["error"] = redact_diagnostics(str(exc), secrets)
+            summary["error_type"] = type(exc).__name__
+            summary["exception"] = exception_details(exc, secrets)
+            logger.error("[运行异常堆栈] %s", json.dumps(summary["exception"], ensure_ascii=False))
+            if records and record_writable and not isinstance(exc, WriteUncertain):
+                _, errors = persist_diagnostic(records, "run_failure.json", {
+                    "event_type": "run_failure", "run_id": records.run_id,
+                    "source_label": config.source_label, "target_label": config.target_label,
+                    **summary["exception"]}, secrets)
+                if errors:
+                    summary["diagnostic_record_errors"] = errors
             summary["mapping_status"] = "write_unknown" if isinstance(exc, WriteUncertain) else "interrupted"
             code = 2 if isinstance(exc, WriteUncertain) or summary["copy_status"] in {"committed", "commit_unknown"} else 1
             logger.error("[运行停止] copy_status=%s mapping_status=%s error=%s",

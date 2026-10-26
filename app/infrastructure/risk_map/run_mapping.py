@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app.infrastructure.graph_storage.factory import GraphStorageFactory
+from app.infrastructure.graph_storage.diagnostics import exception_details, redact_diagnostics
 from app.infrastructure.risk_map import MappingConfig, ModelConfig, execute_mapping
 from app.infrastructure.risk_map.common.model_client import redact
 from app.infrastructure.risk_map.common.progress import ExecutionMonitor
@@ -64,9 +65,7 @@ class RedactedFormatter(logging.Formatter):
 
     def format(self, record):
         value = super().format(record)
-        for secret in self.secrets:
-            value = value.replace(secret, "[REDACTED]")
-        return redact(value)
+        return redact_diagnostics(redact(value), self.secrets)
 
 
 def build_config():
@@ -97,8 +96,8 @@ async def execute(config, adapter, *, action="map", run_id=None, client=None):
     folder.mkdir(parents=True, exist_ok=True)
     log = logging.getLogger("app.infrastructure.risk_map")
     storage_log = logging.getLogger("app.infrastructure.graph_storage")
-    handlers = [logging.StreamHandler(), logging.FileHandler(folder / (
-        datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8] + ".log"), encoding="utf-8")]
+    log_path = folder / (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8] + ".log")
+    handlers = [logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")]
     previous = [(item, item.level, item.propagate) for item in (log, storage_log)]
     for handler in handlers:
         handler.setFormatter(RedactedFormatter([config.model.api_key, getattr(adapter, "password", "")]))
@@ -109,9 +108,16 @@ async def execute(config, adapter, *, action="map", run_id=None, client=None):
             item.addHandler(handler)
     monitor = ExecutionMonitor(action=action, source_mode="neo4j", interval=60).start()
     try:
+        log.info("[运行日志] path=%s pid=%s action=%s source=%s target=%s database=%s run_id=%s",
+                 log_path, os.getpid(), action, config.source_label, config.target_label, adapter.database,
+                 run_id or "new")
         summary, code = await execute_mapping(config, adapter, action=action, run_id=run_id, client=client)
         monitor.result(summary.get("status", "unknown"), code)
         return summary, code
+    except (Exception, asyncio.CancelledError) as exc:
+        log.error("[执行入口异常] %s", json.dumps(exception_details(exc,
+            (config.model.api_key, getattr(adapter, "password", ""))), ensure_ascii=False))
+        raise
     finally:
         monitor.close(sys.exc_info()[0].__name__ if sys.exc_info()[0] else None)
         for item, level, propagate in previous:
@@ -143,7 +149,7 @@ def main():
         print("执行已中断。已提交的基础图谱不会删除，请查看copy_first运行摘要及未决写入。")
         return 130
     except Exception as exc:
-        print(json.dumps({"status": "failed", "error_type": type(exc).__name__}))
+        print(json.dumps({"status": "failed", **exception_details(exc, (API_KEY, NEO4J_PASSWORD))}, ensure_ascii=False))
         return 1
     finally:
         if adapter:

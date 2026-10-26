@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 import traceback
@@ -101,6 +102,7 @@ class LangextractAdapter(IInformationExtraction):
         Args:
             max_retries: 最大重试次数
             config: Langextract配置对象
+            document_validator: 可选同步文档校验器，异常参与原有重试
         """
         self.max_retries = max_retries
         self.default_config = config
@@ -128,7 +130,8 @@ class LangextractAdapter(IInformationExtraction):
             schema: str | dict,
             input_text: str,
             examples: list = None,
-            langextract_config: Optional[LangextractConfig] = None
+            langextract_config: Optional[LangextractConfig] = None,
+            document_validator=None,
     ) -> dict:
         """
         实体和关系one-shot抽取
@@ -218,10 +221,13 @@ class LangextractAdapter(IInformationExtraction):
                 prompt,
                 input_examples,
                 input_text,
-                config
+                config,
+                document_validator=document_validator,
             )
             return self.convert_document_list_to_graph_dict(extract_result)
         except Exception as e:
+            if document_validator is not None:
+                raise
             print(f"Error extracting nodes: {e}")
             # 打印完整的错误追踪信息
             traceback.print_exc()
@@ -620,7 +626,8 @@ class LangextractAdapter(IInformationExtraction):
             prompt: str,
             examples: list,
             input_text: str,
-            langextract_config: Optional[LangextractConfig] = None
+            langextract_config: Optional[LangextractConfig] = None,
+            document_validator=None,
     ):
         """
         从文本中提取知识，包含重试机制
@@ -654,9 +661,7 @@ class LangextractAdapter(IInformationExtraction):
 
         # 初始化重试参数
         last_exception = None
-        # 初始化重试提示词变化标记
-        timeout_flag = False
-        failed_flag = False
+        base_prompt = prompt
 
         for attempt in range(self.max_retries):
             try:
@@ -710,13 +715,15 @@ class LangextractAdapter(IInformationExtraction):
                     timeout=3600  # 30分钟超时
                 )
 
-                logging.info(f"第 {attempt + 1} 次尝试成功!")
                 # 转化为统一的list格式
                 if isinstance(result, data.AnnotatedDocument):
                     result_list = [result]
                 else:
                     result_list = list(result)
                 document_dict_list = self.convert_document_to_dict_with_text(result_list)
+                if document_validator is not None:
+                    document_validator(document_dict_list)
+                logging.info(f"第 {attempt + 1} 次尝试成功!")
                 # try:
                 #     formatted_json = json.dumps(
                 #         document_dict_list,
@@ -742,10 +749,7 @@ class LangextractAdapter(IInformationExtraction):
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
                     logging.info(f"等待 {wait_time} 秒后进行下一次尝试...")
-                    # 变化提示词以避免模型记忆
-                    if not timeout_flag:
-                        prompt = self._generate_failed_prompt(prompt, "timeout", e)
-                        timeout_flag = True
+                    prompt = self._generate_failed_prompt(base_prompt, "timeout", e)
                     time.sleep(wait_time)
             except Exception as e:
                 last_exception = e
@@ -757,10 +761,9 @@ class LangextractAdapter(IInformationExtraction):
                     # 指数退避策略: 等待 2^attempt 秒
                     wait_time = 30 * (2 ** attempt)
                     logging.info(f"等待 {wait_time} 秒后进行下一次尝试...")
-                    # 变化提示词以避免模型记忆
-                    if not failed_flag:
-                        prompt = self._generate_failed_prompt(prompt, "failed", e)
-                        failed_flag = True
+                    prompt = self._generate_failed_prompt(
+                        base_prompt, "failed", e, sensitive_values=(config.api_key,)
+                    )
                     time.sleep(wait_time)
 
                 # 特殊处理API限流错误
@@ -1027,7 +1030,8 @@ class LangextractAdapter(IInformationExtraction):
     def _generate_failed_prompt(
             prompt,
             reason,
-            error
+            error,
+            sensitive_values=(),
     ):
         """
         抽取失败时生成重试的提示词
@@ -1039,9 +1043,23 @@ class LangextractAdapter(IInformationExtraction):
     警告！上次问答超时，请你简化推理思考过程，重新生成答案。
     """ + prompt
         elif reason == "failed":
+            # Error messages can echo request credentials or include an entire traceback.
+            detail = str(error).split("Traceback (most recent call last):", 1)[0]
+            for value in sensitive_values:
+                if isinstance(value, str) and value:
+                    detail = detail.replace(value, "[REDACTED]")
+            detail = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [REDACTED]", detail)
+            detail = re.sub(
+                r"(?i)\b(?:api[_-]?key|password|passwd|secret|token|authorization)"
+                r"[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+                "credential=[REDACTED]", detail,
+            )
+            detail = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[REDACTED]@", detail)
+            detail = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+", " ", detail)
+            detail = " ".join(detail.split())[:1000]
             final_prompt = """
     警告！上次问答结果失败或不可用，报错：
-    """ + str(error) + """
+    """ + type(error).__name__ + ": " + detail + """
     请您检查输入是否符合要求，重新生成答案。
     """ + prompt
         else:

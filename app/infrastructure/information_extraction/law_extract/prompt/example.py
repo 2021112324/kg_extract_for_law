@@ -1,3 +1,6 @@
+from app.infrastructure.information_extraction.quantitative import unit_examples
+
+
 example_for_clause = [
     {
         "text": """
@@ -221,6 +224,8 @@ example_for_clause = [
         ]
     }
 ]
+
+example_for_clause += unit_examples()
 
 example_for_file_info = [
     {
