@@ -188,9 +188,9 @@ if __name__ == "__main__":
         # 将源库 kg_366920576398295040 标签数据迁移到目标库同名标签
         migrate_label(
             source=source,
-            source_tag="ad1_行政复议法规_中_kg_636100095850315776",
+            source_tag="ad1_行政复议案例3_kg_637262502282919936",
             target=target,
-            target_tag="行政复议法律法规",
+            target_tag="kg_368371532428247040",
         )
         # 如需改名，把 target_tag 改成别的名字即可，例如：
         # migrate_label(source, "kg_366920576398295040", target, "法律法规条款")
