@@ -29,6 +29,13 @@ class WriteUncertain(RuntimeError):
     pass
 
 
+def confirmed_patches(confirmed):
+    """Replay confirmed phases without materializing another history list."""
+    for phase in ("initialization", "matching", "review"):
+        for result in confirmed.get(phase, {}).values():
+            yield {"id": result["id"], "properties": result["properties"]}
+
+
 def persist_diagnostic(records, name, detail, secrets):
     """Keep the original failure visible even if local diagnostic persistence fails."""
     detail = redact_diagnostics({"time": now(), **detail}, secrets)
@@ -96,6 +103,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     own_client = None
     session = None
     records = None
+    confirmed = None
     record_writable = action == "map"
     summary = {"copy_status": "not_started", "mapping_status": "not_started",
                "target_label": config.target_label, "source_label": config.source_label,
@@ -192,12 +200,12 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     raise ValueError("冻结法条清单校验失败")
                 record_writable = True
             summary["articles"] = len(inventory)
-            confirmed, pending, patches = records.batches()
+            confirmed, pending, _ = records.batches(include_patches=False)
             if pending:
                 raise WriteUncertain("存在未确认批次意图，禁止自动重放或认领")
             set_step("核对基础图谱与已确认映射增量")
             target = await db_call(adapter.read_subgraph_records, config.target_label, **options)
-            verification = verify_target(target, source, manifest, patches)
+            verification = verify_target(target, source, manifest, confirmed_patches(confirmed))
             del target
             if action == "inspect":
                 previous = records.read("summary.json")
@@ -309,10 +317,15 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                                               "article_id": r["id"], "status": r["status"]})
                         if r.get("errors"):
                             records.event("failures", {"phase": phase, "id": r["id"], "errors": r["errors"]})
-            confirmed, pending, patches = records.batches()
+            # Recheck durable evidence one batch at a time, without rebuilding
+            # a second complete confirmed/result/patch collection in memory.
+            pending = records.pending_batches()
+            if pending:
+                raise WriteUncertain("结束核验发现未确认批次，禁止认定映射完成")
             set_step("结束核验：原始成员保真与映射增量")
             target = await db_call(adapter.read_subgraph_records, config.target_label, **options)
-            summary["inspection"] = verify_target(target, source, manifest, patches)
+            summary["inspection"] = verify_target(target, source, manifest, records.iter_patches())
+            del target
             failures = sum(bool(result.get("errors")) for phase in ("matching", "review")
                            for result in confirmed.get(phase, {}).values())
             summary["mapping_status"] = "completed_with_errors" if failures else "completed"
@@ -331,7 +344,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     logger.error("[摘要保存失败] 基础复制状态=%s", summary["copy_status"])
             raise
         except Exception as exc:
-            summary["error"] = redact_diagnostics(str(exc), secrets)
+            summary["error"] = redact_diagnostics(str(exc) or type(exc).__name__, secrets)
             summary["error_type"] = type(exc).__name__
             summary["exception"] = exception_details(exc, secrets)
             logger.error("[运行异常堆栈] %s", json.dumps(summary["exception"], ensure_ascii=False))
@@ -356,7 +369,9 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
         if records and record_writable:
             summary["record_directory"] = str(records.path)
             try:
-                confirmed, pending, _ = records.batches()
+                if confirmed is None:
+                    raise ValueError("本次运行尚未完成记录恢复，不能推断已确认任务")
+                pending = records.pending_batches()
                 summary["confirmed_counts"] = {phase: len(rows) for phase, rows in confirmed.items()}
                 local_statuses = {}
                 for phase in ("initialization", "matching", "review"):
@@ -371,9 +386,12 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     "unreviewed_candidates": sum(len(r.get("unreviewed_numbers", [])) for r in reviewed_results)}
                 summary["pending_batches"] = len(pending)
                 summary["unprocessed"] = max(0, summary.get("articles", 0) - len(confirmed.get("review", {})))
-            except (ValueError, OSError, KeyError):
+            except (ValueError, OSError, KeyError, MemoryError) as exc:
                 summary["record_validation_error"] = True
                 summary["unprocessed"] = None
+                summary["record_summary_error_type"] = type(exc).__name__
+                logger.error("[记录摘要不可用] error_type=%s 原始错误类型=%s；不重复加载批次历史",
+                             type(exc).__name__, summary.get("error_type", "none"))
             summary["model"] = session.counters if session else {}
             summary["tree_diagnostics"] = diagnostics.to_dict()
             try:
