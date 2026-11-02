@@ -1,6 +1,6 @@
 """Law-schema validation with explicit evidence and numeric location checks."""
 from ..guide_p1.validator import build_schema_contract, normalize_extraction_result
-from ...quantitative import normalize_quant_condition
+from ...quantitative import normalize_quant_condition, QUANTITY, UNITS, number
 from .io_utils import compact
 from .prompt.schema import schema_for_clause, schema_for_file_info
 import re
@@ -12,6 +12,29 @@ RISK_TYPES = ("产品法律风险", "供应链合规风险", "劳动用工法律
 
 def supported(quote, source):
     return bool(compact(quote)) and compact(quote) in compact(source)
+
+
+def inherited_evidence_supported(quote, unit):
+    if supported(quote, unit["context"]):
+        return True
+    # Local enumerated items may inherit their own article's introductory clause.
+    target = unit["target"]
+    marker = re.search(r"(?m)^\s*[（(][一二三四五六七八九十百\d]+[）)]", target)
+    if marker is None:
+        return False
+    introduction = target[:marker.start()]
+    return bool(compact(introduction)) and supported(quote, introduction)
+
+
+def calendar_quantity_supported(condition):
+    if condition.get("单位") != "月":
+        return False
+    bounds = {number(condition[key]) for key in ("最小值", "最大值") if condition.get(key) is not None}
+    for token in QUANTITY.finditer(condition.get("原文件", "")):
+        info = UNITS.get(token.group("unit"))
+        if info and info[0] == "calendar" and number(token.group("number")) * info[2] in bounds:
+            return True
+    return False
 
 
 def validate_result(raw, *, source, unit=None, title=None):
@@ -67,9 +90,11 @@ def validate_result(raw, *, source, unit=None, title=None):
                 return bool(re.fullmatch(r"[（(][一二三四五六七八九十百\d]+[）)]", suffix) and
                             re.search(r"(?m)^\s*" + re.escape(suffix), unit["target"]))
             if not any(owns_location(n) for n in unit["member_numbers"]):
-                raise ValueError("单元编号 " + location + " 不属于本次承载；请使用 " + unit["number"] +
-                                 "，或拼接正文中真实的局部标记，例如 " + unit["number"] + "（1）；不得把局部（1）转换成新的数字子编号")
-            if props.get("上下文依据") and not supported(props["上下文依据"], unit["context"]):
+                markers = re.findall(r"(?m)^\s*([（(][一二三四五六七八九十百\d]+[）)])", unit["target"])
+                detail = "原文实际局部标记=" + repr(markers) if markers else "原文没有局部编号；自然段不能自行编号"
+                raise ValueError("单元编号 " + location + " 不属于本次承载；请直接使用 " + unit["number"] +
+                                 "，多条语义单元可共用该编号，不要为区分实体编造编号；不得把局部标记转换成新的数字子编号；" + detail)
+            if props.get("上下文依据") and not inherited_evidence_supported(props["上下文依据"], unit):
                 raise ValueError("Unsupported inherited evidence")
             if unit["mode"] == "context" and not props.get("上下文依据"):
                 raise ValueError("Context-dependent unit must identify inherited evidence")
@@ -90,7 +115,7 @@ def validate_result(raw, *, source, unit=None, title=None):
                 raise ValueError("Unsupported quantitative evidence")
             if condition and condition.get("量化值类型") == "期限":
                 day_types = set(re.findall(r"(?:工作|交易|自然)日", condition.get("原文件", "")))
-                if len(day_types) == 1 and condition.get("单位") not in day_types:
+                if len(day_types) == 1 and condition.get("单位") not in day_types and not calendar_quantity_supported(condition):
                     raise ValueError("期限单位必须保留原文明示的" + next(iter(day_types)) + "，不能简化为日或换成其他日类型")
             expected = "定量" if condition else "定性"
             if props.get("量化特征", expected) != expected:

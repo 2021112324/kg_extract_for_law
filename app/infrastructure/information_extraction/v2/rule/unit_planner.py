@@ -36,6 +36,25 @@ def split_text(text, limit):
     return chunks
 
 
+def applicability_in_scope(scope_node, node, by_id, first_branch):
+    ancestors = []
+    parent = by_id.get(scope_node["parent_id"])
+    while parent:
+        ancestors.append(parent)
+        parent = by_id.get(parent["parent_id"])
+    # A section-level "this rule applies" sentence is not a document-wide scope.
+    if any(not ancestor["parent_id"] and re.search(r"(?:总则|通则|适用范围|范围)$", compact(ancestor["title"]))
+           for ancestor in ancestors):
+        return True
+    parts = scope_node["number"].split(".")
+    if not ancestors and len(parts) <= 2 and parts[0] == first_branch:
+        return True
+    if scope_node["scope"] != node["scope"]:
+        return False
+    prefix = ".".join(parts[:-1]) if len(parts) > 1 else parts[0]
+    return node["number"] == prefix or node["number"].startswith(prefix + ".")
+
+
 class RuleUnitPlanner:
     def __init__(self, block_chars=6000, context_chars=12000):
         self.block_chars = block_chars
@@ -47,6 +66,7 @@ class RuleUnitPlanner:
         candidates = {n["node_id"] for n in boundary_candidates(parsed)}
         file_scope_nodes = [n for n in parsed["nodes"] if n["kind"] == "numeric" and re.search(
             r"本(?:规则|办法|规定|预案|指引)适用于", n["body_text"])]
+        first_branch = next((n["number"].split(".")[0] for n in parsed["nodes"] if n["kind"] == "numeric"), "")
         consumed, context_only, owners, units, errors = set(), set(), {}, [], []
         pending = []
         for node in parsed["nodes"]:
@@ -84,7 +104,8 @@ class RuleUnitPlanner:
             context_nodes.reverse()
             parent_node_ids = [n["node_id"] for n in context_nodes]
             for scope_node in file_scope_nodes:
-                if scope_node["node_id"] not in {n["node_id"] for n in members + context_nodes}:
+                if (scope_node["node_id"] not in {n["node_id"] for n in members + context_nodes}
+                        and applicability_in_scope(scope_node, node, by_id, first_branch)):
                     context_nodes.insert(0, scope_node)
             context = "\n".join(n["own_text"] for n in context_nodes)
             if len(context) > self.context_chars:

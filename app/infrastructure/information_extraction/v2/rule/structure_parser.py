@@ -9,7 +9,7 @@ from .io_utils import compact, load_text, stable_id
 CHAPTER = re.compile(r"^第([零〇一二三四五六七八九十百千万\d]+)(章|节)\s*(.+)$")
 NUMBER = re.compile(r"^(\d+(?:[.．]\d+)*)(?:[、．.]?\s+)(\S.*)$")
 MARKER = re.compile(r"^(附件|附录|附表)(?:\s*[A-Za-z0-9一二三四五六七八九十]*)?(?:[：:].*)?$")
-SIGNAL = re.compile(r"应当|必须|不得|禁止|可以|有权|应|须|负责|是指|适用|包括|按照|规定|需要|不得|：|[。；！？]")
+SIGNAL = re.compile(r"应当|必须|不得|禁止|可以|有权|应(?!急)|须|负责|是指|适用|包括|按照|规定|需要|不得|：|[。；！？]")
 
 
 def clean_line(line):

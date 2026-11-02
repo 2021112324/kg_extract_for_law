@@ -68,6 +68,71 @@ def test_complete_numbers(number):
     assert result["validation"]["passed"]
 
 
+def test_section_applicability_does_not_leak_to_other_sections():
+    parsed = parse("第一章 总则\n1.1 本指引适用于上市公司。\n"
+                   "第二章 公司治理\n2.1.1 公司应保存会议记录。\n"
+                   "第六章 资金管理\n第三节 募集资金\n6.3.1 本规则适用于募集资金监管。\n"
+                   "6.3.2 公司应专户存储募集资金。\n第四节 其他资金\n6.4.1 公司应保留支付记录。")
+    plan = RuleUnitPlanner().plan(parsed)
+    assert plan["formal_plan_eligible"]
+    units = {unit["number"]: unit for unit in plan["units"]}
+    assert "募集资金监管" not in units["2.1.1"]["context"]
+    assert "募集资金监管" not in units["6.4.1"]["context"]
+    assert "募集资金监管" in units["6.3.2"]["context"]
+    assert "适用于上市公司" in units["2.1.1"]["context"]
+
+
+def test_nested_numeric_applicability_stays_with_its_prefix():
+    parsed = parse("1.1 企业应保存记录。\n6.3.1 本规则适用于募集资金监管。\n"
+                   "6.3.2 公司应专户管理。\n6.4.1 公司应办理登记。")
+    units = {unit["number"]: unit for unit in RuleUnitPlanner().plan(parsed)["units"]}
+    assert "募集资金监管" not in units["1.1"]["context"]
+    assert "募集资金监管" not in units["6.4.1"]["context"]
+    assert "募集资金监管" in units["6.3.2"]["context"]
+
+
+@pytest.mark.parametrize("quote,allowed", [
+    ("1.1 企业不得以下列方式占用资金：", True),
+    ("其他文件规定不得占用资金。", False),
+    ("（二）要求企业提供担保。", False),
+])
+def test_local_item_inherits_only_real_introductory_clause(quote, allowed):
+    from ..validator import inherited_evidence_supported
+    unit = {"target": "1.1 企业不得以下列方式占用资金：\n（一）划转企业资金。\n（二）要求企业提供担保。", "context": "第一章 管理"}
+    assert inherited_evidence_supported(quote, unit) is allowed
+
+
+@pytest.mark.parametrize("intro", ["1.1 报告内容", "1.1 处置流程和方法如下。"])
+def test_introductory_titles_and_sentences_need_no_colon(intro):
+    from ..validator import inherited_evidence_supported
+    unit = {"target": intro + "\n（1）报告事故时间。\n（2）说明处置情况。", "context": ""}
+    assert inherited_evidence_supported(intro, unit)
+    assert not inherited_evidence_supported("（2）说明处置情况。", unit)
+
+
+@pytest.mark.parametrize("raw,value,expected", [
+    ("股票连续12个月每个交易日的收盘价均低于净资产", 12, True),
+    ("股票连续十二个月每个交易日的收盘价均低于净资产", 12, True),
+    ("一年内每个交易日完成核对", 12, True),
+    ("5个交易日内完成报告", 5, False),
+])
+def test_calendar_span_is_not_replaced_by_its_observation_day_type(raw, value, expected):
+    from ..validator import calendar_quantity_supported
+    assert calendar_quantity_supported({"原文件": raw, "单位": "月", "最小值": value, "最大值": None}) is expected
+
+
+def test_emergency_heading_is_not_an_independent_normative_carrier():
+    parsed = parse("6 应急保障\n6.1 系统参与者应提供技术保障。")
+    plan = RuleUnitPlanner().plan(parsed)
+    assert [unit["number"] for unit in plan["units"]] == ["6.1"]
+    assert "6 应急保障" in plan["units"][0]["context"]
+
+
+def test_modal_duty_with_emergency_word_is_still_substantive():
+    parsed = parse("6 系统参与者应实施应急保障。")
+    assert [unit["number"] for unit in RuleUnitPlanner().plan(parsed)["units"]] == ["6"]
+
+
 def test_real_mixed_hierarchy():
     result = parse("第二章 管理\n第一节 记录\n2.1.1 企业应保存记录。\n2.1.1.1 应保留原始凭证。")
     nodes = result["nodes"]

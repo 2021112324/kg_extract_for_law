@@ -85,7 +85,7 @@ def count_directory_sizes(root_path):
 
 if __name__ == "__main__":
     # 目标目录：优先取命令行参数，否则使用默认目录
-    target_dir = sys.argv[1] if len(sys.argv) > 1 else r"D:\CogmAIT\8.1项目\8.1数据\爬取的数据\风险法规"
+    target_dir = sys.argv[1] if len(sys.argv) > 1 else rf"D:\CogmAIT\2.3行政复议项目"
 
     print("=" * 60)
     print(f"统计目录下各子目录的存储大小：{target_dir}")
