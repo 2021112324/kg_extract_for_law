@@ -1,1 +1,1 @@
-"""Unreasonable-indicator removal, without ranking."""
+"""Historical review helpers; not part of the current mapping workflow."""

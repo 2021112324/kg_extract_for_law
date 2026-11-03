@@ -90,12 +90,12 @@ class ReviewResponseTests(unittest.TestCase):
         with self.assertRaises(ModelFailure):
             split_groups(article, values, replace(config, max_input_chars=budget - 1))
 
-    def test_group_configuration_is_positive_and_semantic(self):
+    def test_legacy_group_configuration_does_not_affect_current_workflow(self):
         for value in (0, -1, True, 1.5, "8"):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with self.subTest(value=value):
                 ModelConfig(review_max_group_candidates=value).validate()
-        self.assertNotEqual(ModelConfig().semantic, ModelConfig(review_max_group_candidates=7).semantic)
-        self.assertEqual(ModelConfig().semantic["review_protocol"], REVIEW_PROTOCOL)
+        self.assertEqual(ModelConfig().semantic, ModelConfig(review_max_group_candidates=7).semantic)
+        self.assertNotIn("review_protocol", ModelConfig().semantic)
 
 
 class ReviewSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -258,7 +258,7 @@ class ReviewSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(e["response"] == KEEP_ALL for e in failures))
 
 
-class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
+class LocationCommitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -275,15 +275,15 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
         original_intent, original_ack, original_event = RunRecords.intent, RunRecords.acknowledge, RunRecords.event
         applied = []
         def intent(records, phase, rows, results):
-            if fault == "intent" and phase == "review":
+            if fault == "intent" and phase == "matching":
                 raise OSError("controlled intent failure")
             return original_intent(records, phase, rows, results)
         def ack(records, key, digest, receipt):
-            if fault == "ack" and "review" in key:
+            if fault == "ack" and "matching" in key:
                 raise OSError("controlled ack failure")
             return original_ack(records, key, digest, receipt)
         def event(records, phase, row):
-            if row.get("event_type") == "review_applied":
+            if row.get("event_type") == "location_applied":
                 self.assertTrue((records.path / "checkpoints" / (row["batch"] + "_ack.json")).exists())
                 if fault == "applied_event":
                     raise OSError("controlled applied event failure")
@@ -291,7 +291,7 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
             return original_event(records, phase, row)
         original_update = adapter.update_subgraph_article_properties
         def update(label, rows, **kwargs):
-            if fault == "unknown" and FINAL in rows[0]["properties"] and CANDIDATES not in rows[0]["properties"]:
+            if fault == "unknown" and rows[0]["properties"].get(FINAL):
                 adapter.unknown = True
             return original_update(label, rows, **kwargs)
         with patch.object(RunRecords, "intent", intent), patch.object(RunRecords, "acknowledge", ack), \
@@ -299,21 +299,22 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
             summary, code = await execute_mapping(self.config, adapter, client=client)
         return adapter, client, summary, code, applied
 
-    async def test_reasons_are_durable_before_apply_and_not_graph_properties(self):
+    async def test_locations_are_durable_before_apply_and_not_graph_properties(self):
         adapter, client, summary, code, applied = await self.run_case()
         self.assertEqual(code, 0)
         self.assertEqual(len(applied), 1)
         records = RunRecords(self.config.output_root, summary["run_id"], resume=True)
         confirmed, pending, patches = records.batches()
-        group = confirmed["review"]["ts0"]["groups"][0]
-        self.assertEqual(group["reasons"], {"2.1.1.1": "测试中的明确规范冲突"})
+        result = confirmed["matching"]["ts0"]
+        self.assertEqual(result["sources"][0]["description"], TEXT)
         self.assertFalse(pending)
-        self.assertEqual(summary["review_audit"]["confirmed_removals"], 1)
+        self.assertNotIn("review_audit", summary)
+        self.assertEqual(summary["location"]["saved_links"], 7)
         self.assertNotIn("reasons", adapter.target["nodes"][0]["n"]["properties"])
         result, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
         self.assertEqual(code, 0)
-        self.assertEqual(result["review_audit"]["confirmed_removals"], 1)
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(result["location"]["saved_links"], 7)
+        self.assertEqual(client.calls, 0)
 
     async def test_legacy_status_removed_only_from_copy_and_statuses_recover_locally(self):
         adapter = FakeAdapter(1)
@@ -327,24 +328,24 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
         records = RunRecords(self.config.output_root, summary["run_id"], resume=True)
         confirmed, pending, patches = records.batches()
         self.assertFalse(pending)
-        self.assertEqual([confirmed[p]["ts0"]["status"] for p in ("initialization", "matching", "review")],
-                         ["未处理", "候选已定位", "已审查"])
+        self.assertEqual([confirmed[p]["ts0"]["status"] for p in ("initialization", "matching")],
+                         ["未处理", "定位完成"])
         self.assertTrue(all(row["properties"].get("三级指标映射状态") is None for row in patches))
-        events = [json.loads(line) for line in (records.path / "review" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertTrue(any(e.get("event_type") == "article_result" and e["status"] == "已审查" for e in events))
-        self.assertEqual(summary["article_statuses"], {"已审查": 1})
+        events = [json.loads(line) for line in (records.path / "matching" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(any(e.get("event_type") == "article_result" and e["status"] == "定位完成" for e in events))
+        self.assertEqual(summary["article_statuses"], {"定位完成": 1})
         resumed, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
         self.assertEqual(code, 0)
         self.assertEqual(resumed["article_statuses"], summary["article_statuses"])
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 0)
 
-    async def test_intent_failure_does_not_write_review_patch(self):
+    async def test_intent_failure_does_not_write_location_patch(self):
         adapter, _, summary, code, applied = await self.run_case("intent")
         self.assertEqual(code, 2)
         self.assertNotIn(FINAL, adapter.target["nodes"][0]["n"]["properties"])
-        self.assertEqual(len([c for c in adapter.calls if c[0] == "update"]), 2)
+        self.assertEqual(len([c for c in adapter.calls if c[0] == "update"]), 1)
         self.assertFalse(applied)
-        self.assertEqual(summary["review_audit"]["confirmed_removals"], 0)
+        self.assertEqual(summary["location"]["saved_links"], 0)
 
     async def test_unknown_or_missing_ack_never_claims_applied_or_replays(self):
         for fault in ("unknown", "ack"):
@@ -354,7 +355,7 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(code, 2)
                 self.assertFalse(applied)
                 self.assertEqual(summary["pending_batches"], 1)
-                self.assertEqual(summary["review_audit"]["confirmed_removals"], 0)
+                self.assertEqual(summary["location"]["saved_links"], 0)
                 before = len(adapter.calls)
                 result, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
                 self.assertEqual(result["mapping_status"], "write_unknown")
@@ -365,28 +366,28 @@ class ReviewCommitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(summary["mapping_status"], "interrupted")
         self.assertEqual(summary["pending_batches"], 0)
-        self.assertEqual(summary["review_audit"]["confirmed_removals"], 1)
+        self.assertEqual(summary["location"]["saved_links"], 7)
         before = len(adapter.calls)
         result, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
         self.assertEqual(code, 0)
         self.assertEqual(len(adapter.calls), before)
 
-    async def test_old_protocol_or_changed_group_config_cannot_resume(self):
+    async def test_old_protocol_rejected_but_unused_group_option_can_change(self):
         adapter, client, summary, _, _ = await self.run_case()
         records = RunRecords(self.config.output_root, summary["run_id"], resume=True)
         before = copy.deepcopy(adapter.target)
         run = records.read("run.json")
-        self.assertEqual(run["review_protocol"], REVIEW_PROTOCOL)
+        self.assertNotIn("review_protocol", run)
         legacy = dict(run)
-        legacy.pop("review_protocol")
+        legacy["protocol"] = "copy-first-many-to-many-v3-audit-fixes"
         records.save("run.json", legacy)
-        result, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
-        self.assertNotEqual(code, 0)
+        with self.assertRaisesRegex(ValueError, "旧语义审查"):
+            await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
         self.assertEqual(before, adapter.target)
         records.save("run.json", run)
         changed = replace(self.config, model=replace(self.config.model, review_max_group_candidates=7))
         result, code = await execute_mapping(changed, adapter, action="resume", run_id=summary["run_id"], client=client)
-        self.assertNotEqual(code, 0)
+        self.assertEqual(code, 0)
         self.assertEqual(before, adapter.target)
 
 

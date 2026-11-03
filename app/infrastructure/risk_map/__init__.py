@@ -1,4 +1,4 @@
-"""Standalone Neo4j copy-first many-to-many indicator mapping extension."""
+"""Copy Neo4j graphs and preserve located expert indicator-reference associations."""
 
 from .config import MappingConfig, ModelConfig
 from .pipeline import execute_mapping

@@ -1,4 +1,4 @@
-"""Remove only explicitly rejected authoritative candidates; never rank or truncate."""
+"""Historical review helpers only; the current pipeline never imports this module."""
 
 import json
 import logging

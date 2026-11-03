@@ -45,7 +45,7 @@ def payload_data(payload):
 def local_status(summary, article_id="ts0"):
     records = RunRecords(Path(summary["record_directory"]).parents[1], summary["run_id"], resume=True)
     confirmed, _, _ = records.batches()
-    return confirmed["review"][article_id]["status"]
+    return confirmed["matching"][article_id]["status"]
 
 
 def tree(count=7, description=TEXT):
@@ -172,7 +172,7 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(props[CANDIDATES]), 7)
         self.assertEqual(props[CANDIDATES], props[FINAL])
-        self.assertEqual(local_status(summary), "已审查")
+        self.assertEqual(local_status(summary), "定位完成")
         self.assertNotIn("三级指标映射状态", props)
         self.assertNotIn("三级指标映射Top5", props)
         self.assertEqual(adapter.calls[0], "copy")
@@ -180,16 +180,15 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.target["nodes"][0]["n"]["labels"], ["Semantic", "target"])
         self.assertEqual(summary["copy_status"], "committed")
 
-    async def test_model_failure_preserves_base_and_candidates(self):
+    async def test_exact_location_needs_no_model_even_when_model_unavailable(self):
         adapter, client, summary, code = await self.run_case(failure=True)
         props = adapter.target["nodes"][0]["n"]["properties"]
-        self.assertEqual(code, 2)
-        self.assertEqual(client.calls, 5)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.calls, 0)
         self.assertEqual(len(props[CANDIDATES]), 7)
-        self.assertNotIn(FINAL, props)
-        self.assertEqual(local_status(summary), "审查失败")
+        self.assertEqual(props[CANDIDATES], props[FINAL])
+        self.assertEqual(local_status(summary), "定位完成")
         self.assertEqual(summary["copy_status"], "committed")
-        self.assertIn("simulated_500", client.payloads[1]["messages"][-1]["content"])
 
     async def test_first_phase_failure_is_not_no_match(self):
         adapter, client, summary, code = await self.run_case(failure=True, description="企业应当开展专项风险评估。")
@@ -208,9 +207,10 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
                 summary, code = await execute_mapping(config, adapter, client=client)
                 self.assertEqual(code, 0)
                 sizes = [min(20, count - i) for i in range(0, count, 20)]
-                self.assertEqual([n for kind, n in adapter.calls[1:] if kind == "update"], sizes * 3)
+                self.assertEqual([n for kind, n in adapter.calls[1:] if kind == "update"], sizes * 2)
                 self.assertLessEqual(client.maximum, 20)
-                self.assertEqual(summary["confirmed_counts"].get("review", 0), count)
+                self.assertEqual(summary["confirmed_counts"].get("matching", 0), count)
+                self.assertNotIn("review", summary["confirmed_counts"])
 
     async def test_unknown_update_blocks_resume_without_replay(self):
         adapter = FakeAdapter(1)
@@ -251,21 +251,23 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["record_validation_error"])
         self.assertEqual(adapter.target, before)
 
-    async def test_unknown_removal_does_not_delete_candidates(self):
+    async def test_legacy_unknown_removal_response_is_never_requested(self):
         adapter, client, _, code = await self.run_case(response=removal_response(["9.9.9.9"]))
         props = adapter.target["nodes"][0]["n"]["properties"]
-        self.assertEqual(code, 2)
-        self.assertEqual(client.calls, 5)
-        self.assertNotIn(FINAL, props)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(len(props[FINAL]), 7)
 
-    async def test_all_removed_is_valid_empty_result(self):
+    async def test_legacy_all_removed_response_cannot_delete_expert_associations(self):
         adapter, client, summary, code = await self.run_case(response=removal_response([f"2.1.1.{i}" for i in range(1, 8)]))
         props = adapter.target["nodes"][0]["n"]["properties"]
         self.assertEqual(code, 0)
-        self.assertEqual(props[FINAL], [])
-        self.assertEqual(local_status(summary), "全部剔除")
+        self.assertEqual(len(props[FINAL]), 7)
+        self.assertEqual(local_status(summary), "定位完成")
+        self.assertEqual(client.calls, 0)
 
     async def test_cancel_after_candidates_resume_does_not_reset(self):
+        atomic_json(tree(description="企业应当开展专项风险评估。"), self.tree)
         adapter = FakeAdapter(21)
         client = Client(adapter)
         reached = asyncio.Event()
@@ -279,15 +281,17 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         run_id = next((self.config.output_root / "runs").iterdir()).name
-        before_candidates = copy.deepcopy(adapter.target["nodes"][0]["n"]["properties"][CANDIDATES])
-        self.assertEqual(len(before_candidates), 7)
+        self.assertNotIn(CANDIDATES, adapter.target["nodes"][0]["n"]["properties"])
         previous_updates = len([call for call in adapter.calls if isinstance(call, tuple) and call[0] == "update"])
         result, code = await execute_mapping(self.config, adapter, action="resume", run_id=run_id, client=client)
         self.assertEqual(code, 0)
-        self.assertEqual(adapter.target["nodes"][0]["n"]["properties"][CANDIDATES], before_candidates)
+        props = adapter.target["nodes"][0]["n"]["properties"]
+        self.assertEqual(len(props[CANDIDATES]), 7)
+        self.assertEqual(props[CANDIDATES], props[FINAL])
         self.assertEqual(len([call for call in adapter.calls if isinstance(call, tuple) and call[0] == "update"]), previous_updates + 2)
 
     async def test_one_article_failure_other_articles_continue(self):
+        atomic_json(tree(description="企业应当开展专项风险评估。"), self.tree)
         adapter = FakeAdapter(21)
         for i, row in enumerate(adapter.source["nodes"]):
             row["n"]["properties"]["法条全文"] += f"第{i}组事实。"
@@ -300,10 +304,10 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         client = OneFailure(adapter)
         summary, code = await execute_mapping(self.config, adapter, client=client)
         self.assertEqual(code, 2)
-        self.assertEqual(summary["article_statuses"], {"已审查": 20, "审查失败": 1})
-        self.assertEqual(summary["confirmed_counts"]["review"], 21)
+        self.assertEqual(summary["article_statuses"], {"定位完成": 20, "匹配失败": 1})
+        self.assertEqual(summary["confirmed_counts"]["matching"], 21)
 
-    async def test_known_candidates_still_reviewed_with_empty_basis_skipped(self):
+    async def test_known_associations_saved_with_empty_basis_skipped(self):
         data = tree()
         data["产品法律风险"]["一级"]["二级"]["指标7"]["映射文件"]["中国"]["测试法"]["知识依据"] = ""
         atomic_json(data, self.tree)
@@ -312,11 +316,11 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         props = adapter.target["nodes"][0]["n"]["properties"]
         self.assertEqual(code, 0)
         self.assertEqual(len(props[FINAL]), 6)
-        self.assertEqual(local_status(summary), "已审查")
+        self.assertEqual(local_status(summary), "定位完成")
         self.assertEqual(summary["basis_skips"]["unique_empty_attachments"], 1)
         self.assertEqual(summary["failed_stage_tasks"], 0)
 
-    async def test_long_candidates_group_failure_keeps_only_reviewed_final(self):
+    async def test_many_indicators_preserved_without_review_groups(self):
         data = tree(30)
         atomic_json(data, self.tree)
         adapter = FakeAdapter(1)
@@ -329,13 +333,13 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
                 return await super().complete(payload)
         summary, code = await execute_mapping(config, adapter, client=GroupFailure(adapter))
         props = adapter.target["nodes"][0]["n"]["properties"]
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
         self.assertEqual(len(props[CANDIDATES]), 30)
-        self.assertGreater(len(props[FINAL]), 0)
-        self.assertLess(len(props[FINAL]), 30)
-        self.assertEqual(local_status(summary), "部分完成")
+        self.assertEqual(len(props[FINAL]), 30)
+        self.assertEqual(local_status(summary), "定位完成")
 
     async def test_full_article_over_budget_is_not_truncated(self):
+        atomic_json(tree(description="企业应当开展专项风险评估。"), self.tree)
         adapter = FakeAdapter(1)
         adapter.source["nodes"][0]["n"]["properties"]["法条全文"] = TEXT + "完整法条。" * 1000
         original = snapshot_hash(adapter.source)
@@ -345,7 +349,7 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(client.calls, 0)
         self.assertEqual(snapshot_hash(adapter.source), original)
-        self.assertEqual(local_status(summary), "审查失败")
+        self.assertEqual(local_status(summary), "匹配失败")
 
     async def test_copy_failures_no_models_and_receipt_failure_keeps_commit(self):
         for outcome in ("failed", "commit_unknown"):
@@ -381,9 +385,8 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.target, before)
         from app.infrastructure.risk_map.__main__ import main
         self.assertEqual(main(["file", "old.json"]), 64)
-        result, code = await execute_mapping(self.config, adapter, action="resume", run_id="../old")
-        self.assertEqual(code, 1)
-        self.assertIn("run_id", result["error"])
+        with self.assertRaisesRegex(ValueError, "run_id"):
+            await execute_mapping(self.config, adapter, action="resume", run_id="../old")
 
     def test_groups_cover_every_candidate_once_and_do_not_truncate(self):
         candidates = [{"指标名": f"指标{i}", "指标序号": f"2.1.1.{i}", "指标描述": "完整描述" * 20} for i in range(30)]
@@ -419,7 +422,7 @@ class CopyFirstTests(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_change_cannot_silently_resume_old_results(self):
         adapter, client, summary, _ = await self.run_case()
         before = copy.deepcopy(adapter.target)
-        with patch("app.infrastructure.risk_map.pipeline.REVIEW_SYSTEM", "changed review policy"):
+        with patch("app.infrastructure.risk_map.pipeline.MATCH_SYSTEM", "changed location policy"):
             result, code = await execute_mapping(self.config, adapter, action="resume", run_id=summary["run_id"], client=client)
         self.assertNotEqual(code, 0)
         self.assertEqual(adapter.target, before)

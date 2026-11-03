@@ -289,8 +289,8 @@ class SkipAndSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved["protocol"], PROTOCOL)
             records.save("run.json", {**saved, "protocol": "copy-first-many-to-many-v2-local-status"})
             before = copy.deepcopy(adapter.target)
-            _, code = await execute_mapping(config, adapter, action="resume", run_id=summary["run_id"])
-            self.assertNotEqual(code, 0)
+            with self.assertRaisesRegex(ValueError, "旧语义审查"):
+                await execute_mapping(config, adapter, action="resume", run_id=summary["run_id"])
             self.assertEqual(before, adapter.target)
 
 

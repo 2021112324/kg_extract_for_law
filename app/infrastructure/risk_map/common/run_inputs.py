@@ -12,7 +12,7 @@ from ..preparation.document_identity import country_family
 def code_identity():
     package = Path(__file__).resolve().parents[1]
     paths = list(package.glob("*.py"))
-    for folder in ("common", "preparation", "matching", "review"):
+    for folder in ("common", "preparation", "matching"):
         paths.extend((package / folder).glob("*.py"))
     hashes = {p.relative_to(package).as_posix(): file_hash(p) for p in sorted(paths)}
     info = {"files": hashes, "runtime_hash": content_hash(hashes)}

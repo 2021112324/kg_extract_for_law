@@ -24,7 +24,7 @@ async def interrupted_after_review(tmp_path):
 
     with patch.object(pipeline, "verify_target", verify):
         summary, code = await execute_mapping(config, adapter, client=client)
-    assert code == 2 and summary["confirmed_counts"]["review"] == 2
+    assert code == 2 and summary["confirmed_counts"]["matching"] == 2
     return config, adapter, client, summary
 
 
@@ -39,7 +39,7 @@ async def test_read_only_finish_preserves_original_records_and_never_replays(tmp
         report, code = verify_finished_run(config, adapter, summary["run_id"])
     assert code == 0 and report["status"] == "verified"
     assert report["inspection"]["status"] == "verified"
-    assert report["confirmed_counts"] == {"initialization": 2, "matching": 2, "review": 2}
+    assert report["confirmed_counts"] == {"initialization": 2, "matching": 2}
     assert report["database_writes"] == report["model_requests"] == 0
     assert client.calls == calls
     assert all(path.read_bytes() == raw for path, raw in original_records.items())
@@ -57,17 +57,17 @@ async def test_graph_content_change_cannot_be_reported_as_finished(tmp_path):
 @pytest.mark.asyncio
 async def test_pending_checkpoint_never_replayed_or_reported_complete(tmp_path):
     config, adapter, _, summary = await interrupted_after_review(tmp_path)
-    path = next((Path(summary["record_directory"])/"checkpoints").glob("*_review_ack.json"))
+    path = next((Path(summary["record_directory"])/"checkpoints").glob("*_matching_ack.json"))
     path.unlink()
     with pytest.raises(ValueError, match="未确认批次"):
         verify_finished_run(config, adapter, summary["run_id"])
 
 
 @pytest.mark.asyncio
-async def test_missing_review_is_not_treated_as_success(tmp_path):
+async def test_missing_matching_is_not_treated_as_success(tmp_path):
     config, adapter, _, summary = await interrupted_after_review(tmp_path)
     folder = Path(summary["record_directory"])/"checkpoints"
-    for path in folder.glob("*_review_*.json"):
+    for path in folder.glob("*_matching_*.json"):
         path.unlink()
     with pytest.raises(ValueError, match="任务尚未全部完成"):
         verify_finished_run(config, adapter, summary["run_id"])
@@ -85,7 +85,7 @@ async def test_tampered_input_is_rejected_before_database_read(tmp_path):
 @pytest.mark.asyncio
 async def test_tampered_checkpoint_is_rejected(tmp_path):
     config, adapter, _, summary = await interrupted_after_review(tmp_path)
-    path = next((Path(summary["record_directory"])/"checkpoints").glob("*_review_intent.json"))
+    path = next((Path(summary["record_directory"])/"checkpoints").glob("*_matching_intent.json"))
     value = read_json(path)
     value["results"][0]["status"] = "forged"
     atomic_json(value, path)

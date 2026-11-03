@@ -10,7 +10,7 @@ import re
 import uuid
 
 from .common.io import atomic_json, content_hash, read_json
-from .config import PROTOCOL
+from .config import PHASES, PROTOCOL
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class RunRecords:
                 logger.error("[本地记录内存不足] %s", detail)
                 raise MemoryError(detail) from exc
             if (intent.get("protocol") != PROTOCOL or intent.get("run_id") != self.run_id
-                    or intent.get("phase") not in {"initialization", "matching", "review"}
+                    or intent.get("phase") not in PHASES
                     or len(intent.get("rows", [])) != len(intent.get("results", []))):
                 raise ValueError("批次意图协议、身份或任务数量不一致")
             ack_path = path.with_name(path.name.replace("_intent.json", "_ack.json"))
@@ -134,7 +134,7 @@ class RunRecords:
                 if (row["id"] in done or row["id"] != result["id"]
                         or row["properties"] != result["properties"]):
                     raise ValueError("阶段逻辑任务重复或错位")
-                previous_phase = {"matching": "initialization", "review": "matching"}.get(intent["phase"])
+                previous_phase = {"matching": "initialization"}.get(intent["phase"])
                 if previous_phase and row["id"] not in confirmed.get(previous_phase, {}):
                     raise ValueError("阶段前置任务缺失，禁止重新初始化已处理节点")
                 done.add(row["id"])
@@ -165,6 +165,8 @@ class RunRecords:
         return confirmed, pending, patches
 
     def intent(self, phase, rows, results):
+        if phase not in PHASES:
+            raise ValueError("当前协议不支持此阶段: " + phase)
         sequences = [int(p.name.split("_", 1)[0]) for p in (self.path / "checkpoints").glob("*_intent.json")]
         count = max(sequences, default=-1) + 1
         key = f"{count:08d}_{phase}"

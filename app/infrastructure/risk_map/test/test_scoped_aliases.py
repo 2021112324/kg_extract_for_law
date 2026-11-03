@@ -412,6 +412,9 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(old_calls, (len(self.adapter.calls), self.client.calls))
 
     async def test_source_changes_isolate_model_cache(self):
+        files(self.data)["测试法"]["知识依据"] = "企业应当开展专项风险评估。"
+        atomic_json(self.data, self.tree_path)
+        atomic_json(provenance_for(self.data), self.prov_path)
         first, code = await self.run_map()
         self.assertEqual(code, 0)
         self.prov_path.write_bytes(self.prov_path.read_bytes() + b" ")

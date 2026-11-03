@@ -44,17 +44,17 @@ PROVENANCE_PATH = None  # 可选：主树同目录的“条款知识来源明细
 REGION = "中国"
 OUTPUT_ROOT = SCRIPT_DIR / "output" / "copy_first"
 RUN_ID = None  # map时None自动生成；resume/inspect填写本次copy_first摘要中的run_id。
-MODEL_NAME = "qwen3.6-35b-a3b"
+MODEL_NAME = "glm-5.3-flash"
 MODEL_API_URL = "http://1.62.254.162:20001/v1/chat/completions"
 API_KEY = os.getenv("RISK_MAP_API_KEY") or local_credential("API_KEY")
 MODEL_OPTIONS = {"request_timeout": 300, "max_attempts": 5, "retry_delay": 1,
-                 "max_input_chars": 60000, "max_tokens": 4096,
-                 "review_max_group_candidates": 8}  # 每次审查请求上限，不是最终映射数量上限。
+                 "max_input_chars": 60000, "max_tokens": 4096}
 NEO4J_OPTIONS = {"fetch_size": 1000, "max_nodes": 50000, "max_relationships": 200000,
                  "max_bytes": 536870912, "timeout": 600}
 DRIVER_OPTIONS = {"connection_timeout": 30, "max_connection_pool_size": 20,
                   "max_transaction_retry_time": 30}
-# 法条每批固定20条并发，两轮之间有屏障；不再设置排名预算或Top5。
+# 法条每批固定20条并发，定位后直接保存全部专家关联，不进行第二轮语义审查。
+# 旧审查run不能resume；重新映射须使用未占用目标标签，新协议自身支持断点恢复。
 # ==================== END OF CONFIGURATION =========================
 
 

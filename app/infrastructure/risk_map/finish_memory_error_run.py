@@ -1,4 +1,4 @@
-"""Read-only completion verification for the recorded final-replay MemoryError.
+"""Read-only completion verification for new-protocol final-replay MemoryError.
 
 Run this file directly after installing the checkpoint memory fix. It neither
 resumes extraction nor changes the old run identity or any graph property.
@@ -23,13 +23,12 @@ from app.infrastructure.graph_storage.factory import GraphStorageFactory
 from app.infrastructure.graph_storage.subgraph_records import decode, snapshot_hash
 from app.infrastructure.risk_map.common.io import content_hash, file_hash
 from app.infrastructure.risk_map.common.progress import ExecutionMonitor, set_step, update_progress
-from app.infrastructure.risk_map.config import PROTOCOL
+from app.infrastructure.risk_map.config import PHASES, PROTOCOL
 from app.infrastructure.risk_map.local_records import RunRecords, now, target_lock
 from app.infrastructure.risk_map.neo4j_bridge import freeze_articles, verify_target
 
-RUN_ID = "9ce9ad324a6c4a3aa833a6fc6095ff79"
+RUN_ID = None  # Fill in a new expert-reference run ID; old review runs are rejected.
 logger = logging.getLogger("app.infrastructure.risk_map.final_verification")
-PHASES = ("initialization", "matching", "review")
 
 
 def validate_frozen_inputs(records, run):
@@ -57,7 +56,6 @@ def finished_counts(records, article_ids):
     seen = {phase: set() for phase in PHASES}
     statuses = {}
     failed = 0
-    removed = 0
     pending = records.pending_batches()
     if pending:
         raise ValueError(f"存在{len(pending)}个未确认批次；不自动重放，不认定完成")
@@ -73,16 +71,14 @@ def finished_counts(records, article_ids):
             statuses[aid] = result["status"]
             if phase != "initialization":
                 failed += bool(result.get("errors"))
-            if phase == "review":
-                removed += sum(len(group["removed"]) for group in result.get("groups", []) if group["confirmed"])
         if number % 100 == 0:
-            update_progress(emit=True, 已校验批次=number, 已审查法条=len(seen["review"]))
+            update_progress(emit=True, 已校验批次=number, 已定位处理法条=len(seen["matching"]))
     missing = {phase: len(article_ids - ids) for phase, ids in seen.items()}
     if any(missing.values()):
         raise ValueError("任务尚未全部完成；缺少已确认法条: " + json.dumps(missing, ensure_ascii=False))
     return {"confirmed_counts": {phase: len(ids) for phase, ids in seen.items()},
             "article_statuses": dict(Counter(statuses.values())), "failed_stage_tasks": failed,
-            "confirmed_removals": removed, "pending_batches": 0, "unprocessed": 0}
+            "pending_batches": 0, "unprocessed": 0}
 
 
 def verify_finished_run(config, adapter, run_id=RUN_ID):
@@ -99,6 +95,8 @@ def verify_finished_run(config, adapter, run_id=RUN_ID):
     with target_lock(config.output_root, [connection, config.target_label]):
         set_step("核对故障运行和冻结输入")
         run = records.read("run.json")
+        if run.get("protocol") != PROTOCOL:
+            raise ValueError("此收尾入口仅支持新专家依据定位协议；旧语义审查运行请使用匹配的历史代码核验")
         expected = {"protocol": PROTOCOL, "run_id": run_id, "connection": connection,
                     "source_label": config.source_label, "target_label": config.target_label,
                     "config_hash": config.semantic_hash}
@@ -130,7 +128,7 @@ def verify_finished_run(config, adapter, run_id=RUN_ID):
             raise ValueError("冻结法条清单校验失败")
         article_ids = {item["id"] for item in items}
         del frozen, items
-        set_step("逐批核对三阶段已确认记录", 法条数=len(article_ids))
+        set_step("逐批核对初始化与定位已确认记录", 法条数=len(article_ids))
         counts = finished_counts(records, article_ids)
         set_step("只读核验现有目标图谱", 目标=config.target_label)
         target = adapter.read_subgraph_records(config.target_label, **dict(config.read_options))
@@ -163,6 +161,8 @@ def main():
     previous = []
     monitor = None
     try:
+        if not RUN_ID:
+            raise ValueError("请先填写新专家依据定位协议运行的RUN_ID；不再默认核验历史审查任务")
         if struct.calcsize("P") != 8:
             raise ValueError("请使用64位Python运行，当前解释器为32位")
         if not all(hasattr(RunRecords, name) for name in ("iter_batches", "iter_patches", "pending_batches")):

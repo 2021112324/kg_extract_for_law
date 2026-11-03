@@ -38,7 +38,7 @@ async def test_full_history_is_loaded_once_per_run_not_again_at_completion(tmp_p
         summary, code = await execute_mapping(config, adapter, client=client)
     assert code == 0 and summary["inspection"]["status"] == "verified"
     assert calls == [{"include_patches": False}]
-    assert summary["confirmed_counts"] == {"initialization": 2, "matching": 2, "review": 2}
+    assert summary["confirmed_counts"] == {"initialization": 2, "matching": 2}
     before = len(adapter.calls)
     calls.clear()
     with patch.object(RunRecords, "batches", once):
@@ -79,7 +79,7 @@ async def test_end_verification_oom_preserves_confirmed_counts_and_original_erro
         summary, code = await execute_mapping(config, adapter, client=client)
     assert code == 2 and replay.call_count == 1
     assert summary["error_type"] == "MemoryError" and summary["error"] == "original final verification failure"
-    assert summary["confirmed_counts"]["review"] == 2 and summary["unprocessed"] == 0
+    assert summary["confirmed_counts"]["matching"] == 2 and summary["unprocessed"] == 0
     assert not summary.get("record_validation_error")
 
 
@@ -99,8 +99,7 @@ async def test_unknown_write_still_blocks_replay_and_is_reported_pending(tmp_pat
 def ledger(tmp_path):
     records = RunRecords(tmp_path)
     for phase, properties in [("initialization", {CANDIDATES: None, FINAL: None}),
-                              ("matching", {CANDIDATES: ["candidate " + "x"*10000], FINAL: None}),
-                              ("review", {FINAL: []})]:
+                              ("matching", {CANDIDATES: ["candidate " + "x"*10000], FINAL: []})]:
         rows = [{"id": "article", "properties": properties}]
         results = [{"id": "article", "properties": properties, "status": phase}]
         key, digest = records.intent(phase, rows, results)
@@ -144,7 +143,7 @@ def test_streamed_patches_revalidate_disk_instead_of_trusting_cached_results(tmp
     records = ledger(tmp_path)
     confirmed, pending, patches = records.batches()
     assert list(records.iter_patches()) == patches
-    intent_path = next((records.path/"checkpoints").glob("*_review_intent.json"))
+    intent_path = next((records.path/"checkpoints").glob("*_matching_intent.json"))
     intent = read_json(intent_path)
     intent["results"][0]["status"] = "tampered after initial recovery"
     atomic_json(intent, intent_path)
@@ -159,7 +158,7 @@ async def test_end_verification_still_rejects_record_tampering_after_ack(tmp_pat
 
     def acknowledge(records, key, digest, receipt):
         original(records, key, digest, receipt)
-        if key.endswith("review"):
+        if key.endswith("matching"):
             path = records.path/"checkpoints"/(key+"_intent.json")
             value = read_json(path)
             value["results"][0]["status"] = "tampered after acknowledgement"

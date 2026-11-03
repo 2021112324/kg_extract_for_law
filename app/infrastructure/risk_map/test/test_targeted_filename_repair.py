@@ -33,7 +33,7 @@ def test_snapshot_changes_no_other_properties_or_relationships():
 
 
 @pytest.mark.parametrize("matched", [True, False])
-def test_write_is_cas_and_failed_count_rolls_back(tmp_path, matched):
+def test_retired_write_entry_never_reaches_database(tmp_path, matched):
     tx = Mock()
     tx.run.return_value.single.return_value = {"count": 1 if matched else 0}
     session = Mock()
@@ -43,20 +43,11 @@ def test_write_is_cas_and_failed_count_rolls_back(tmp_path, matched):
     adapter = SimpleNamespace(database="fake", driver=Mock())
     adapter.driver.session.return_value = session
     rows = {TARGET: [{"id": "x", "before": {"filename": [OLD]}, "patch": {"filename": [NEW]}}]}
-    if matched:
+    with pytest.raises(ValueError, match="旧定向修复入口已停用"):
         guarded_write(adapter, tmp_path, "rename", rows)
-        tx.commit.assert_called_once()
-        tx.rollback.assert_not_called()
-        assert (tmp_path / "rename_receipt.json").exists()
-    else:
-        with pytest.raises(ValueError, match="Compare-and-set"):
-            guarded_write(adapter, tmp_path, "rename", rows)
-        tx.commit.assert_not_called()
-        tx.rollback.assert_called_once()
-        assert not (tmp_path / "rename_receipt.json").exists()
-    assert "properties(n)=row.before" in tx.run.call_args.args[0]
-    with pytest.raises(ValueError, match="intent already exists"):
-        guarded_write(adapter, tmp_path, "rename", rows)
+    tx.run.assert_not_called()
+    tx.commit.assert_not_called()
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("fault", [None, "quote", "item", "missing", "retained", "duplicate"])

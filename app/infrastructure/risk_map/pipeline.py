@@ -1,4 +1,4 @@
-"""The only business workflow: committed copy -> all candidates -> all reviews."""
+"""Committed independent copy -> locate expert references -> save all confirmed links."""
 
 import asyncio
 from collections import Counter
@@ -15,12 +15,12 @@ from .common.model_client import ModelSession, OpenAICompatibleClient
 from .common.progress import set_step, update_progress
 from .common.run_inputs import code_identity, empty_attachments, freeze_inputs, provenance_identity, skip_summary
 from .common.stats import Diagnostics
-from .config import CANDIDATES, FINAL, MANAGED, PROTOCOL, REVIEW_PROTOCOL
+from .config import MANAGED, PHASES, PROTOCOL
 from .local_records import RunRecords, now, target_lock, unresolved_runs
 from .matching.location import locate_article, SYSTEM as MATCH_SYSTEM
+from .matching.outcomes import location_counts, unresolved_basis
 from .neo4j_bridge import copy_plan, freeze_articles, verify_target
 from .preparation.tree_index import attach_provenance, build_tree_index
-from .review.review import EXAMPLES, review_article, SYSTEM as REVIEW_SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class WriteUncertain(RuntimeError):
 
 def confirmed_patches(confirmed):
     """Replay confirmed phases without materializing another history list."""
-    for phase in ("initialization", "matching", "review"):
+    for phase in PHASES:
         for result in confirmed.get(phase, {}).values():
             yield {"id": result["id"], "properties": result["properties"]}
 
@@ -55,6 +55,17 @@ def persist_diagnostic(records, name, detail, secrets):
     return detail, errors
 
 
+def execution_diagnostics(summary, diagnostics):
+    inputs = diagnostics.to_dict()
+    return {"failed_article_tasks": summary.get("failed_stage_tasks", 0),
+            "model_attempt_errors": summary.get("model", {}).get("attempt_errors", 0),
+            "run_errors": int(bool(summary.get("error"))),
+            "record_errors": int(bool(summary.get("record_validation_error")))
+                             + int(bool(summary.get("summary_record_error"))),
+            "input_errors": inputs["error_count"],
+            "weak_warnings": inputs["weak_warning_count"], "strong_warnings": inputs["strong_warning_count"]}
+
+
 async def db_call(function, *args, **kwargs):
     # Drain an in-flight operation before honoring cancellation; never abandon a commit.
     task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
@@ -74,6 +85,11 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     if action in {"resume", "inspect"} and not run_id:
         raise ValueError("resume/inspect必须提供本次新协议的RUN_ID")
     root, tree = Path(config.output_root).resolve(), Path(config.tree_path).resolve()
+    # Reject old protocols before locks, input reads or any run-record mutation.
+    if action in {"resume", "inspect"}:
+        previous = RunRecords(root, run_id, resume=True).read("run.json")
+        if previous.get("protocol") != PROTOCOL:
+            raise ValueError("旧语义审查运行不能由新协议resume/inspect；请使用新run_id和未占用目标标签重新映射")
     source_path = Path(config.provenance_path).resolve() if config.provenance_path is not None else None
     for input_path in (tree, source_path):
         if input_path is not None and (input_path == root or root in input_path.parents or input_path in root.parents):
@@ -97,7 +113,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     connection = content_hash([getattr(adapter, "uri", "injected"), getattr(adapter, "username", ""), adapter.database])
     binding = {"protocol": PROTOCOL, "config_hash": config.semantic_hash,
                "tree_hash": tree_digest, "connection": connection,
-               "prompt_hash": content_hash([MATCH_SYSTEM, REVIEW_SYSTEM, EXAMPLES]), "review_protocol": REVIEW_PROTOCOL,
+               "prompt_hash": content_hash([MATCH_SYSTEM]),
                "runtime_hash": identity["runtime_hash"]}
     binding["provenance"] = provenance_identity(provenance_bytes, config)
     own_client = None
@@ -105,7 +121,8 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
     records = None
     confirmed = None
     record_writable = action == "map"
-    summary = {"copy_status": "not_started", "mapping_status": "not_started",
+    summary = {"protocol": PROTOCOL, "semantic_review_enabled": False,
+               "copy_status": "not_started", "mapping_status": "not_started",
                "target_label": config.target_label, "source_label": config.source_label,
                "input_diagnostics": index.input_stats}
     secrets = (config.model.api_key, getattr(adapter, "password", ""))
@@ -130,8 +147,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                     raise WriteUncertain("同一目标存在历史未决本地写入；禁止通过新run_id绕过核对")
                 records = RunRecords(root, run_id)
                 summary["run_id"] = records.run_id
-                input_hash = freeze_inputs(records, tree_bytes, config, {"matching": MATCH_SYSTEM, "review": REVIEW_SYSTEM,
-                                                           "review_examples": EXAMPLES},
+                input_hash = freeze_inputs(records, tree_bytes, config, {"matching": MATCH_SYSTEM},
                               identity, skipped, provenance_bytes=provenance_bytes,
                               verification=[{"attachment_id": aid, **a.source_verification}
                                             for aid, a in enumerate(index.attachments)])
@@ -212,9 +228,8 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 return {**previous, "inspection": verification}, 0
             summary["mapping_status"] = "running"
             summary["articles"] = len(inventory)
-            for phase in ("initialization", "matching", "review"):
-                set_step({"initialization": "初始化目标映射字段", "matching": "第一轮：多对多候选定位",
-                          "review": "第二轮：不合理指标剔除"}[phase], 法条总数=len(inventory))
+            for phase in PHASES:
+                set_step({"initialization": "初始化目标映射字段", "matching": "专家依据定位与关联保存"}[phase], 法条总数=len(inventory))
                 done = confirmed.setdefault(phase, {})
                 remaining = [a for a in inventory if a["id"] not in done]
                 for offset in range(0, len(remaining), 20):
@@ -232,16 +247,8 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                         if session is None:
                             session = ModelSession(config.model, client, root / "cache" / PROTOCOL, records.event,
                                                    scope=content_hash(binding), run_id=records.run_id)
-                        if phase == "matching":
-                            async def work(article):
-                                if not isinstance(article["text"], str) or not article["text"].strip():
-                                    return {"id": article["id"], "status": "匹配失败", "coverage_complete": False,
-                                            "errors": ["法条全文缺失"], "properties": {CANDIDATES: [], FINAL: None}}
-                                return await locate_article(article, index, config.region, session)
-                        else:
-                            async def work(article):
-                                return await review_article({**article, "region": config.region}, current[article["id"]],
-                                    confirmed["matching"][article["id"]], session)
+                        async def work(article):
+                            return await locate_article(article, index, config.region, session)
                         tasks = [asyncio.create_task(work(a)) for a in batch]
                         try:
                             results = await asyncio.gather(*tasks)
@@ -302,14 +309,9 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                                 records.run_id, phase, key, len(rows), time.monotonic() - write_started,
                                 bool(receipt.get("cleanup_error")))
                     done.update((r["id"], r) for r in results)
-                    if phase == "review":
-                        removed_count = sum(len(group["removed"]) for r in results for group in r["groups"]
-                                            if group["confirmed"])
-                        records.event("review", {"event_type": "review_applied", "batch": key,
-                            "intent_hash": intent_hash, "review_protocol": REVIEW_PROTOCOL,
-                            "article_ids": [r["id"] for r in results], "removed_count": removed_count})
-                        logger.info("[审查确认] 批次=%s 状态=已应用 法条数=%s 已应用剔除项数=%s",
-                                    key, len(results), removed_count)
+                    if phase == "matching":
+                        records.event("matching", {"event_type": "location_applied", "batch": key,
+                            "intent_hash": intent_hash, "article_ids": [r["id"] for r in results]})
                     update_progress(emit=True, 阶段=phase, 已确认法条=len(done), 法条总数=len(inventory),
                                     当前批次条数=len(batch), 当前批次失败=sum(bool(r.get("errors")) for r in results))
                     for r in results:
@@ -326,8 +328,7 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
             target = await db_call(adapter.read_subgraph_records, config.target_label, **options)
             summary["inspection"] = verify_target(target, source, manifest, records.iter_patches())
             del target
-            failures = sum(bool(result.get("errors")) for phase in ("matching", "review")
-                           for result in confirmed.get(phase, {}).values())
+            failures = sum(bool(result.get("errors")) for result in confirmed.get("matching", {}).values())
             summary["mapping_status"] = "completed_with_errors" if failures else "completed"
             summary["failed_stage_tasks"] = failures
             summary["model"] = session.counters if session else {}
@@ -374,31 +375,43 @@ async def execute_mapping(config, adapter, *, action="map", run_id=None, client=
                 pending = records.pending_batches()
                 summary["confirmed_counts"] = {phase: len(rows) for phase, rows in confirmed.items()}
                 local_statuses = {}
-                for phase in ("initialization", "matching", "review"):
+                for phase in PHASES:
                     local_statuses.update({key: r["status"] for key, r in confirmed.get(phase, {}).items()})
                 summary["article_statuses"] = dict(Counter(local_statuses.values()))
                 summary["basis_skips"] = skip_summary(index, confirmed.get("matching", {}))
-                reviewed_results = confirmed.get("review", {}).values()
-                summary["review_audit"] = {"review_protocol": REVIEW_PROTOCOL,
-                    "confirmed_removals": sum(len(group["removed"]) for r in reviewed_results
-                                              for group in r["groups"] if group["confirmed"]),
-                    "confirmed_groups": sum(group["confirmed"] for r in reviewed_results for group in r["groups"]),
-                    "unreviewed_candidates": sum(len(r.get("unreviewed_numbers", [])) for r in reviewed_results)}
+                matching = confirmed.get("matching", {})
+                summary["location"] = location_counts(inventory, matching)
+                summary["failed_stage_tasks"] = summary["location"]["failed_articles"]
+                summary["unresolved_basis"] = "unresolved_basis.json"
+                unresolved = unresolved_basis(index, config.region, source, inventory, matching)
+                records.save("unresolved_basis.json", unresolved)
+                summary["unresolved_basis_counts"] = {k: v for k, v in unresolved.items()
+                                                      if k in {"unresolved_attachments", "unresolved_units", "reason_counts"}}
+                if summary["mapping_status"] == "completed" and unresolved["unresolved_units"]:
+                    summary["mapping_status"] = summary["status"] = "completed_with_unresolved"
                 summary["pending_batches"] = len(pending)
-                summary["unprocessed"] = max(0, summary.get("articles", 0) - len(confirmed.get("review", {})))
+                summary["unprocessed"] = summary["location"]["unprocessed_articles"]
             except (ValueError, OSError, KeyError, MemoryError) as exc:
                 summary["record_validation_error"] = True
                 summary["unprocessed"] = None
                 summary["record_summary_error_type"] = type(exc).__name__
                 logger.error("[记录摘要不可用] error_type=%s 原始错误类型=%s；不重复加载批次历史",
                              type(exc).__name__, summary.get("error_type", "none"))
+                if code == 0:
+                    code = 2
+                    summary["mapping_status"] = summary["status"] = "record_error"
             summary["model"] = session.counters if session else {}
             summary["tree_diagnostics"] = diagnostics.to_dict()
+            summary["diagnostics"] = execution_diagnostics(summary, diagnostics)
             try:
                 records.save("summary.json", summary)
             except OSError:
                 summary["summary_record_error"] = True
+                summary["mapping_status"] = summary["status"] = "record_error"
+                summary["diagnostics"] = execution_diagnostics(summary, diagnostics)
                 code = 2 if summary["copy_status"] == "committed" else 1
         logger.info("[结束摘要] 基础复制=%s 目标=%s 映射=%s 未处理=%s",
                     summary["copy_status"], config.target_label, summary["mapping_status"], summary.get("unprocessed"))
+        logger.info("[定位统计] %s", json.dumps(summary.get("location", {}), ensure_ascii=False))
+        logger.info("[错误警告统计] %s", json.dumps(execution_diagnostics(summary, diagnostics), ensure_ascii=False))
         return summary, code

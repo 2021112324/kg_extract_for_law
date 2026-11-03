@@ -121,17 +121,23 @@ def attachment_ids(index, filenames, region):
 
 
 async def locate_article(article, index, region, session):
-    result = {"id": article["id"], "errors": [], "sources": [], "coverage_complete": True}
+    result = {"id": article["id"], "errors": [], "sources": [], "failed_sources": [],
+              "file_attachment_ids": [], "coverage_complete": True}
     try:
         ids, file_match = resolve_attachments(index, article["filenames"], region)
         result["file_match"] = file_match
     except DocumentAmbiguity as exc:
         return {**result, "status": "文件歧义", "coverage_complete": False,
                 "file_match": exc.details,
-                "errors": [{"kind": "file_ambiguity", "error": str(exc)}],
+                "unresolved_reason": str(exc),
                 "properties": {CANDIDATES: [], FINAL: None}}
+    result["file_attachment_ids"] = ids
     if not ids:
         return {**result, "status": "文件未匹配", "properties": {CANDIDATES: [], FINAL: None}}
+    if not isinstance(article["text"], str) or not article["text"].strip():
+        return {**result, "status": "匹配失败", "coverage_complete": False,
+                "errors": [{"kind": "missing_article_text", "error": "法条全文缺失"}],
+                "properties": {CANDIDATES: [], FINAL: None}}
     grouped = {}
     result["skipped_attachment_ids"] = []
     result["skipped_attachments"] = []
@@ -167,12 +173,16 @@ async def locate_article(article, index, region, session):
         except ModelFailure as exc:
             result["coverage_complete"] = False
             result["errors"].append({"kind": "model_failure", "error": str(exc)})
+            result["failed_sources"].append({"description": description, "attachment_ids": sources,
+                                              "reason": str(exc)})
     if numbers:
-        status = "候选已定位" if result["coverage_complete"] else "部分完成"
+        status = "定位完成" if result["coverage_complete"] else "部分完成"
     elif result["coverage_complete"]:
         status = "无匹配"
     else:
         status = "匹配失败" if any(e["kind"] == "model_failure" for e in result["errors"]) else "依据不足"
     result["status"] = status
-    result["properties"] = {CANDIDATES: encode_candidates(index, numbers), FINAL: [] if status == "无匹配" else None}
+    items = encode_candidates(index, numbers)
+    result["properties"] = {CANDIDATES: items,
+                            FINAL: items if items or result["coverage_complete"] else None}
     return result

@@ -376,6 +376,7 @@ class LocalNeo4jTests(unittest.TestCase):
         self.assert_source_unchanged()
 
     def test_local_pipeline_failures_preserve_complete_base(self):
+        atomic_json(tree(description="企业应当开展专项风险评估。"), self.tree_path)
         target = self.target()
         config = MappingConfig(self.source, target, tree_path=self.tree_path, output_root=self.root / "failure",
                     write_enabled=True, exclusive_target=True, model=ModelConfig(retry_delay=0))
@@ -391,13 +392,13 @@ class LocalNeo4jTests(unittest.TestCase):
         snapshot = self.adapter.read_subgraph_records(target)
         self.assertEqual((len(snapshot["nodes"]), len(snapshot["edges"])), (4, 3))
         props = next(n["n"]["properties"] for n in snapshot["nodes"] if n["n"]["properties"].get("label") == "法条")
-        self.assertEqual(result["article_statuses"], {"审查失败": 1})
+        self.assertEqual(result["article_statuses"], {"匹配失败": 1})
         self.assertNotIn("三级指标映射状态", props)
-        self.assertEqual(len(props[CANDIDATES]), 7)
+        self.assertEqual(props[CANDIDATES], [])
         self.assertNotIn(FINAL, props)
         self.assert_source_unchanged()
 
-    def test_local_removal_reasons_are_durable_but_not_graph_properties(self):
+    def test_local_expert_associations_are_preserved_without_review(self):
         with self.adapter.driver.session(database=self.adapter.database) as session:
             session.run(f"MATCH (n:{identifier(self.source)} {{slot:1}}) SET n.三级指标映射状态='历史状态'").consume()
         self.snap = self.adapter.read_subgraph_records(self.source)
@@ -406,26 +407,26 @@ class LocalNeo4jTests(unittest.TestCase):
                     write_enabled=True, exclusive_target=True, model=ModelConfig(retry_delay=0))
         class RejectOne:
             async def complete(inner, payload):
-                return removal_response(["2.1.1.1"])
+                raise AssertionError("Exact location should not call any model")
         result, code = asyncio.run(execute_mapping(config, self.adapter, client=RejectOne()))
         self.assertEqual(code, 0)
         records = RunRecords(config.output_root, result["run_id"], resume=True)
         confirmed, pending, _ = records.batches()
         self.assertFalse(pending)
-        group = next(iter(confirmed["review"].values()))["groups"][0]
-        self.assertEqual(group["reasons"], {"2.1.1.1": "测试中的明确规范冲突"})
+        self.assertNotIn("review", confirmed)
         actual = self.adapter.read_subgraph_records(target)
         props = next(n["n"]["properties"] for n in actual["nodes"] if n["n"]["properties"].get("label") == "法条")
         self.assertEqual(len(props[CANDIDATES]), 7)
-        self.assertEqual(len(props[FINAL]), 6)
+        self.assertEqual(len(props[FINAL]), 7)
         self.assertNotIn("reasons", props)
         self.assertNotIn("review_protocol", props)
         self.assertNotIn("三级指标映射状态", props)
-        self.assertEqual(next(iter(confirmed["review"].values()))["status"], "已审查")
+        self.assertEqual(next(iter(confirmed["matching"].values()))["status"], "定位完成")
         self.assertEqual((len(actual["nodes"]), len(actual["edges"])), (4, 3))
         self.assert_source_unchanged()
 
     def test_local_cancel_after_candidates_resume_no_recopy(self):
+        atomic_json(tree(description="企业应当开展专项风险评估。"), self.tree_path)
         target = self.target()
         config = MappingConfig(self.source, target, tree_path=self.tree_path, output_root=self.root / "resume",
                     write_enabled=True, exclusive_target=True, model=ModelConfig(retry_delay=0))
@@ -446,12 +447,12 @@ class LocalNeo4jTests(unittest.TestCase):
         run_id = next((config.output_root / "runs").iterdir()).name
         class AcceptAll:
             async def complete(inner, payload):
-                return KEEP_ALL
+                return '{"match":"是","reason":"对应依据"}'
         result, code = asyncio.run(execute_mapping(config, self.adapter, action="resume", run_id=run_id, client=AcceptAll()))
         self.assertEqual(code, 0)
         after = self.adapter.read_subgraph_records(target)
         self.assertEqual(before_ids, {n["n"]["elementId"] for n in after["nodes"]})
-        self.assertEqual(result["confirmed_counts"], {"initialization": 1, "matching": 1, "review": 1})
+        self.assertEqual(result["confirmed_counts"], {"initialization": 1, "matching": 1})
         self.assert_source_unchanged()
 
 

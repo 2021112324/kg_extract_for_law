@@ -175,6 +175,7 @@ class PipelineDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             update.assert_called_once()
         self.assertEqual(code, 2)
         self.assertEqual(summary["mapping_status"], "write_unknown")
+        self.assertEqual(summary["diagnostics"]["run_errors"], 1)
         self.assertEqual(summary["pending_batches"], 1)
         detail = summary["write_failure"]
         self.assertEqual(detail["batch"], "00000000_initialization")

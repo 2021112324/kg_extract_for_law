@@ -8,8 +8,9 @@ from .common.io import content_hash
 from .common.json_output import POLICY, dependency_version
 from .preparation.config import DEFAULT_TREE_PATH, REGIONS
 
-PROTOCOL = "copy-first-many-to-many-v3-audit-fixes"
-REVIEW_PROTOCOL = "removal-reasons-v1"
+PROTOCOL = "copy-first-expert-reference-v1"
+PHASES = ("initialization", "matching")
+REVIEW_PROTOCOL = "removal-reasons-v1"  # Historical pure helpers only; not a runtime stage.
 CANDIDATES = "三级指标映射候选列表"
 FINAL = "三级指标映射列表"
 LEGACY = ("三级指标映射Top5", "三级指标映射版本", "三级指标映射状态")
@@ -29,7 +30,7 @@ class ModelConfig:
     retry_delay: float = 1
     max_input_chars: int = 60000
     max_tokens: int = 4096
-    review_max_group_candidates: int = 8
+    review_max_group_candidates: int = 8  # Deprecated, ignored by the current workflow.
 
     def validate(self):
         if type(self.max_attempts) is not int or not 1 <= self.max_attempts <= 5:
@@ -40,14 +41,11 @@ class ModelConfig:
             raise ValueError("模型超时、等待或输入预算不合法")
         if type(self.max_tokens) is not int or self.max_tokens <= 0:
             raise ValueError("max_tokens必须为正数")
-        if type(self.review_max_group_candidates) is not int or self.review_max_group_candidates <= 0:
-            raise ValueError("review_max_group_candidates必须为正整数")
 
     @property
     def semantic(self):
         return {"model": self.model, "endpoint": self.api_url, "max_input_chars": self.max_input_chars,
                 "max_tokens": self.max_tokens, "protocol": PROTOCOL,
-                "review_protocol": REVIEW_PROTOCOL, "review_max_group_candidates": self.review_max_group_candidates,
                 "json_policy": POLICY, "json_repair_version": dependency_version(),
                 "filename_policy": FILENAME_POLICY, "empty_basis_policy": EMPTY_BASIS_POLICY,
                 "provenance_policy": PROVENANCE_POLICY}

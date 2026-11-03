@@ -1,4 +1,4 @@
-"""Audited one-document repair. Writes require explicit rename/apply actions."""
+"""Retired historical repair. Pure parsers remain for historical evidence tests."""
 
 import argparse
 import asyncio
@@ -29,6 +29,10 @@ OLD = "中华人民共和国两用物项出口管理条例.txt"
 NEW = "中华人民共和国两用物项出口管制条例.txt"
 SOURCE, TARGET = "行政监管规则", "行政监管规则_指标映射"
 LABELS = (SOURCE, TARGET)
+
+
+def reject_retired_workflow():
+    raise ValueError("旧定向修复入口已停用，不能审查或覆盖新协议成果；请通过新协议和未占用目标重新映射")
 
 
 def replace_filename(value):
@@ -66,6 +70,7 @@ def schema_state(adapter):
 
 
 def prepare(adapter, output):
+    reject_retired_workflow()
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"repair_id": output.name, "created_at": datetime.now().astimezone().isoformat(),
                 "database_uri": runner.NEO4J_URI, "database": adapter.database, "old": OLD, "new": NEW,
@@ -98,6 +103,7 @@ def prepare(adapter, output):
 
 
 def manifest_for(adapter, output):
+    reject_retired_workflow()
     manifest = read_json(output / "manifest.json")
     if (manifest["database_uri"], manifest["database"]) != (runner.NEO4J_URI, adapter.database):
         raise ValueError("Repair database binding differs")
@@ -123,6 +129,7 @@ def baseline_target(adapter, output, manifest):
 
 
 def guarded_write(adapter, output, phase, rows):
+    reject_retired_workflow()
     if (output / f"{phase}_intent.json").exists():
         raise ValueError("Write intent already exists; inspect actual database before any replay")
     atomic_json(encode(rows), output / f"{phase}_intent.json", durable=True)
@@ -355,6 +362,7 @@ async def quality_review(adapter, output):
 
 def adopt_verified_quality(output, selections):
     """Adopt explicitly reviewed, validated responses; never turn failures into negatives."""
+    reject_retired_workflow()
     plan = read_json(output / "mapping_plan.json")
     initial = read_json(output / "mapping_plan_before_quality.json")
     if digest(plan) != digest(initial):
@@ -430,6 +438,7 @@ def apply_mapping(adapter, output):
 
 
 def main():
+    reject_retired_workflow()
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("prepare", "rename", "map", "quality", "apply"))
     parser.add_argument("--output", type=Path, required=True)
