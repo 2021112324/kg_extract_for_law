@@ -96,6 +96,11 @@ def _emit(
     source_location: str = "",
     add_source_context: bool = False,
     source_context_issues: Counter[str] | None = None,
+    collector: list[dict[str, Any]] | None = None,
+    source_node: dict[str, Any] | None = None,
+    related_nodes: tuple[dict[str, Any], ...] = (),
+    source_edge: dict[str, Any] | None = None,
+    knowledge_type: str = "",
 ) -> None:
     """输出一条知识并统计来源文件条目数。"""
     rendered = (
@@ -111,6 +116,17 @@ def _emit(
         source_context_issues["非文件节点缺少有效法规名称"] += 1
     type_lines.append(rendered)
     file_counter[filename] += 1
+    if collector is not None:
+        collector.append({
+            "content": rendered,
+            "knowledge_type": knowledge_type,
+            "semantic_types": [knowledge_type],
+            "source_nodes": [source_node] if source_node is not None else [],
+            "related_nodes": list(related_nodes),
+            "source_edges": [source_edge] if source_edge is not None else [],
+            "source_location": source_location,
+            "metadata": {"source_file": filename, "relationship": source_edge is not None},
+        })
 
 
 def build_regulation_source_names(
@@ -160,6 +176,7 @@ def convert_regulation_documents(
     node_records: list[dict[str, Any]],
     type_lines: list[str],
     file_counter: Counter[str],
+    collector: list[dict[str, Any]] | None = None,
 ) -> None:
     """法规文件节点组装成档案知识（身份/效力/目的/范围，最多 4 条）。"""
     for record in node_records:
@@ -177,7 +194,8 @@ def convert_regulation_documents(
         filename = first_filename(properties)
 
         def emit(line: str) -> None:
-            _emit(type_lines, file_counter, filename, line)
+            _emit(type_lines, file_counter, filename, line, collector=collector,
+                  source_node=node, knowledge_type="法规文件档案知识")
 
         # 1. 文件身份：{name}[（{文号}）]是[{发布单位}发布的]{文件性质}
         identity_parts: list[str] = [name]
@@ -229,6 +247,7 @@ def convert_law_articles(
     file_counter: Counter[str],
     source_names: dict[str, str] | None = None,
     source_context_issues: Counter[str] | None = None,
+    collector: list[dict[str, Any]] | None = None,
 ) -> None:
     """法条节点产出效力知识（1 条：效力范围）。"""
     for record in node_records:
@@ -254,7 +273,12 @@ def convert_law_articles(
                 source_name=regulation_source_name(filename, source_names or {}),
                 add_source_context=True,
                 source_context_issues=source_context_issues,
+                collector=collector,
+                source_node=node,
+                knowledge_type="法条效力知识",
             )
+            if collector is not None:
+                collector[-1]["source_location"] = name
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +292,7 @@ def convert_clause_units(
     file_counter: Counter[str],
     source_names: dict[str, str] | None = None,
     source_context_issues: Counter[str] | None = None,
+    collector: list[dict[str, Any]] | None = None,
 ) -> None:
     """条款单元节点产出规则知识（结构化组装）+ 内容知识（原文）。"""
     for record in node_records:
@@ -290,7 +315,8 @@ def convert_clause_units(
             else name
         )
 
-        def emit(line: str, *, include_location: bool = True) -> None:
+        def emit(line: str, *, include_location: bool = True,
+                 knowledge_type: str = "条款单元内容知识") -> None:
             _emit(
                 type_lines,
                 file_counter,
@@ -300,7 +326,12 @@ def convert_clause_units(
                 source_location=unit_number if include_location else "",
                 add_source_context=True,
                 source_context_issues=source_context_issues,
+                collector=collector,
+                source_node=node,
+                knowledge_type=knowledge_type,
             )
+            if collector is not None:
+                collector[-1]["source_location"] = unit_number
 
         # 2. 条款单元内容知识（原文，始终产出）
         content = properties.get("条款单元内容")
@@ -340,7 +371,7 @@ def convert_clause_units(
             sentence += f"，{value_to_text(exception)}的除外"
 
         sentence += "。"
-        emit(sentence)
+        emit(sentence, knowledge_type="规则知识")
 
         # 后果句：[违反{条款单元}规定的，{法律后果}。]
         consequence = properties.get("法律后果")
@@ -348,6 +379,7 @@ def convert_clause_units(
             emit(
                 f"违反{name}规定的，{value_to_text(consequence)}。",
                 include_location=False,
+                knowledge_type="规则知识",
             )
 
 
@@ -364,6 +396,7 @@ def convert_references(
     file_counter: Counter[str],
     source_names: dict[str, str] | None = None,
     source_context_issues: Counter[str] | None = None,
+    collector: list[dict[str, Any]] | None = None,
 ) -> None:
     """边关系产出引用知识，删除"包含"（层级）关系。"""
     for record in edge_records:
@@ -405,6 +438,12 @@ def convert_references(
         source_name = regulation_source_name(filename, source_names or {})
 
         def emit(line: str) -> None:
+            start_source = {"identity": edge.get("start"),
+                            "elementId": edge.get("startNodeElementId"),
+                            "properties": start_node.get("properties", {})}
+            end_source = {"identity": edge.get("end"),
+                          "elementId": edge.get("endNodeElementId"),
+                          "properties": end_node.get("properties", {})}
             _emit(
                 type_lines,
                 file_counter,
@@ -413,7 +452,16 @@ def convert_references(
                 source_name=source_name,
                 add_source_context=start_label != "法规文件",
                 source_context_issues=source_context_issues,
+                collector=collector,
+                source_node=start_source,
+                related_nodes=(start_source, end_source),
+                source_edge=edge,
+                knowledge_type="引用知识",
             )
+            if collector is not None:
+                props = start_source["properties"]
+                collector[-1]["source_location"] = value_to_text(
+                    props.get("单元编号") or props.get("条") or subject)
 
         # 条款单元 -引用/涉及→ 引用依据
         if end_label == "引用依据":

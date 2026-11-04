@@ -118,6 +118,8 @@ class ResolvedEdge:
     start: NodeInfo
     end: NodeInfo
     properties: dict[str, Any]
+    source_edges: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    source_edge_indices: list[int] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -140,6 +142,17 @@ class KnowledgeEntry:
     dedup_text: str = field(default="", repr=False)
     resource_key: str = field(default="", repr=False)
     structure_key: str = field(default="", repr=False)
+    source_refs: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    source_relationship_ids: list[str] = field(default_factory=list)
+
+    def merge_sources(self, other: KnowledgeEntry) -> None:
+        for target, values in ((self.source_refs, other.source_refs),
+                               (self.source_relationship_ids, other.source_relationship_ids)):
+            for value in values:
+                if value not in target:
+                    target.append(value)
+        if other.metadata.get("relationship"):
+            self.metadata["relationship"] = True
 
     def __post_init__(self) -> None:
         if not self.semantic_types:
@@ -160,6 +173,8 @@ class KnowledgeEntry:
             "risk_types": self.risk_types,
             "attachments": self.attachments,
             "metadata": self.metadata,
+            "source_refs": self.source_refs,
+            "source_relationship_ids": self.source_relationship_ids,
         }
 
 
@@ -248,7 +263,8 @@ class StandardGraphContext:
 
     def _parse_edges(self, records: list[dict[str, Any]]) -> None:
         seen: set[tuple[str, str, str]] = set()
-        for record in records:
+        resolved_by_key: dict[tuple[str, str, str], ResolvedEdge] = {}
+        for index, record in enumerate(records):
             edge = extract_edge(record)
             if edge is None:
                 self.stats.relationship_issue("导出结构无p对象")
@@ -267,6 +283,8 @@ class StandardGraphContext:
                 continue
             edge_key = (start.key, predicate, end.key)
             if edge_key in seen:
+                resolved_by_key[edge_key].source_edges.append(edge)
+                resolved_by_key[edge_key].source_edge_indices.append(index)
                 self.stats.relationship_issue("重复关系")
                 continue
             seen.add(edge_key)
@@ -276,7 +294,10 @@ class StandardGraphContext:
                 start=start,
                 end=end,
                 properties=properties if isinstance(properties, dict) else {},
+                source_edges=[edge],
+                source_edge_indices=[index],
             )
+            resolved_by_key[edge_key] = resolved
             self.edges.append(resolved)
             self.outgoing[start.key].append(resolved)
             self.incoming[end.key].append(resolved)
@@ -483,6 +504,13 @@ def _metadata(**values: Any) -> dict[str, Any]:
     return {key: value for key, value in values.items() if not is_empty_value(value)}
 
 
+def _source_ref(node: NodeInfo, role: str = "primary") -> dict[str, Any]:
+    return {"node_id": _node_id(node), "role": role, "node_key": node.key,
+            "key_scope": "snapshot", "identity": node.identity,
+            "element_id": node.element_id, "business_id": _text(node.properties.get("id")),
+            "node_type": node.label}
+
+
 def _make_entry(
     context: StandardGraphContext,
     node: NodeInfo,
@@ -493,6 +521,7 @@ def _make_entry(
     resource_key: str = "",
     metadata: dict[str, Any] | None = None,
     source_structure: NodeInfo | None = None,
+    source_edge: ResolvedEdge | None = None,
 ) -> KnowledgeEntry:
     structure = source_structure or context.structure_for(node)
     number, _title, path = context.source_location(structure or node)
@@ -507,7 +536,7 @@ def _make_entry(
         if rendered_content == body and not clean_source_name(standard_name):
             stats = context.stats
             stats.source_context_issue("非文件节点缺少有效标准名称")
-    return KnowledgeEntry(
+    entry = KnowledgeEntry(
         knowledge_type=knowledge_type,
         content=rendered_content,
         source_file=node.filename,
@@ -522,7 +551,18 @@ def _make_entry(
         dedup_text=dedup_text or content,
         resource_key=resource_key,
         structure_key=structure.key if structure else "",
+        source_refs=[dict(_source_ref(node), source_location=path or number)],
     )
+    if source_edge is not None:
+        entry.metadata["relationship"] = True
+        entry.source_refs.extend(_source_ref(endpoint, "related")
+                                 for endpoint in (source_edge.start, source_edge.end))
+        entry.source_relationship_ids = [
+            str(raw.get("elementId") or (raw["identity"] if raw.get("identity") is not None
+                                        else f"relationship:{index}"))
+            for raw, index in zip(source_edge.source_edges, source_edge.source_edge_indices)
+        ]
+    return entry
 
 
 def _generate_standard_file_entries(
@@ -1140,6 +1180,7 @@ def _generate_reference_entries(
                     f"{context.standard_name(edge.start)}{verb}{target}",
                     dedup_text=f"{verb}{target}",
                     metadata=_metadata(reference_scope="文件级", reference_type=basis_type, target=target),
+                    source_edge=edge,
                 )
             )
             continue
@@ -1171,6 +1212,7 @@ def _generate_reference_entries(
                 "引用知识",
                 content,
                 dedup_text=f"{'内部' if internal else '外部'}引用{target}{explanation}",
+                source_edge=edge,
                 metadata=_metadata(
                     reference_scope="内部" if internal else "外部",
                     target=target,
@@ -1199,6 +1241,7 @@ def _deduplicate_entries(
         if entry.resource_key:
             resource_key = f"{entry.knowledge_type}\x1f{entry.source_file}\x1f{entry.resource_key}"
             if resource_key in resource_selected:
+                resource_selected[resource_key].merge_sources(entry)
                 stats.skip(entry.knowledge_type, "重复资源知识")
                 continue
             resource_selected[resource_key] = entry
@@ -1212,10 +1255,15 @@ def _deduplicate_entries(
             key=lambda item: PRIMARY_TYPE_PRIORITY.get(item, 99),
         )
         if _entry_priority(entry) < _entry_priority(existing):
+            entry.merge_sources(existing)
             entry.semantic_types = semantic_types
             selected[key] = entry
         else:
+            existing.merge_sources(entry)
             existing.semantic_types = semantic_types
+        for resource_id, resource_entry in list(resource_selected.items()):
+            if resource_entry is entry or resource_entry is existing:
+                resource_selected[resource_id] = selected[key]
         stats.skip(entry.knowledge_type, "跨类型或同类型正文重复")
 
     exact_selected: dict[tuple[str, str, str], KnowledgeEntry] = {}
@@ -1234,9 +1282,11 @@ def _deduplicate_entries(
             key=lambda item: PRIMARY_TYPE_PRIORITY.get(item, 99),
         )
         if _entry_priority(entry) < _entry_priority(existing):
+            entry.merge_sources(existing)
             entry.semantic_types = semantic_types
             exact_selected[exact_key] = entry
         else:
+            existing.merge_sources(entry)
             existing.semantic_types = semantic_types
         stats.skip(entry.knowledge_type, "最终正文重复")
 

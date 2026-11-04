@@ -214,10 +214,11 @@ def _write_export_sample(label: str, output_dir: str | Path) -> dict[str, Any]:
             _node(
                 1,
                 label,
-                "指引要求",
+                "指引知识单元",
                 "合规指引示例.md",
                 name="履行合规审查义务",
-                要求内容="企业应履行合规审查义务",
+                知识内容="企业应履行合规审查义务",
+                知识类型="合规要求",
             )
         ]
     (output_root / "node.json").write_text(

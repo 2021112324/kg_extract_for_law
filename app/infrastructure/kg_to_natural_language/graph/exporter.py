@@ -126,6 +126,22 @@ def export_graph_to_directory(tag: str, output_dir: str | Path) -> dict[str, Any
     )
 
 
+def read_knowledge_snapshot(tag, *, driver=None, database=None, max_bytes=536870912):
+    """Read a configured label in one explicit transaction; never write graph data."""
+    from app.infrastructure.graph_storage.subgraph_records import identifier
+    identifier(tag)
+    owned = driver is None
+    driver = driver or _get_driver()
+    try:
+        with driver.session(database=database or settings.NEO4J_DATABASE,
+                            default_access_mode="READ") as session:
+            with session.begin_transaction() as tx:
+                return read_records(tx, tag, internal_only=True, max_bytes=max_bytes)
+    finally:
+        if owned:
+            driver.close()
+
+
 def export_graph(tag: str) -> dict[str, Any]:
     """
     从 Neo4j 导出指定标签的图谱数据为 JSON 文件。

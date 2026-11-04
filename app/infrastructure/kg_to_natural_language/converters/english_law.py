@@ -197,6 +197,8 @@ class ResolvedEdge:
     start: NodeInfo
     end: NodeInfo
     properties: dict[str, Any]
+    source_edges: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    source_edge_indices: list[int] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -219,6 +221,18 @@ class KnowledgeEntry:
     knowledge_id: str = ""
     source_node_key: str = field(default="", repr=False)
     dedup_text: str = field(default="", repr=False)
+    source_refs: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    source_relationship_ids: list[str] = field(default_factory=list)
+
+    def merge_sources(self, other: KnowledgeEntry) -> None:
+        for name in ("source_refs", "source_relationship_ids", "related_node_ids",
+                     "related_edge_ids", "validation_issues"):
+            target = getattr(self, name)
+            for value in getattr(other, name):
+                if value not in target:
+                    target.append(value)
+        if other.metadata.get("relationship"):
+            self.metadata["relationship"] = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -236,6 +250,8 @@ class KnowledgeEntry:
             "related_node_ids": self.related_node_ids,
             "related_edge_ids": self.related_edge_ids,
             "validation_issues": self.validation_issues,
+            "source_refs": self.source_refs,
+            "source_relationship_ids": self.source_relationship_ids,
         }
 
 
@@ -443,6 +459,7 @@ class EnglishLawGraphContext:
 
     def _parse_edges(self, records: list[dict[str, Any]]) -> None:
         seen: set[tuple[str, str, str]] = set()
+        resolved_by_key: dict[tuple[str, str, str], ResolvedEdge] = {}
         for index, record in enumerate(records):
             raw_edge = extract_edge(record)
             if raw_edge is None:
@@ -466,6 +483,8 @@ class EnglishLawGraphContext:
                 continue
             edge_tuple = (start.key, predicate, end.key)
             if edge_tuple in seen:
+                resolved_by_key[edge_tuple].source_edges.append(raw_edge)
+                resolved_by_key[edge_tuple].source_edge_indices.append(index)
                 self.stats.relationship_issue("duplicate_relationship")
                 continue
             seen.add(edge_tuple)
@@ -477,7 +496,10 @@ class EnglishLawGraphContext:
                 start=start,
                 end=end,
                 properties=properties if isinstance(properties, dict) else {},
+                source_edges=[raw_edge],
+                source_edge_indices=[index],
             )
+            resolved_by_key[edge_tuple] = edge
             self.edges.append(edge)
             self.outgoing[start.key].append(edge)
             self.incoming[end.key].append(edge)
@@ -621,6 +643,13 @@ class EnglishLawGraphContext:
         return result
 
 
+def _source_ref(node: NodeInfo, role: str = "primary") -> dict[str, Any]:
+    return {"node_id": _node_id(node), "role": role, "node_key": node.key,
+            "key_scope": "snapshot", "identity": node.identity,
+            "element_id": node.element_id, "business_id": _text(node.properties.get("id")),
+            "node_type": node.label}
+
+
 def _make_entry(
     context: EnglishLawGraphContext,
     node: NodeInfo,
@@ -633,6 +662,7 @@ def _make_entry(
     related_edge_ids: Iterable[str] = (),
     validation_issues: Iterable[str] = (),
     dedup_text: str = "",
+    source_edge: ResolvedEdge | None = None,
 ) -> KnowledgeEntry:
     document_name = context.document_name(node)
     body = _clean_source_text(content)
@@ -641,7 +671,7 @@ def _make_entry(
         rendered_content = add_english_source_context(body, document_name)
         if rendered_content == body and not clean_source_name(document_name):
             context.stats.validation_issue("missing_source_context")
-    return KnowledgeEntry(
+    entry = KnowledgeEntry(
         knowledge_type=knowledge_type,
         content=rendered_content,
         source_file=node.filename,
@@ -657,7 +687,20 @@ def _make_entry(
         validation_issues=list(dict.fromkeys(item for item in validation_issues if item)),
         source_node_key=node.key,
         dedup_text=dedup_text,
+        source_refs=[dict(_source_ref(node), source_location=(
+            source_location if source_location is not None else context.source_location(node)))],
     )
+    entry.source_relationship_ids = list(entry.related_edge_ids)
+    if source_edge is not None:
+        entry.metadata["relationship"] = True
+        entry.source_refs.extend(_source_ref(endpoint, "related")
+                                 for endpoint in (source_edge.start, source_edge.end))
+        entry.source_relationship_ids = [
+            str(raw.get("elementId") or (raw["identity"] if raw.get("identity") is not None
+                                        else f"relationship:{index}"))
+            for raw, index in zip(source_edge.source_edges, source_edge.source_edge_indices)
+        ]
+    return entry
 
 
 def _generate_document_entries(
@@ -783,6 +826,7 @@ def _generate_legal_basis_entries(
                 related_node_ids=(_node_id(edge.end),),
                 related_edge_ids=(_edge_id(edge),),
                 dedup_text=basis,
+                source_edge=edge,
             )
         )
         stats.candidate("legal_basis")
@@ -990,6 +1034,7 @@ def _generate_external_citation_entries(
                 related_node_ids=(_node_id(citation),),
                 related_edge_ids=(_edge_id(edge),),
                 dedup_text=target,
+                source_edge=edge,
             )
         )
         stats.candidate("citation")
@@ -1045,6 +1090,7 @@ def _deduplicate_entries(
                 )
             ):
                 duplicate = True
+                existing.merge_sources(entry)
                 break
         if duplicate:
             stats.skip(entry.source_node_type, "exact_cross_level_duplicate")
@@ -1061,6 +1107,7 @@ def _deduplicate_entries(
             _normalize_text(entry.content),
         )
         if key in selected_other:
+            selected_other[key].merge_sources(entry)
             stats.skip(entry.knowledge_type, "exact_duplicate")
             continue
         selected_other[key] = entry
